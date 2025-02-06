@@ -1,0 +1,8 @@
+# Get a list of everything from the RDF.
+
+SELECT DISTINCT ?a ?prop ?c
+WHERE {
+  ?a ?prop ?c
+}
+
+#ORDER BY ?prop

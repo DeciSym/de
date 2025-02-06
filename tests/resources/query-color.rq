@@ -1,0 +1,10 @@
+PREFIX ex: <http://example.org/>
+PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+
+SELECT ?fruit
+WHERE {
+  ?fruit rdf:type ex:Fruit ;
+         ex:hasColor "yellow" .
+}
+
+ORDER BY DESC(?fruit)

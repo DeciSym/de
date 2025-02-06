@@ -1,0 +1,51 @@
+[package]
+name = "de"
+version = "0.10.0"
+edition = "2021"
+default-run = "de"
+
+[[bin]]
+name = "de"
+path = "src/main.rs"
+bench = false
+
+[[bench]]
+name = "benchmark"
+harness = false
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+anyhow = { version = "1.0.95", default-features = false }
+clap = { version = "4.5.28" }
+clap-verbosity-flag = { version = "3.0.2", default-features = false, features = ["log"] }
+env_logger = { version = "0.11.6", default-features = false }
+exitcode = "1.1.2"
+futures = { version = "0.3.31", default-features = false }
+hdt = { version = "0.2.2", default-features = false }
+log = "0.4.25"
+oxigraph = { git = "https://github.com/DeciSym/oxigraph/", branch = "1-enable-sparql-query-of-hdt-storage", default-features = false }
+oxrdf = "0.2.4"
+tempfile = {version = "3.16.0"}
+tokio = { version = "1.43.0", default-features = false, features = ["full"] }
+walkdir = "2.5.0"
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["async_tokio"]}
+pprof = { version = "0.14", features = ["protobuf", "protobuf-codec", "criterion"] }
+
+[package.metadata.deb]
+maintainer = "DeciSym.AI <support@decisym.ai>"
+copyright = "2023, DeciSym.AI."
+extended-description = "CLI tool for creating and querying hdt files"
+section = "utils"
+priority = "optional"
+assets = [
+    # binary
+    ["target/release/de", "usr/bin/", "755"], 
+    ["deps/rdf2hdt", "usr/bin/", "755"],
+
+]
+default-features = false
+
+features = [""]

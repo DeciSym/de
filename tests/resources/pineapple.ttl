@@ -1,0 +1,17 @@
+@prefix ex: <http://example.org/>.
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>.
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#>.
+
+ex:Pineapple rdf:type ex:Fruit ;
+             ex:hasColor "yellow" ;
+             ex:hasTaste "sweet" ;
+             ex:hasShape "oblong" ;
+             ex:hasWeight "500 grams" ;
+             ex:growsIn ex:TropicalClimate ;
+             ex:isEdible true ;
+             ex:hasVitamin ex:VitaminC ;
+             ex:hasPrice "$2.50" ;
+             ex:hasOrigin "Hawaii" .
+
+ex:Fruit rdf:type rdfs:Class;
+             rdfs:label "Fruit".
