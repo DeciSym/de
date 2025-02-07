@@ -2,6 +2,7 @@
 
 use crate::create;
 use crate::rdf2hdt::Rdf2Hdt;
+use crate::rdf2nt::OxRdfConvert;
 use anyhow::Error;
 use log::*;
 use oxigraph::io::RdfFormat;
@@ -217,7 +218,7 @@ async fn handle_files(
         .unwrap();
 
     let (combined_rdf_path, unknown_files) =
-        match create::files_to_rdf(&files.clone(), &mut rdf_tempfile) {
+        match create::files_to_rdf(&files.clone(), &mut rdf_tempfile, Arc::new(OxRdfConvert {})) {
             Ok((p, u)) => (p, u),
             Err(e) => {
                 return (

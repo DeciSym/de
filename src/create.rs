@@ -1,6 +1,8 @@
 // This file handles the create subcommand
 
 use crate::rdf2hdt::Rdf2Hdt;
+use crate::rdf2nt::OxRdfConvert;
+use crate::rdf2nt::Rdf2Nt;
 use log::*;
 use oxigraph::io::RdfFormat::*;
 use oxigraph::io::RdfParser;
@@ -41,7 +43,8 @@ pub fn do_create(
         Err(e) => return Err(anyhow::anyhow!("Error creating temporary file: {:?}", e)),
     };
 
-    let (combined_rdf_path, unknown_files) = files_to_rdf(data, &mut tmp_file)?;
+    let (combined_rdf_path, unknown_files) =
+        files_to_rdf(data, &mut tmp_file, Arc::new(OxRdfConvert {}))?;
     if unknown_files.len() != 0 {
         for f in unknown_files.clone().iter() {
             if !Path::new(f).exists() {
@@ -74,11 +77,11 @@ pub fn do_create(
 pub fn files_to_rdf(
     data: &Vec<String>,
     out_file: &mut NamedTempFile,
+    converter: Arc<dyn Rdf2Nt>,
 ) -> anyhow::Result<(String, Vec<String>), anyhow::Error> {
-    let num_files = data.len();
-    let mut converted_files = 0;
+    // let mut converted_files = 0;
     let mut nt_files = vec![];
-
+    let mut files_to_convert = vec![];
     let mut unrecognized_files = vec![];
 
     for file in data.iter() {
@@ -93,55 +96,21 @@ pub fn files_to_rdf(
             debug!("Adding RDF triples to graph");
             nt_files.push(file.clone());
         } else {
-            let source = match File::open(file) {
-                Ok(f) => f,
-                Err(e) => return Err(anyhow::anyhow!("Error opening file {:?}: {:?}", file, e)),
-            };
-            let source_reader = BufReader::new(source);
-
-            debug!("converting {} to nt format", &file);
-
-            let mut dest_writer = BufWriter::new(out_file.as_file());
-            let mut serializer =
-                RdfSerializer::from_format(NTriples).for_writer(dest_writer.by_ref());
-
-            let rdf_format = if file.ends_with(".nq") {
-                NQuads
-            } else if file.ends_with(".ttl") {
-                Turtle
-            } else if file.ends_with(".n3") {
-                N3
-            } else if file.ends_with(".xml") {
-                RdfXml
-            } else if file.ends_with(".trig") {
-                TriG
-            } else {
-                unrecognized_files.push(file.clone());
-                continue;
-            };
-            let quads = RdfParser::from_format(rdf_format)
-                .for_reader(source_reader)
-                .collect::<Result<Vec<_>, _>>()?;
-            for q in quads.iter() {
-                if q.graph_name.to_string() != DefaultGraph.to_string() {
-                    warn! {"HDT does not support named graphs, merging triples for {file}"}
-                }
-                serializer.serialize_triple(TripleRef {
-                    subject: q.subject.as_ref(),
-                    predicate: q.predicate.as_ref(),
-                    object: q.object.as_ref(),
-                })?
-            }
-
-            serializer.finish()?;
-            dest_writer.flush()?;
-            converted_files += 1;
+            files_to_convert.push(file.clone());
         }
     }
 
-    // optimization here. If only one NTriple file provided don't do an additional file copy otherwise
+    let res = match converter.convert_to_nt(files_to_convert, out_file.reopen()?) {
+        Ok(r) => {
+            unrecognized_files.extend(r.unhandled.clone().into_iter());
+            r
+        }
+        Err(e) => return Err(anyhow::anyhow!("Error converting file(s) to NT: {e}")),
+    };
+
+    // optimization attempt. If only one NTriple file provided don't do an additional file copy otherwise
     // inefficient when creating an HDT file from one large file
-    if nt_files.len() > 1 || converted_files != 0 {
+    if nt_files.len() > 1 || res.converted != 0 {
         for nt_file in nt_files {
             let source = match File::open(&nt_file) {
                 Ok(f) => f,
@@ -160,7 +129,7 @@ pub fn files_to_rdf(
                 }
             };
         }
-    } else if nt_files.len() == 1 && converted_files == 0 {
+    } else if nt_files.len() == 1 && res.converted == 0 {
         return Ok((data[0].clone(), unrecognized_files));
     }
 

@@ -40,16 +40,14 @@ impl Rdf2Hdt for Rdf2HdtImpl {
     }
 }
 
-#[cfg(test)]
-pub mod mock {
-
-    use super::Rdf2Hdt;
-    use std::path::Path;
-
-    pub struct MockRdf2Hdt();
-    impl Rdf2Hdt for MockRdf2Hdt {
-        fn convert(&self, _source: &Path, _dest: &Path) -> anyhow::Result<(), anyhow::Error> {
+// This should only be used by serve_query, where the server is never expected to have to perform conversions
+pub struct NoopRdf2Hdt();
+impl Rdf2Hdt for NoopRdf2Hdt {
+    fn convert(&self, source: &Path, _dest: &Path) -> anyhow::Result<(), anyhow::Error> {
+        if source.is_file() && source.extension().unwrap() == "hdt" {
             return Ok(());
         }
+        error!("this mock rdf2hdt implementation should never be called");
+        return Err(anyhow::anyhow!("rdf2hdt is not implemented"));
     }
 }
