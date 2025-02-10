@@ -1,6 +1,7 @@
 // This file handles the create subcommand
 
 use crate::rdf2hdt::Rdf2Hdt;
+use crate::rdf2nt::ConvertResult;
 use crate::rdf2nt::OxRdfConvert;
 use crate::rdf2nt::Rdf2Nt;
 use log::*;
@@ -94,17 +95,21 @@ pub fn files_to_rdf(
         }
     }
 
-    let res = match converter.convert_to_nt(files_to_convert, out_file.reopen()?) {
-        Ok(r) => {
-            unrecognized_files.extend(r.unhandled.clone().into_iter());
-            r
+    let conv_res = if files_to_convert.len() != 0 {
+        match converter.convert_to_nt(files_to_convert, out_file.reopen()?) {
+            Ok(r) => {
+                unrecognized_files.extend(r.unhandled.clone().into_iter());
+                r
+            }
+            Err(e) => return Err(anyhow::anyhow!("Error converting file(s) to NT: {e}")),
         }
-        Err(e) => return Err(anyhow::anyhow!("Error converting file(s) to NT: {e}")),
+    } else {
+        ConvertResult::default()
     };
 
     // optimization attempt. If only one NTriple file provided don't do an additional file copy otherwise
     // inefficient when creating an HDT file from one large file
-    if nt_files.len() > 1 || res.converted != 0 {
+    if nt_files.len() > 1 || conv_res.converted != 0 {
         for nt_file in nt_files {
             let source = match File::open(&nt_file) {
                 Ok(f) => f,
@@ -123,8 +128,8 @@ pub fn files_to_rdf(
                 }
             };
         }
-    } else if nt_files.len() == 1 && res.converted == 0 {
-        return Ok((data[0].clone(), unrecognized_files));
+    } else if nt_files.len() == 1 && conv_res.converted == 0 {
+        return Ok((nt_files[0].clone(), unrecognized_files));
     }
 
     return Ok((

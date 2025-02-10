@@ -12,6 +12,9 @@ init:
 test: init
 	CI=1 cargo test
 
+bench: init
+	cargo bench
+
 build:
 	cargo build
 
