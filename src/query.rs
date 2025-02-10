@@ -7,26 +7,18 @@ use anyhow::Error;
 use log::*;
 use oxigraph::io::RdfFormat;
 use std::fs::File;
-use std::io::copy;
 use std::io::BufRead;
 use std::io::BufReader;
-use std::io::BufWriter;
-use std::io::Write;
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::{fs, vec};
 use tempfile::{tempdir, Builder, NamedTempFile};
 
-use oxigraph::io::RdfFormat::*;
-use oxigraph::io::RdfParser;
-use oxigraph::io::RdfSerializer;
-use oxigraph::model::TripleRef;
 use oxigraph::sparql::dataset::HDTDatasetView;
 use oxigraph::sparql::evaluate_hdt_query;
 use oxigraph::sparql::results::QueryResultsFormat;
 use oxigraph::sparql::QueryOptions;
-use oxrdf::GraphName::DefaultGraph;
 
 #[derive(clap::ValueEnum, Clone, Default, Debug, PartialEq)]
 pub enum DeOutput {
@@ -290,7 +282,7 @@ async fn handle_files(
 // performs directory removal for a list of directories
 pub async fn file_cleanup(dirs: Vec<String>) {
     // TODO need to either change everything to pass a vec of strings or change other functions to pass a vec
-    debug!("Cleaning up envoirment");
+    debug!("Cleaning up environment");
     for dir in dirs.iter() {
         match fs::remove_dir_all(dir) {
             Err(e) => {

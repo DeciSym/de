@@ -1,0 +1,55 @@
+name: Building the Decisym Engine and testing subcommands
+
+on: 
+  schedule:
+    - cron: '0 0 * * SAT'
+  push:
+
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - uses: actions-rust-lang/setup-rust-toolchain@v1
+      with:
+        toolchain: ${{ github.event.schedule == '' && 'stable' || 'nightly' }}
+        cache: false
+
+    - uses: Swatinem/rust-cache@v2
+      with: 
+        shared-key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+    - name: Build
+      run: cargo build --verbose
+
+  end-to-end:
+    name: end-to-end test
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions-rust-lang/setup-rust-toolchain@v1
+      with:
+        toolchain: ${{ github.event.schedule == '' && 'stable' || 'nightly' }}
+        cache: false
+    - uses: actions/setup-java@v4
+      with:
+        distribution: 'temurin'
+        java-version: '17'
+    - uses: Swatinem/rust-cache@v2
+      with:
+        shared-key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+    - name: Build DE
+      run: cargo build && sudo cp target/debug/de /usr/local/bin 
+
+    - name: Download dependency binaries
+      env:
+        GITHUB_TOKEN: ${{ secrets.RELEASE_ARTIFACTS_ENGINE_DEPS }}
+      run: make init
+
+    - name: Run Rust integration tests
+      run: make test

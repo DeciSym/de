@@ -20,7 +20,7 @@ pub fn show_content(hdt_files: &Vec<String>, indent: String) -> anyhow::Result<(
         let mut reader = std::io::BufReader::new(file);
         // seek past the start of the file, nothing in here worth displaying
         match ControlInfo::read(&mut reader) {
-            Ok(v) => {}
+            Ok(_) => {}
             Err(e) => {
                 error!("failed to read HDT control info for file {f}: {e}");
                 return Err(anyhow!("error reading control info for HDT file {f}: {e}"));
@@ -71,7 +71,8 @@ mod tests {
     use crate::view;
     #[test]
     fn test_view() -> anyhow::Result<()> {
-        view::view_hdt(&vec!["apple.hdt".to_string()]).expect("failed to load hdt file");
+        view::view_hdt(&vec!["tests/resources/apple.hdt".to_string()])
+            .expect("failed to load hdt file");
         Ok(())
     }
 }

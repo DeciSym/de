@@ -446,7 +446,7 @@ dependencies = [
 
 [[package]]
 name = "de"
-version = "0.10.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -454,7 +454,6 @@ dependencies = [
  "criterion",
  "env_logger",
  "exitcode",
- "futures",
  "hdt",
  "log",
  "oxigraph",
@@ -462,7 +461,6 @@ dependencies = [
  "pprof",
  "tempfile",
  "tokio",
- "walkdir",
 ]
 
 [[package]]

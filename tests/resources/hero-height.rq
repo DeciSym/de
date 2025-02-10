@@ -1,0 +1,7 @@
+PREFIX dbo: <http://dbpedia.org/ontology/>
+SELECT ?hero ?height
+WHERE {
+    ?hero dbo:height ?height .
+}
+ORDER BY DESC(?hero)
+LIMIT 5

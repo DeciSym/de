@@ -1,9 +1,8 @@
 // This code handles the CLI
 
-use anyhow::anyhow;
 use clap::{Parser, Subcommand};
 use de::*;
-use log::{debug, error};
+use log::error;
 use std::sync::Arc;
 // Building clap structs using derive
 #[derive(Parser)]
