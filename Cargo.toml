@@ -24,7 +24,6 @@ exitcode = "1.1.2"
 hdt = { version = "0.2.2", default-features = false }
 log = "0.4.25"
 oxigraph = { git = "https://github.com/DeciSym/oxigraph/", branch = "1-enable-sparql-query-of-hdt-storage", default-features = false }
-oxrdf = "0.2.4"
 tempfile = {version = "3.16.0"}
 tokio = { version = "1.43.0", default-features = false, features = ["full"] }
 

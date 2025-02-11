@@ -457,7 +457,6 @@ dependencies = [
  "hdt",
  "log",
  "oxigraph",
- "oxrdf 0.2.4",
  "pprof",
  "tempfile",
  "tokio",
@@ -1000,7 +999,7 @@ dependencies = [
  "openssl-sys",
  "oxilangtag",
  "oxiri",
- "oxrdf 0.2.2",
+ "oxrdf",
  "oxrdfio",
  "oxsdatatypes",
  "rand",
@@ -1043,23 +1042,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "oxrdf"
-version = "0.2.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a04761319ef84de1f59782f189d072cbfc3a9a40c4e8bded8667202fbd35b02a"
-dependencies = [
- "oxilangtag",
- "oxiri",
- "rand",
- "thiserror 2.0.11",
-]
-
-[[package]]
 name = "oxrdfio"
 version = "0.1.2"
 source = "git+https://github.com/DeciSym/oxigraph/?branch=1-enable-sparql-query-of-hdt-storage#8f4620f4e1ac18d185e66b8a9c0687a7cb3ea438"
 dependencies = [
- "oxrdf 0.2.2",
+ "oxrdf",
  "oxrdfxml",
  "oxttl",
  "thiserror 1.0.69",
@@ -1072,7 +1059,7 @@ source = "git+https://github.com/DeciSym/oxigraph/?branch=1-enable-sparql-query-
 dependencies = [
  "oxilangtag",
  "oxiri",
- "oxrdf 0.2.2",
+ "oxrdf",
  "quick-xml",
  "thiserror 1.0.69",
 ]
@@ -1093,7 +1080,7 @@ dependencies = [
  "memchr",
  "oxilangtag",
  "oxiri",
- "oxrdf 0.2.2",
+ "oxrdf",
  "thiserror 1.0.69",
 ]
 
@@ -1580,7 +1567,7 @@ source = "git+https://github.com/DeciSym/oxigraph/?branch=1-enable-sparql-query-
 dependencies = [
  "json-event-parser",
  "memchr",
- "oxrdf 0.2.2",
+ "oxrdf",
  "quick-xml",
  "thiserror 1.0.69",
 ]
@@ -1592,7 +1579,7 @@ source = "git+https://github.com/DeciSym/oxigraph/?branch=1-enable-sparql-query-
 dependencies = [
  "oxilangtag",
  "oxiri",
- "oxrdf 0.2.2",
+ "oxrdf",
  "peg 0.8.4",
  "rand",
  "thiserror 1.0.69",
@@ -1603,7 +1590,7 @@ name = "sparopt"
 version = "0.1.2"
 source = "git+https://github.com/DeciSym/oxigraph/?branch=1-enable-sparql-query-of-hdt-storage#8f4620f4e1ac18d185e66b8a9c0687a7cb3ea438"
 dependencies = [
- "oxrdf 0.2.2",
+ "oxrdf",
  "rand",
  "spargebra",
 ]
