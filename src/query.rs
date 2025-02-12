@@ -55,7 +55,7 @@ pub enum DeOutput {
 }
 // Function that will be used to handle querying multiple local HDTs
 pub async fn do_query(
-    data_files: &Vec<String>,
+    data_files: &[String],
     query_files: &Vec<String>,
     r2h: Arc<dyn Rdf2Hdt>,
     out: &DeOutput,
@@ -74,7 +74,7 @@ pub async fn do_query(
         }
     }
 
-    let (dir_path_vec, hdt_path_vec, e) = handle_files(data_files.clone(), r2h).await;
+    let (dir_path_vec, hdt_path_vec, e) = handle_files(data_files.to_owned(), r2h).await;
 
     if e.is_some() {
         file_cleanup(dir_path_vec.clone()).await;
@@ -161,7 +161,7 @@ pub async fn do_query(
                 for line in reader.lines() {
                     let l = line.unwrap();
                     println!("{l}");
-                    if output == "" {
+                    if output.is_empty() {
                         output = l.clone();
                     } else {
                         output = format!("{output}\n{l}");
@@ -265,7 +265,7 @@ async fn handle_files(
                     "error converting plain RDF file {:?} to HDT: {e}",
                     rdf_tempfile.path()
                 );
-                return (dir_path_vec, hdt_path_vec, Some(e.into()));
+                return (dir_path_vec, hdt_path_vec, Some(e));
             }
             Ok(_) => debug!("RDF2HDT WORKED"),
         }
@@ -273,10 +273,10 @@ async fn handle_files(
         let _ = named_tempfile.keep();
     }
 
-    if hdt_path_vec.len() == 0 {
+    if hdt_path_vec.is_empty() {
         error!("no files to query")
     }
-    return (dir_path_vec, hdt_path_vec, None);
+    (dir_path_vec, hdt_path_vec, None)
 }
 
 // performs directory removal for a list of directories
@@ -284,11 +284,8 @@ pub async fn file_cleanup(dirs: Vec<String>) {
     // TODO need to either change everything to pass a vec of strings or change other functions to pass a vec
     debug!("Cleaning up environment");
     for dir in dirs.iter() {
-        match fs::remove_dir_all(dir) {
-            Err(e) => {
-                error!("Failed to remove directory {:?}: {:?}", dir, e)
-            }
-            _ => {}
+        if let Err(e) = fs::remove_dir_all(dir) {
+            error!("Failed to remove directory {:?}: {:?}", dir, e)
         };
     }
 }

@@ -21,7 +21,7 @@ mod integration {
 
         assert!(create::do_create(
             &new_hdt.clone(),
-            &vec!["tests/resources/apple.ttl".to_string()],
+            &["tests/resources/apple.ttl".to_string()],
             r2h.clone(),
         )
         .is_ok());
@@ -73,13 +73,13 @@ mod integration {
 
         assert!(create::do_create(
             &new_hdt.clone(),
-            &vec!["tests/resources/apple.ttl".to_string()],
+            &["tests/resources/apple.ttl".to_string()],
             r2h.clone(),
         )
         .is_ok());
         assert!(Path::new(&new_hdt).exists());
 
-        assert!(view::view_hdt(&vec![new_hdt]).is_ok());
+        assert!(view::view_hdt(&[new_hdt]).is_ok());
 
         tmp_dir.close()?;
         Ok(())
@@ -101,7 +101,7 @@ mod integration {
 
         assert!(create::do_create(
             &new_hdt.clone(),
-            &vec!["tests/resources/banana.nt".to_string()],
+            &["tests/resources/banana.nt".to_string()],
             r2h.clone(),
         )
         .is_ok());
@@ -136,7 +136,7 @@ http://example.org/Banana"#
 
         assert!(create::do_create(
             &new_hdt.clone(),
-            &vec!["tests/resources/banana.ttl".to_string()],
+            &["tests/resources/banana.ttl".to_string()],
             r2h.clone(),
         )
         .is_ok());
@@ -171,7 +171,7 @@ http://example.org/Banana"#
 
         assert!(create::do_create(
             &new_hdt.clone(),
-            &vec![
+            &[
                 "tests/resources/pineapple.ttl".to_string(),
                 "tests/resources/banana.ttl".to_string()
             ],
@@ -238,7 +238,7 @@ http://example.org/Banana"#
             );
             assert!(create::do_create(
                 &new_hdt.clone(),
-                &vec![format!("tests/resources/{}", d),],
+                &[format!("tests/resources/{}", d)],
                 r2h.clone(),
             )
             .is_ok());

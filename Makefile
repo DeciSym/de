@@ -9,8 +9,15 @@ init:
 	scripts/download-sample-bench.sh
 	cargo install cargo-deb cargo-machete
 
+lint:
+	cargo fmt --check
+	cargo machete
+	cargo clippy --benches --tests --bins
+
 test: init
-	CI=1 cargo test
+	cargo test
+
+presubmit: lint test
 
 bench: init
 	cargo bench

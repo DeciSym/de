@@ -36,7 +36,7 @@ impl Rdf2Hdt for Rdf2HdtImpl {
             }
         };
 
-        return Ok(());
+        Ok(())
     }
 }
 
@@ -48,6 +48,6 @@ impl Rdf2Hdt for NoopRdf2Hdt {
             return Ok(());
         }
         error!("this mock rdf2hdt implementation should never be called");
-        return Err(anyhow::anyhow!("rdf2hdt is not implemented"));
+        Err(anyhow::anyhow!("rdf2hdt is not implemented"))
     }
 }

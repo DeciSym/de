@@ -14,7 +14,7 @@ use tempfile::{tempdir, Builder, NamedTempFile};
 
 pub fn do_create(
     hdt_name: &str,
-    data: &Vec<String>,
+    data: &[String],
     r2h: Arc<dyn Rdf2Hdt>,
 ) -> anyhow::Result<String, anyhow::Error> {
     debug!("Creating HDT...");
@@ -40,7 +40,7 @@ pub fn do_create(
 
     let (combined_rdf_path, unknown_files) =
         files_to_rdf(data, &mut tmp_file, Arc::new(OxRdfConvert {}))?;
-    if unknown_files.len() != 0 {
+    if !unknown_files.is_empty() {
         for f in unknown_files.clone().iter() {
             if !Path::new(f).exists() {
                 error!("file {:?} could not be found on local machine", f);
@@ -70,7 +70,7 @@ pub fn do_create(
 }
 
 pub fn files_to_rdf(
-    data: &Vec<String>,
+    data: &[String],
     out_file: &mut NamedTempFile,
     converter: Arc<dyn Rdf2Nt>,
 ) -> anyhow::Result<(String, Vec<String>), anyhow::Error> {
@@ -95,10 +95,10 @@ pub fn files_to_rdf(
         }
     }
 
-    let conv_res = if files_to_convert.len() != 0 {
+    let conv_res = if !files_to_convert.is_empty() {
         match converter.convert_to_nt(files_to_convert, out_file.reopen()?) {
             Ok(r) => {
-                unrecognized_files.extend(r.unhandled.clone().into_iter());
+                unrecognized_files.extend(r.unhandled.clone());
                 r
             }
             Err(e) => return Err(anyhow::anyhow!("Error converting file(s) to NT: {e}")),
@@ -132,10 +132,10 @@ pub fn files_to_rdf(
         return Ok((nt_files[0].clone(), unrecognized_files));
     }
 
-    return Ok((
+    Ok((
         out_file.path().to_str().unwrap().to_string(),
         unrecognized_files,
-    ));
+    ))
 }
 
 #[cfg(test)]

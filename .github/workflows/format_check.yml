@@ -16,3 +16,5 @@ jobs:
         uses: actions-rust-lang/rustfmt@v1
       - name: Machete
         uses: bnjbvr/cargo-machete@main
+      - name: Clippy Check
+        run: cargo clippy --benches --tests --bins

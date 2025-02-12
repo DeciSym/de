@@ -65,9 +65,7 @@ async fn main() {
             sparql,
             output,
         } => query::do_query(data, sparql, r2h, output).await,
-        Commands::Create { output_name, data } => {
-            create::do_create(output_name, data.as_ref(), r2h)
-        }
+        Commands::Create { output_name, data } => create::do_create(output_name, data, r2h),
         Commands::View { data } => match view::view_hdt(data) {
             Ok(v) => Ok(v),
             Err(e) => Err(e),

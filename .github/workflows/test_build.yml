@@ -36,10 +36,6 @@ jobs:
       with:
         toolchain: ${{ github.event.schedule == '' && 'stable' || 'nightly' }}
         cache: false
-    - uses: actions/setup-java@v4
-      with:
-        distribution: 'temurin'
-        java-version: '17'
     - uses: Swatinem/rust-cache@v2
       with:
         shared-key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
@@ -48,7 +44,7 @@ jobs:
 
     - name: Download dependency binaries
       env:
-        GITHUB_TOKEN: ${{ secrets.RELEASE_ARTIFACTS_ENGINE_DEPS }}
+        GITHUB_TOKEN: ${{ secrets.ENGINE_ARTIFACTS }}
       run: make init
 
     - name: Run Rust integration tests

@@ -4,7 +4,7 @@ use hdt::header::Header;
 use log::{debug, error};
 use std::path::Path;
 
-pub fn show_content(hdt_files: &Vec<String>, indent: String) -> anyhow::Result<(), anyhow::Error> {
+pub fn show_content(hdt_files: &[String], indent: String) -> anyhow::Result<(), anyhow::Error> {
     debug!("Getting HDT info ...");
 
     for f in hdt_files {
@@ -37,18 +37,17 @@ pub fn show_content(hdt_files: &Vec<String>, indent: String) -> anyhow::Result<(
         for t in h.body {
             let o = format!("{:?}", t.object);
             let s: Vec<&str> = o.split("\"").collect();
-            if t.predicate == "http://rdfs.org/ns/void#distinctObjects" {
-                println!("{indent}\t{}: {}", t.predicate, s[1])
-            } else if t.predicate == "http://rdfs.org/ns/void#distinctSubjects" {
-                println!("{indent}\t{}: {}", t.predicate, s[1])
-            } else if t.predicate == "http://rdfs.org/ns/void#properties" {
-                println!("{indent}\t{}: {}", t.predicate, s[1])
-            } else if t.predicate == "http://rdfs.org/ns/void#triples" {
-                println!("{indent}\t{}: {}", t.predicate, s[1])
-            } else if t.predicate == "http://purl.org/HDT/hdt#hdtSize" {
-                println!("{indent}\t{}: {}", t.predicate, s[1])
-            } else if t.predicate == "http://purl.org/HDT/hdt#originalSize" {
-                println!("{indent}\t{}: {}", t.predicate, s[1])
+
+            match t.predicate.as_str() {
+                "http://rdfs.org/ns/void#distinctObjects"
+                | "http://rdfs.org/ns/void#distinctSubjects"
+                | "http://rdfs.org/ns/void#properties"
+                | "http://rdfs.org/ns/void#triples"
+                | "http://purl.org/HDT/hdt#hdtSize"
+                | "http://purl.org/HDT/hdt#originalSize" => {
+                    println!("{indent}\t{}: {}", t.predicate, s[1])
+                }
+                _ => {}
             }
         }
     }
@@ -56,9 +55,9 @@ pub fn show_content(hdt_files: &Vec<String>, indent: String) -> anyhow::Result<(
     Ok(())
 }
 
-pub fn view_hdt(hdt_files: &Vec<String>) -> anyhow::Result<String, anyhow::Error> {
+pub fn view_hdt(hdt_files: &[String]) -> anyhow::Result<String, anyhow::Error> {
     debug!("Calling view::show_content");
-    match show_content(&hdt_files.clone().to_vec(), String::new()) {
+    match show_content(hdt_files, String::new()) {
         Ok(_) => {}
         Err(e) => return Err(e),
     };
@@ -71,7 +70,7 @@ mod tests {
     use crate::view;
     #[test]
     fn test_view() -> anyhow::Result<()> {
-        view::view_hdt(&vec!["tests/resources/apple.hdt".to_string()])
+        view::view_hdt(&["tests/resources/apple.hdt".to_string()])
             .expect("failed to load hdt file");
         Ok(())
     }
