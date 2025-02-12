@@ -48,4 +48,6 @@ jobs:
       run: make init
 
     - name: Run Rust integration tests
+      env:
+        GITHUB_TOKEN: ${{ secrets.ENGINE_ARTIFACTS }}
       run: make test

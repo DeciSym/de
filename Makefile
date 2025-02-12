@@ -7,9 +7,10 @@ init:
 	mkdir -p deps
 	scripts/download-rdf2hdt.sh
 	scripts/download-sample-bench.sh
-	cargo install cargo-deb cargo-machete
+	
 
 lint:
+	cargo install cargo-deb cargo-machete
 	cargo fmt --check
 	cargo machete
 	cargo clippy --benches --tests --bins
