@@ -10,7 +10,6 @@ use std::fs::File;
 use std::io::BufRead;
 use std::io::BufReader;
 use std::path::Path;
-use std::rc::Rc;
 use std::sync::Arc;
 use std::{fs, vec};
 use tempfile::{tempdir, Builder, NamedTempFile};
@@ -84,10 +83,11 @@ pub async fn do_query(
         ));
     }
 
-    let dataset: Rc<HDTDatasetView> = Rc::new(HDTDatasetView::new(hdt_path_vec.clone()));
+    let dataset = HDTDatasetView::new(&hdt_path_vec);
 
     let mut output = String::new();
     for rq in query_files {
+        // let dataset = HDTDatasetView::new(hdt_path_vec.clone());
         let sparql_query_string = match fs::read_to_string(rq) {
             Ok(s) => s,
             Err(e) => {
@@ -97,10 +97,11 @@ pub async fn do_query(
         };
 
         let res = match evaluate_hdt_query(
-            Rc::clone(&dataset),
+            dataset.clone(),
             sparql_query_string.as_str(),
             QueryOptions::default(),
             false,
+            [],
         ) {
             Ok((r, _explaination)) => r,
             Err(e) => {
