@@ -187,8 +187,8 @@ http://example.org/Banana"#
         assert_eq!(
             res.unwrap().replace("\r", ""),
             r#"fruit
-http://example.org/Banana
-http://example.org/Pineapple"#
+http://example.org/Pineapple
+http://example.org/Banana"#
         );
         tmp_dir.close()?;
         Ok(())
@@ -209,8 +209,8 @@ http://example.org/Pineapple"#
         assert_eq!(
             res.unwrap().replace("\r", ""),
             r#"fruit
-http://example.org/Banana
-http://example.org/Pineapple"#
+http://example.org/Pineapple
+http://example.org/Banana"#
         );
         Ok(())
     }
