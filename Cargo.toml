@@ -16,16 +16,16 @@ harness = false
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-anyhow = { version = "1.0.95", default-features = false }
-clap = { version = "4.5.28" }
-clap-verbosity-flag = { version = "3.0.2", default-features = false, features = ["log"] }
-env_logger = { version = "0.11.6", default-features = false }
-exitcode = "1.1.2"
-hdt = { version = "0.2.2", default-features = false }
-log = "0.4.25"
+anyhow = { version = "1.0", default-features = false }
+clap = { version = "4.5" }
+clap-verbosity-flag = { version = "3.0", default-features = false, features = ["log"] }
+env_logger = { version = "0.11", default-features = false }
+exitcode = "1.1"
+hdt = { version = "0.3.0", default-features = false }
+log = "0.4"
 oxigraph = { git = "https://github.com/DeciSym/oxigraph/", branch = "1-enable-sparql-query-of-hdt-storage", default-features = false }
-tempfile = {version = "3.16.0"}
-tokio = { version = "1.43.0", default-features = false, features = ["full"] }
+tempfile = {version = "3.19"}
+tokio = { version = "1.44", default-features = false, features = ["full"] }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["async_tokio"]}
