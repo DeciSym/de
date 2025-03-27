@@ -1,6 +1,7 @@
 // file handles calls to rdf2hdt library
 
 use log::*;
+use std::fs::File;
 use std::io::{self, Write};
 use std::{path::Path, process::Command};
 pub trait Rdf2Hdt: Sync + Send {
@@ -12,6 +13,15 @@ pub struct Rdf2HdtImpl();
 impl Rdf2Hdt for Rdf2HdtImpl {
     fn convert(&self, source: &Path, dest: &Path) -> anyhow::Result<(), anyhow::Error> {
         debug!("Running RDF2HDT binary");
+        match File::open(source) {
+            Ok(f) => {
+                if f.metadata().unwrap().len() == 0 {
+                    error!("file {source:?} is empty, nothing to convert");
+                    return Err(anyhow::anyhow!("empty file"));
+                }
+            }
+            Err(e) => return Err(anyhow::anyhow!("error opening source file: {e}")),
+        }
         let mut r2h = Command::new("rdf2hdt"); //using rdf2hdt-ccp to handle conversion from rdf to hdt
         r2h.args([
             "-i",

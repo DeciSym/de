@@ -3,3 +3,5 @@
 /target
 /tests/resources/superhero-ttl.zip
 /tests/resources/superhero.ttl
+
+*.hdt
