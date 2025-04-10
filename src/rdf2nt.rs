@@ -49,6 +49,9 @@ impl Rdf2Nt for OxRdfConvert {
                 RdfFormat::from_extension(Path::new(&file).extension().unwrap().to_str().unwrap())
             {
                 t
+            } else if file.ends_with(".owl") {
+                // OWL files should be in XML format: https://www.w3.org/TR/owl-xmlsyntax/
+                RdfFormat::RdfXml
             } else {
                 res.unhandled.push(file.clone());
                 continue;
