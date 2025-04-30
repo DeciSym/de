@@ -1,8 +1,14 @@
 [package]
 name = "de"
-version = "0.1.0"
+version = "0.1.1"
+authors = ["bharath181 <bharathselvaraj18@gmail.com>", "Greg Hanson <g.isaac.hanson@gmail.com>"]
 edition = "2021"
+license = "BSD-3-Clause"
+readme = "README.md"
+repository = "https://github.com/DeciSym/de"
 default-run = "de"
+keywords = ["hdt", "rdf", "semantic-web", "triple-store", "sparql"]
+categories = ["command-line-utilities"]
 
 [[bin]]
 name = "de"
@@ -26,6 +32,7 @@ log = "0.4"
 oxigraph = { git = "https://github.com/DeciSym/oxigraph/", branch = "1-enable-sparql-query-of-hdt-storage", default-features = false }
 tempfile = {version = "3.19"}
 tokio = { version = "1.44", default-features = false, features = ["full"] }
+rdf2hdt = { git = "https://github.com/DeciSym/rdf2hdt" }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["async_tokio"]}
@@ -40,7 +47,6 @@ priority = "optional"
 assets = [
     # binary
     ["target/release/de", "usr/bin/", "755"], 
-    ["deps/rdf2hdt", "usr/bin/", "755"],
 
 ]
 default-features = false
