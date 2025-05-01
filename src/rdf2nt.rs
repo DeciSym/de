@@ -1,3 +1,6 @@
+// Copyright (c) 2025, Decisym, LLC
+// Licensed under the BSD 3-Clause License (see LICENSE file in the project root).
+
 use log::{debug, error, warn};
 use oxigraph::io::RdfFormat::{self, NTriples};
 use oxigraph::io::RdfSerializer;
