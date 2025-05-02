@@ -13,7 +13,7 @@ pub trait Rdf2Nt {
     fn convert_to_nt(
         &self,
         file_paths: Vec<String>,
-        output_file: std::fs::File,
+        output_file: &std::fs::File,
     ) -> anyhow::Result<ConvertResult, anyhow::Error>;
 }
 
@@ -29,7 +29,7 @@ impl Rdf2Nt for OxRdfConvert {
     fn convert_to_nt(
         &self,
         file_paths: Vec<String>,
-        output_file: std::fs::File,
+        output_file: &std::fs::File,
     ) -> anyhow::Result<ConvertResult, anyhow::Error> {
         let mut res = ConvertResult::default();
         let mut dest_writer = BufWriter::new(output_file);

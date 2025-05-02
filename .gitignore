@@ -5,3 +5,4 @@
 /tests/resources/superhero.ttl
 
 *.hdt
+*.index.v1-rust-cache

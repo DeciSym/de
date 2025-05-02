@@ -96,7 +96,7 @@ pub fn files_to_rdf(
     }
 
     let conv_res = if !files_to_convert.is_empty() {
-        match converter.convert_to_nt(files_to_convert, out_file.reopen()?) {
+        match converter.convert_to_nt(files_to_convert, out_file.as_file()) {
             Ok(r) => {
                 unrecognized_files.extend(r.unhandled.clone());
                 r
