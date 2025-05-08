@@ -1,13 +1,33 @@
+// Copyright (c) 2025, Decisym, LLC
+// Licensed under the BSD 3-Clause License (see LICENSE file in the project root).w
+
 // file handles calls to rdf2hdt library
 
 use log::*;
-use std::fs::File;
-use std::io::{self, Write};
-use std::{path::Path, process::Command};
+use rdf2hdt::builder::Options;
+use std::path::Path;
 pub trait Rdf2Hdt: Sync + Send {
     fn convert(&self, source: &Path, dest: &Path) -> anyhow::Result<(), anyhow::Error>;
 }
 
+pub struct RustRdfToHdt {}
+
+impl Rdf2Hdt for RustRdfToHdt {
+    fn convert(&self, source: &Path, dest: &Path) -> Result<(), anyhow::Error> {
+        match rdf2hdt::builder::build_hdt(
+            vec![source.to_str().unwrap().to_string()],
+            dest.to_str().unwrap(),
+            Options::default(),
+        ) {
+            Ok(_) => {}
+            Err(e) => return Err(anyhow::anyhow!(format!("error building hdt: {}", e))),
+        }
+
+        Ok(())
+    }
+}
+
+/*
 pub struct Rdf2HdtImpl();
 
 impl Rdf2Hdt for Rdf2HdtImpl {
@@ -49,6 +69,7 @@ impl Rdf2Hdt for Rdf2HdtImpl {
         Ok(())
     }
 }
+*/
 
 // This should only be used by serve_query, where the server is never expected to have to perform conversions
 pub struct NoopRdf2Hdt();

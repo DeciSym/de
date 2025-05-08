@@ -1,9 +1,10 @@
-// This code handles the CLI
+// Copyright (c) 2025, Decisym, LLC
+// Licensed under the BSD 3-Clause License (see LICENSE file in the project root).
 
+// This code handles the CLI
 use clap::{Parser, Subcommand};
 use de::*;
 use log::error;
-use std::sync::Arc;
 // Building clap structs using derive
 #[derive(Parser)]
 #[command(author, version, about="CLI tool for creating and querying HDT files", long_about = None)]
@@ -44,8 +45,6 @@ enum Commands {
         /// Path to HDT files
         data: Vec<String>,
     },
-    /// Check that required CLI dependencies are installed on the system
-    Check {},
 }
 
 #[tokio::main]
@@ -56,21 +55,18 @@ async fn main() {
         .filter_level(cli.verbose.log_level_filter())
         .init();
 
-    let r2h = Arc::new(rdf2hdt::Rdf2HdtImpl());
-
     // Matching CLI input to commands
     let result = match &cli.command {
         Commands::Query {
             data,
             sparql,
             output,
-        } => query::do_query(data, sparql, r2h, output).await,
-        Commands::Create { output_name, data } => create::do_create(output_name, data, r2h),
+        } => query::do_query(data, sparql, output).await,
+        Commands::Create { output_name, data } => create::do_create(output_name, data),
         Commands::View { data } => match view::view_hdt(data) {
             Ok(v) => Ok(v),
             Err(e) => Err(e),
         },
-        Commands::Check {} => check::do_check(None),
     };
 
     match result {

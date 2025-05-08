@@ -1,7 +1,6 @@
 use criterion::{criterion_group, criterion_main, Criterion};
 use de::*;
 use pprof::criterion::{Output, PProfProfiler};
-use std::sync::Arc;
 use std::time::Duration;
 use tempfile::tempdir;
 
@@ -13,14 +12,13 @@ fn query(c: &mut Criterion) {
     let fname = format!("{}/rdf.hdt", tmp_dir.as_ref().display());
     let test_hdt = fname.as_str();
     let _ = std::fs::remove_file(test_hdt);
-    let r2h = Arc::new(rdf2hdt::Rdf2HdtImpl());
     let source_rdf = "tests/resources/superhero.ttl".to_string();
 
     let mut group = c.benchmark_group("create HDT from TTL file");
     group.sample_size(10);
     group.measurement_time(Duration::from_secs(120));
     group.bench_function("hdt create", |b| {
-        b.iter(|| create::do_create(test_hdt, &[source_rdf.clone()], r2h.clone()).unwrap());
+        b.iter(|| create::do_create(test_hdt, &[source_rdf.clone()]));
     });
     group.finish();
 
@@ -38,7 +36,6 @@ fn query(c: &mut Criterion) {
                         let _ = query::do_query(
                             &[source_rdf.clone()],
                             &vec!["tests/resources/hero-height.rq".to_string()],
-                            Arc::new(rdf2hdt::Rdf2HdtImpl()),
                             &query::DeOutput::CSV,
                         )
                         .await
@@ -63,7 +60,6 @@ fn query(c: &mut Criterion) {
                         let _ = query::do_query(
                             &[source_rdf.clone()],
                             &vec!["tests/resources/hero-height.rq".to_string()],
-                            Arc::new(rdf2hdt::Rdf2HdtImpl()),
                             &query::DeOutput::CSV,
                         )
                         .await

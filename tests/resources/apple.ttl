@@ -5,7 +5,7 @@
 ex:Apple rdf:type ex:Fruit;
   rdfs:label "Apple";
   ex:variety "Red Delicious";
-  ex:color "Red";
+  ex:hasColor "Red";
   ex:weight "150 grams";
   ex:origin "United States";
   ex:isOrganic true.

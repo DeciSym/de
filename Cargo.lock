@@ -55,6 +55,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "android-tzdata"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e999941b234f3131b00bc13c22d06e8c5ff726d1b6318ac7eb276997bbb4fef0"
+
+[[package]]
+name = "android_system_properties"
+version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "819e7219dbd41043ac279b19830f2efc897156490d7fd6ea916720117ee66311"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "anes"
 version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -242,6 +257,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "baf1de4339761588bc0619e3cbc0120ee582ebb74b53b4efbf79117bd2da40fd"
 
 [[package]]
+name = "chrono"
+version = "0.4.41"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c469d952047f47f91b68d1cba3f10d63c11d73e4636f24f08daf0278abf01c4d"
+dependencies = [
+ "android-tzdata",
+ "iana-time-zone",
+ "js-sys",
+ "num-traits",
+ "wasm-bindgen",
+ "windows-link",
+]
+
+[[package]]
 name = "ciborium"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -323,6 +352,12 @@ name = "colorchoice"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5b63caa9aa9397e2d9480a9b13673856c78d8ac123288526c37d7839f2a86990"
+
+[[package]]
+name = "core-foundation-sys"
+version = "0.8.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
 
 [[package]]
 name = "cpp_demangle"
@@ -460,10 +495,11 @@ dependencies = [
  "criterion",
  "env_logger",
  "exitcode",
- "hdt 0.3.0",
+ "hdt 0.3.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "log",
  "oxigraph",
  "pprof",
+ "rdf2hdt",
  "tempfile",
  "tokio",
 ]
@@ -500,6 +536,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "186e05a59d4c50738528153b83b0b0194d3a29507dfec16eccd4b342903397d0"
 dependencies = [
  "log",
+ "regex",
 ]
 
 [[package]]
@@ -508,7 +545,10 @@ version = "0.11.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dcaee3d8e3cfc3fd92428d477bc97fc29ec8716d180c0d74c643bb26166660e0"
 dependencies = [
+ "anstream",
+ "anstyle",
  "env_filter",
+ "humantime",
  "log",
 ]
 
@@ -730,6 +770,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "hdt"
+version = "0.3.0"
+source = "git+https://github.com/KonradHoeffner/hdt/#433ca9748d9b7ff4632cedf64790254871d582c2"
+dependencies = [
+ "bytesize 2.0.1",
+ "crc",
+ "eyre",
+ "iref",
+ "langtag",
+ "log",
+ "mownstr",
+ "ntriple",
+ "sophia",
+ "sucds",
+ "thiserror 2.0.11",
+]
+
+[[package]]
 name = "heck"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -752,6 +810,36 @@ name = "hex_fmt"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b07f60793ff0a4d9cef0f18e63b5357e06209987153a64648c972c1e5aff336f"
+
+[[package]]
+name = "humantime"
+version = "2.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9b112acc8b3adf4b107a8ec20977da0273a8c386765a3ec0229bd500a1443f9f"
+
+[[package]]
+name = "iana-time-zone"
+version = "0.1.63"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b0c919e5debc312ad217002b8048a17b7d83f80703865bbfcfebb0458b0b27d8"
+dependencies = [
+ "android_system_properties",
+ "core-foundation-sys",
+ "iana-time-zone-haiku",
+ "js-sys",
+ "log",
+ "wasm-bindgen",
+ "windows-core",
+]
+
+[[package]]
+name = "iana-time-zone-haiku"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f31827a206f56af32e590ba56d5d2d085f558508192593743f16b2306495269f"
+dependencies = [
+ "cc",
+]
 
 [[package]]
 name = "indenter"
@@ -1023,8 +1111,8 @@ dependencies = [
  "openssl-sys",
  "oxilangtag",
  "oxiri",
- "oxrdf",
- "oxrdfio",
+ "oxrdf 0.2.2",
+ "oxrdfio 0.1.2",
  "oxsdatatypes",
  "rand",
  "regex",
@@ -1066,13 +1154,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "oxrdf"
+version = "0.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a04761319ef84de1f59782f189d072cbfc3a9a40c4e8bded8667202fbd35b02a"
+dependencies = [
+ "oxilangtag",
+ "oxiri",
+ "rand",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "oxrdfio"
 version = "0.1.2"
 source = "git+https://github.com/DeciSym/oxigraph/?branch=1-enable-sparql-query-of-hdt-storage#8f4620f4e1ac18d185e66b8a9c0687a7cb3ea438"
 dependencies = [
- "oxrdf",
- "oxrdfxml",
- "oxttl",
+ "oxrdf 0.2.2",
+ "oxrdfxml 0.1.2",
+ "oxttl 0.1.2",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "oxrdfio"
+version = "0.1.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "47d45d81e8e5313e13f88da6c040f5edcd5aa48e91d1cdf0972f5bc79362890d"
+dependencies = [
+ "oxrdf 0.2.4",
+ "oxrdfxml 0.1.6",
+ "oxttl 0.1.7",
  "thiserror 1.0.69",
 ]
 
@@ -1083,7 +1195,20 @@ source = "git+https://github.com/DeciSym/oxigraph/?branch=1-enable-sparql-query-
 dependencies = [
  "oxilangtag",
  "oxiri",
- "oxrdf",
+ "oxrdf 0.2.2",
+ "quick-xml",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "oxrdfxml"
+version = "0.1.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7e00a36021b71d74281cf9ffbbda57210bb9cb84b7f28bda50a3ee9641b6ce5d"
+dependencies = [
+ "oxilangtag",
+ "oxiri",
+ "oxrdf 0.2.4",
  "quick-xml",
  "thiserror 1.0.69",
 ]
@@ -1104,7 +1229,20 @@ dependencies = [
  "memchr",
  "oxilangtag",
  "oxiri",
- "oxrdf",
+ "oxrdf 0.2.2",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "oxttl"
+version = "0.1.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2bc2f05b9179f1033582fe3ae58a96cb4311dd1a2116791c3236117d5427f275"
+dependencies = [
+ "memchr",
+ "oxilangtag",
+ "oxiri",
+ "oxrdf 0.2.4",
  "thiserror 1.0.69",
 ]
 
@@ -1395,6 +1533,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "rdf2hdt"
+version = "0.1.1"
+source = "git+https://github.com/DeciSym/rdf2hdt#47604419fc13668d06d11f262ef45fc0a7443e13"
+dependencies = [
+ "chrono",
+ "clap",
+ "clap-verbosity-flag",
+ "crc",
+ "env_logger",
+ "hdt 0.3.0 (git+https://github.com/KonradHoeffner/hdt/)",
+ "log",
+ "oxrdf 0.2.4",
+ "oxrdfio 0.1.7",
+ "tempfile",
+]
+
+[[package]]
 name = "redox_syscall"
 version = "0.5.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1431,6 +1586,29 @@ name = "regex-syntax"
 version = "0.8.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2b15c43186be67a4fd63bee50d0303afffcef381492ebe2c5d87f324e1b8815c"
+
+[[package]]
+name = "resiter"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cbc95d56eb1865f69288945759cc0879d60ee68168dce676730275804ad2b276"
+
+[[package]]
+name = "rio_api"
+version = "0.8.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "61d0c76ddf8b00cbb4d2c5932d067d49245c2f1f651809bde3cf265033ddb1af"
+
+[[package]]
+name = "rio_turtle"
+version = "0.8.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d6f351b77353c7c896f0cd5ced2a25a7e95b5360cb68d1d7c16682ee096d7f40"
+dependencies = [
+ "oxilangtag",
+ "oxiri",
+ "rio_api",
+]
 
 [[package]]
 name = "rustc-demangle"
@@ -1585,13 +1763,139 @@ dependencies = [
 ]
 
 [[package]]
+name = "sophia"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9fe9928a3014b591068c7b8eb143d996a917f06119b3a64f07694830c640783b"
+dependencies = [
+ "sophia_api",
+ "sophia_c14n",
+ "sophia_inmem",
+ "sophia_iri",
+ "sophia_isomorphism",
+ "sophia_resource",
+ "sophia_rio",
+ "sophia_term",
+ "sophia_turtle",
+]
+
+[[package]]
+name = "sophia_api"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "103a4138290bec38b9b10e0682b613173a102bca9fd2a74b3db25346e22599a3"
+dependencies = [
+ "lazy_static",
+ "mownstr",
+ "regex",
+ "resiter",
+ "serde",
+ "sophia_iri",
+ "thiserror 2.0.11",
+]
+
+[[package]]
+name = "sophia_c14n"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "83f6facc93703fcb7fa773b0ff71e0ee7d937157c5c22ae2aa6c95b5cf834949"
+dependencies = [
+ "log",
+ "sha2",
+ "sophia_api",
+ "sophia_iri",
+ "thiserror 2.0.11",
+]
+
+[[package]]
+name = "sophia_inmem"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ebacba4fa7baed53f89844a5c9e5962d6232a449d5b450b9de72bb67f0203332"
+dependencies = [
+ "sophia_api",
+ "thiserror 2.0.11",
+]
+
+[[package]]
+name = "sophia_iri"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7675ff44ad920ac07fde1b61ff20d3c832d8cb65395416906df90b76631ea95f"
+dependencies = [
+ "lazy_static",
+ "oxiri",
+ "regex",
+ "serde",
+ "thiserror 2.0.11",
+]
+
+[[package]]
+name = "sophia_isomorphism"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e85205f57b26b7f35c4a7691eaeefdb7c44e392515e21f745e9ab48acb12ff11"
+dependencies = [
+ "sophia_api",
+ "sophia_iri",
+]
+
+[[package]]
+name = "sophia_resource"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6ddbf91aae6959a6d88bcd6e15579d8256fc5ae0a980486bab18c182e33c524b"
+dependencies = [
+ "sophia_api",
+ "sophia_iri",
+ "sophia_turtle",
+ "thiserror 2.0.11",
+]
+
+[[package]]
+name = "sophia_rio"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "57a2938da8eeb8645ff616e64ac99af8099772c3e22a955ae5669ceac5372c34"
+dependencies = [
+ "rio_api",
+ "sophia_api",
+ "sophia_iri",
+]
+
+[[package]]
+name = "sophia_term"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "51f4c42480d50d14ac7128ad738d28b68368938cb6f507c9505f68875fd0e4db"
+dependencies = [
+ "lazy_static",
+ "sophia_api",
+]
+
+[[package]]
+name = "sophia_turtle"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e9ff316c00bed741ba431b8533b2ce08e089ca031c742d9b6cccdf01b7f6ef2d"
+dependencies = [
+ "lazy_static",
+ "oxiri",
+ "regex",
+ "rio_turtle",
+ "sophia_api",
+ "sophia_iri",
+ "sophia_rio",
+]
+
+[[package]]
 name = "sparesults"
 version = "0.2.2"
 source = "git+https://github.com/DeciSym/oxigraph/?branch=1-enable-sparql-query-of-hdt-storage#8f4620f4e1ac18d185e66b8a9c0687a7cb3ea438"
 dependencies = [
  "json-event-parser",
  "memchr",
- "oxrdf",
+ "oxrdf 0.2.2",
  "quick-xml",
  "thiserror 1.0.69",
 ]
@@ -1603,7 +1907,7 @@ source = "git+https://github.com/DeciSym/oxigraph/?branch=1-enable-sparql-query-
 dependencies = [
  "oxilangtag",
  "oxiri",
- "oxrdf",
+ "oxrdf 0.2.2",
  "peg 0.8.4",
  "rand",
  "thiserror 1.0.69",
@@ -1614,7 +1918,7 @@ name = "sparopt"
 version = "0.1.2"
 source = "git+https://github.com/DeciSym/oxigraph/?branch=1-enable-sparql-query-of-hdt-storage#8f4620f4e1ac18d185e66b8a9c0687a7cb3ea438"
 dependencies = [
- "oxrdf",
+ "oxrdf 0.2.2",
  "rand",
  "spargebra",
 ]
@@ -1962,6 +2266,65 @@ name = "winapi-x86_64-pc-windows-gnu"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "712e227841d057c1ee1cd2fb22fa7e5a5461ae8e48fa2ca79ec42cfc1931183f"
+
+[[package]]
+name = "windows-core"
+version = "0.61.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4763c1de310c86d75a878046489e2e5ba02c649d185f21c67d4cf8a56d098980"
+dependencies = [
+ "windows-implement",
+ "windows-interface",
+ "windows-link",
+ "windows-result",
+ "windows-strings",
+]
+
+[[package]]
+name = "windows-implement"
+version = "0.60.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a47fddd13af08290e67f4acabf4b459f647552718f683a7b415d290ac744a836"
+dependencies = [
+ "proc-macro2",
+ "quote 1.0.37",
+ "syn 2.0.89",
+]
+
+[[package]]
+name = "windows-interface"
+version = "0.59.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bd9211b69f8dcdfa817bfd14bf1c97c9188afa36f4750130fcdf3f400eca9fa8"
+dependencies = [
+ "proc-macro2",
+ "quote 1.0.37",
+ "syn 2.0.89",
+]
+
+[[package]]
+name = "windows-link"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "76840935b766e1b0a05c0066835fb9ec80071d4c09a16f6bd5f7e655e3c14c38"
+
+[[package]]
+name = "windows-result"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c64fd11a4fd95df68efcfee5f44a294fe71b8bc6a91993e2791938abcc712252"
+dependencies = [
+ "windows-link",
+]
+
+[[package]]
+name = "windows-strings"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7a2ba9642430ee452d5a7aa78d72907ebe8cfda358e8cb7918a2050581322f97"
+dependencies = [
+ "windows-link",
+]
 
 [[package]]
 name = "windows-sys"

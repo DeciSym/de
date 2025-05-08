@@ -1,3 +1,6 @@
+// Copyright (c) 2025, Decisym, LLC
+// Licensed under the BSD 3-Clause License (see LICENSE file in the project root).
+
 use anyhow::anyhow;
 use hdt::containers::ControlInfo;
 use hdt::header::Header;
