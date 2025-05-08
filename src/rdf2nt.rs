@@ -1,3 +1,6 @@
+// Copyright (c) 2025, Decisym, LLC
+// Licensed under the BSD 3-Clause License (see LICENSE file in the project root).
+
 use log::{debug, error, warn};
 use oxigraph::io::RdfFormat::{self, NTriples};
 use oxigraph::io::RdfSerializer;
@@ -13,7 +16,7 @@ pub trait Rdf2Nt {
     fn convert_to_nt(
         &self,
         file_paths: Vec<String>,
-        output_file: std::fs::File,
+        output_file: &std::fs::File,
     ) -> anyhow::Result<ConvertResult, anyhow::Error>;
 }
 
@@ -29,7 +32,7 @@ impl Rdf2Nt for OxRdfConvert {
     fn convert_to_nt(
         &self,
         file_paths: Vec<String>,
-        output_file: std::fs::File,
+        output_file: &std::fs::File,
     ) -> anyhow::Result<ConvertResult, anyhow::Error> {
         let mut res = ConvertResult::default();
         let mut dest_writer = BufWriter::new(output_file);
@@ -49,6 +52,9 @@ impl Rdf2Nt for OxRdfConvert {
                 RdfFormat::from_extension(Path::new(&file).extension().unwrap().to_str().unwrap())
             {
                 t
+            } else if file.ends_with(".owl") {
+                // OWL files should be in XML format: https://www.w3.org/TR/owl-xmlsyntax/
+                RdfFormat::RdfXml
             } else {
                 res.unhandled.push(file.clone());
                 continue;

@@ -1,7 +1,11 @@
+// Copyright (c) 2025, Decisym, LLC
+// Licensed under the BSD 3-Clause License (see LICENSE file in the project root).
+
 // This file handles the query subcommand
 
 use crate::create;
 use crate::rdf2hdt::Rdf2Hdt;
+use crate::rdf2hdt::RustRdfToHdt;
 use crate::rdf2nt::OxRdfConvert;
 use anyhow::Error;
 use log::*;
@@ -56,7 +60,6 @@ pub enum DeOutput {
 pub async fn do_query(
     data_files: &[String],
     query_files: &Vec<String>,
-    r2h: Arc<dyn Rdf2Hdt>,
     out: &DeOutput,
 ) -> anyhow::Result<String, anyhow::Error> {
     debug!("Executing querying ...");
@@ -73,7 +76,7 @@ pub async fn do_query(
         }
     }
 
-    let (dir_path_vec, hdt_path_vec, e) = handle_files(data_files.to_owned(), r2h).await;
+    let (dir_path_vec, hdt_path_vec, e) = handle_files(data_files.to_owned()).await;
 
     if e.is_some() {
         file_cleanup(dir_path_vec.clone()).await;
@@ -181,10 +184,7 @@ pub async fn do_query(
     Ok(output)
 }
 
-async fn handle_files(
-    files: Vec<String>,
-    r2h: Arc<dyn Rdf2Hdt>,
-) -> (Vec<String>, Vec<String>, Option<anyhow::Error>) {
+async fn handle_files(files: Vec<String>) -> (Vec<String>, Vec<String>, Option<anyhow::Error>) {
     let mut dir_path_vec: Vec<String> = vec![]; // This is holding the path to the tempfiles that havent been removed from disk
     let mut hdt_path_vec: Vec<String> = vec![]; // This is holding all the paths to the hdt files. this needs to stay
     let tmp_dir = match tempdir() {
@@ -260,16 +260,15 @@ async fn handle_files(
             .unwrap();
 
         debug!("Running RDF2HDT");
-        match r2h.convert(converted_rdf, named_tempfile.path()) {
-            Err(e) => {
-                error!(
-                    "error converting plain RDF file {:?} to HDT: {e}",
-                    rdf_tempfile.path()
-                );
-                return (dir_path_vec, hdt_path_vec, Some(e));
-            }
-            Ok(_) => debug!("RDF2HDT WORKED"),
-        }
+        let converter = RustRdfToHdt {};
+
+        match converter.convert(converted_rdf, named_tempfile.path()) {
+            Ok(g) => g,
+            Err(e) => error!(
+                "error converting plain RDF file {:?} to HDT: {e}",
+                rdf_tempfile.path()
+            ),
+        };
         hdt_path_vec.push(named_tempfile.path().to_str().unwrap().to_string());
         let _ = named_tempfile.keep();
     }

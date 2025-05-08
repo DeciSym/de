@@ -1,6 +1,10 @@
+// Copyright (c) 2025, Decisym, LLC
+// Licensed under the BSD 3-Clause License (see LICENSE file in the project root).
+
 // This file handles the create subcommand
 
 use crate::rdf2hdt::Rdf2Hdt;
+use crate::rdf2hdt::RustRdfToHdt;
 use crate::rdf2nt::ConvertResult;
 use crate::rdf2nt::OxRdfConvert;
 use crate::rdf2nt::Rdf2Nt;
@@ -12,11 +16,7 @@ use std::path::Path;
 use std::sync::Arc;
 use tempfile::{tempdir, Builder, NamedTempFile};
 
-pub fn do_create(
-    hdt_name: &str,
-    data: &[String],
-    r2h: Arc<dyn Rdf2Hdt>,
-) -> anyhow::Result<String, anyhow::Error> {
+pub fn do_create(hdt_name: &str, data: &[String]) -> anyhow::Result<String, anyhow::Error> {
     debug!("Creating HDT...");
     // Creating a tempdir to be passed to panoplia as the directory.
     let tmp_dir: tempfile::TempDir = match tempdir() {
@@ -54,11 +54,12 @@ pub fn do_create(
         ));
     }
 
-    debug!("Running RDF2HDT");
-    match r2h.convert(Path::new(&combined_rdf_path), Path::new(hdt_name)) {
-        Err(e) => return Err(e),
-        Ok(_) => debug!("RDF2HDT WORKED"),
-    }
+    let converter = RustRdfToHdt {};
+
+    match converter.convert(Path::new(&combined_rdf_path), Path::new(hdt_name)) {
+        Ok(g) => g,
+        Err(e) => return Err(anyhow::anyhow!("Error converting combined RDF to HDT: {e}")),
+    };
 
     fs::remove_file(tmp_file.path()).expect("didnt remove tempfile containing all RDF Data");
 
@@ -96,7 +97,7 @@ pub fn files_to_rdf(
     }
 
     let conv_res = if !files_to_convert.is_empty() {
-        match converter.convert_to_nt(files_to_convert, out_file.reopen()?) {
+        match converter.convert_to_nt(files_to_convert, out_file.as_file()) {
             Ok(r) => {
                 unrecognized_files.extend(r.unhandled.clone());
                 r

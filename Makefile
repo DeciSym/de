@@ -5,10 +5,8 @@ VERSION ?= 0.0.0-test
 
 init:
 	mkdir -p deps
-	scripts/download-rdf2hdt.sh
 	scripts/download-sample-bench.sh
 	
-
 lint:
 	cargo install cargo-deb cargo-machete
 	cargo fmt --check
