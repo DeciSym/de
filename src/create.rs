@@ -3,12 +3,11 @@
 
 // This file handles the create subcommand
 
-use crate::rdf2hdt::Rdf2Hdt;
-use crate::rdf2hdt::RustRdfToHdt;
 use crate::rdf2nt::ConvertResult;
 use crate::rdf2nt::OxRdfConvert;
 use crate::rdf2nt::Rdf2Nt;
 use log::*;
+use rdf2hdt::builder::Options;
 use std::fs;
 use std::fs::File;
 use std::io::{copy, BufReader};
@@ -54,10 +53,8 @@ pub fn do_create(hdt_name: &str, data: &[String]) -> anyhow::Result<String, anyh
         ));
     }
 
-    let converter = RustRdfToHdt {};
-
-    match converter.convert(Path::new(&combined_rdf_path), Path::new(hdt_name)) {
-        Ok(g) => g,
+    match rdf2hdt::builder::build_hdt(vec![combined_rdf_path], hdt_name, Options::default()) {
+        Ok(_) => {}
         Err(e) => return Err(anyhow::anyhow!("Error converting combined RDF to HDT: {e}")),
     };
 
