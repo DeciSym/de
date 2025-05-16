@@ -29,10 +29,10 @@ env_logger = { version = "0.11", default-features = false }
 exitcode = "1.1"
 hdt = { version = "0.3.0", default-features = false }
 log = "0.4"
-oxigraph = { git = "https://github.com/DeciSym/oxigraph/", branch = "1-enable-sparql-query-of-hdt-storage", default-features = false }
+oxigraph = { git = "https://github.com/DeciSym/oxigraph/", branch = "greghanson/test-spareval", default-features = false }
+rdf2hdt = { git = "https://github.com/DeciSym/rdf2hdt" }
 tempfile = {version = "3.19"}
 tokio = { version = "1.44", default-features = false, features = ["full"] }
-rdf2hdt = { git = "https://github.com/DeciSym/rdf2hdt" }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["async_tokio"]}
