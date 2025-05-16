@@ -199,14 +199,14 @@ async fn handle_files(files: Vec<String>) -> (Vec<String>, Vec<String>, Option<a
             )
         }
     };
-    let t_path: std::path::PathBuf = tmp_dir.into_path(); // Getting the tempdir path.
+    let t_path = tmp_dir.path(); // Getting the tempdir path.
     dir_path_vec.push(t_path.to_str().unwrap().to_string());
 
     // Creating TempFile to hold the hdt contents
     let mut rdf_tempfile: NamedTempFile = Builder::new()
         .suffix(".nt")
         .append(true)
-        .tempfile_in(t_path.clone())
+        .tempfile_in(t_path)
         .unwrap();
 
     let (combined_rdf_path, unknown_files) =
@@ -255,7 +255,7 @@ async fn handle_files(files: Vec<String>) -> (Vec<String>, Vec<String>, Option<a
         let named_tempfile: NamedTempFile = Builder::new()
             .suffix(".hdt")
             .append(true)
-            .tempfile_in(t_path.clone())
+            .tempfile_in(t_path)
             .unwrap();
 
         debug!("Running RDF2HDT");
@@ -273,6 +273,7 @@ async fn handle_files(files: Vec<String>) -> (Vec<String>, Vec<String>, Option<a
         };
         hdt_path_vec.push(named_tempfile.path().to_str().unwrap().to_string());
         let _ = named_tempfile.keep();
+        let _ = tmp_dir.keep();
     }
 
     if hdt_path_vec.is_empty() {
