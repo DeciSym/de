@@ -1528,8 +1528,9 @@ dependencies = [
 [[package]]
 name = "rdf2hdt"
 version = "0.1.1"
-source = "git+https://github.com/DeciSym/rdf2hdt#47604419fc13668d06d11f262ef45fc0a7443e13"
+source = "git+https://github.com/DeciSym/rdf2hdt#9ef79e1af418975295e500d1dd9a4e66326d3d93"
 dependencies = [
+ "anyhow",
  "chrono",
  "clap",
  "clap-verbosity-flag",
