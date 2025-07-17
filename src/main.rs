@@ -72,7 +72,7 @@ async fn main() {
     match result {
         Ok(_) => std::process::exit(exitcode::OK),
         Err(e) => {
-            error!("Error during execution: {:?}", e);
+            error!("Error during execution: {e:?}");
             std::process::exit(exitcode::UNAVAILABLE);
         }
     }

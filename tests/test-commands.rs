@@ -196,7 +196,7 @@ http://example.org/Banana"#
                 d.replace(".ttl", ".hdt")
             );
             assert!(
-                create::do_create(&new_hdt.clone(), &[format!("tests/resources/{}", d)],).is_ok()
+                create::do_create(&new_hdt.clone(), &[format!("tests/resources/{d}")],).is_ok()
             );
             pkgs.push(new_hdt.clone());
         }

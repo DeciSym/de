@@ -13,7 +13,7 @@ pub fn show_content(hdt_files: &[String], indent: String) -> anyhow::Result<(), 
     for f in hdt_files {
         let path = Path::new(f);
         if !path.exists() {
-            error!("file {:?} could not be found on local machine", path);
+            error!("file {path:?} could not be found on local machine");
             return Err(anyhow!(
                 "file {:?} could not be found on local machine",
                 path

@@ -67,7 +67,7 @@ pub async fn do_query(
     for rq in query_files.clone() {
         let path = Path::new(&rq);
         if !path.exists() {
-            error!("query file {:?} could not be found on local machine", rq);
+            error!("query file {rq:?} could not be found on local machine");
             return Err(anyhow::anyhow!(
                 "query file {:?} could not be found on local machine",
                 rq
@@ -172,7 +172,7 @@ pub async fn do_query(
                 }
             }
             Err(e) => {
-                error!("Error processing query: {:?}", e);
+                error!("Error processing query: {e:?}");
             }
         };
     }
@@ -288,7 +288,7 @@ pub async fn file_cleanup(dirs: Vec<String>) {
     debug!("Cleaning up environment");
     for dir in dirs.iter() {
         if let Err(e) = fs::remove_dir_all(dir) {
-            error!("Failed to remove directory {:?}: {:?}", dir, e)
+            error!("Failed to remove directory {dir:?}: {e:?}")
         };
     }
 }

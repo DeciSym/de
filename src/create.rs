@@ -42,10 +42,10 @@ pub fn do_create(hdt_name: &str, data: &[String]) -> anyhow::Result<String, anyh
     if !unknown_files.is_empty() {
         for f in unknown_files.clone().iter() {
             if !Path::new(f).exists() {
-                error!("file {:?} could not be found on local machine", f);
+                error!("file {f:?} could not be found on local machine");
             }
         }
-        error!("unable to convert the following files: {:?}", unknown_files);
+        error!("unable to convert the following files: {unknown_files:?}");
         error!("check 'de create --help' for list of supported file types");
         return Err(anyhow::anyhow!(
             "unsupported files detected: {:?}",
@@ -62,7 +62,7 @@ pub fn do_create(hdt_name: &str, data: &[String]) -> anyhow::Result<String, anyh
 
     assert!(Path::exists(Path::new(hdt_name)));
     // Prints location of HDT assuming HDT is generated
-    debug!("HDT file created at {}", hdt_name);
+    debug!("HDT file created at {hdt_name}");
 
     Ok("".to_string())
 }
