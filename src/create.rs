@@ -7,9 +7,9 @@ use crate::rdf2nt::ConvertResult;
 use crate::rdf2nt::OxRdfConvert;
 use crate::rdf2nt::Rdf2Nt;
 use log::*;
-use rdf2hdt::builder::Options;
 use std::fs;
 use std::fs::File;
+use std::io::BufWriter;
 use std::io::{copy, BufReader};
 use std::path::Path;
 use std::sync::Arc;
@@ -53,8 +53,17 @@ pub fn do_create(hdt_name: &str, data: &[String]) -> anyhow::Result<String, anyh
         ));
     }
 
-    match rdf2hdt::builder::build_hdt(vec![combined_rdf_path], hdt_name, Options::default()) {
-        Ok(_) => {}
+    match hdt::Hdt::read_nt(Path::new(&combined_rdf_path)) {
+        Ok(hdt_conv) => {
+            let out_file = File::options()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(hdt_name)?;
+            let mut buf = BufWriter::new(out_file);
+            hdt_conv.write(&mut buf)?
+        }
         Err(e) => return Err(anyhow::anyhow!("Error converting combined RDF to HDT: {e}")),
     };
 
