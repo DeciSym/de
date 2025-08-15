@@ -18,7 +18,7 @@ fn query(c: &mut Criterion) {
     group.sample_size(10);
     group.measurement_time(Duration::from_secs(120));
     group.bench_function("hdt create", |b| {
-        b.iter(|| create::do_create(test_hdt, &[source_rdf.clone()]));
+        b.iter(|| create::do_create(test_hdt, std::slice::from_ref(&source_rdf)));
     });
     group.finish();
 
@@ -34,7 +34,7 @@ fn query(c: &mut Criterion) {
                     .unwrap()
                     .block_on(async {
                         let _ = query::do_query(
-                            &[source_rdf.clone()],
+                            std::slice::from_ref(&source_rdf),
                             &vec!["tests/resources/hero-height.rq".to_string()],
                             &query::DeOutput::CSV,
                         )
@@ -58,7 +58,7 @@ fn query(c: &mut Criterion) {
                     .unwrap()
                     .block_on(async {
                         let _ = query::do_query(
-                            &[source_rdf.clone()],
+                            std::slice::from_ref(&source_rdf),
                             &vec!["tests/resources/hero-height.rq".to_string()],
                             &query::DeOutput::CSV,
                         )

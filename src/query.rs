@@ -8,10 +8,11 @@ use crate::rdf2nt::OxRdfConvert;
 use anyhow::Error;
 use log::*;
 use oxigraph::io::RdfFormat;
-use rdf2hdt::builder::Options;
 use std::fs::File;
 use std::io::BufRead;
 use std::io::BufReader;
+use std::io::BufWriter;
+use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
 use std::{fs, vec};
@@ -260,12 +261,25 @@ async fn handle_files(files: Vec<String>) -> (Vec<String>, Vec<String>, Option<a
 
         debug!("Running RDF2HDT");
 
-        match rdf2hdt::builder::build_hdt(
-            vec![converted_rdf.to_str().unwrap().to_string()],
-            named_tempfile.path().to_str().unwrap(),
-            Options::default(),
-        ) {
-            Ok(_) => {}
+        match hdt::Hdt::read_nt(std::path::Path::new(converted_rdf.to_str().unwrap())) {
+            Ok(h) => {
+                let mut writer = BufWriter::new(&named_tempfile);
+                if let Err(e) = h.write(&mut writer) {
+                    return (
+                        dir_path_vec,
+                        hdt_path_vec,
+                        Some(anyhow::anyhow!("failed writing hdt file: {e}")),
+                    );
+                }
+                if let Err(e) = writer.flush() {
+                    return (
+                        dir_path_vec,
+                        hdt_path_vec,
+                        Some(anyhow::anyhow!("failed writing hdt file: {e}")),
+                    );
+                }
+            }
+
             Err(e) => error!(
                 "error converting plain RDF file {:?} to HDT: {e}",
                 rdf_tempfile.path()
