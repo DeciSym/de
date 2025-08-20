@@ -7,21 +7,23 @@ use crate::create;
 use crate::rdf2nt::OxRdfConvert;
 use anyhow::Error;
 use log::*;
-use oxigraph::io::RdfFormat;
+use oxrdfio::RdfFormat;
+use oxrdfio::RdfSerializer;
+use sparesults::QueryResultsFormat;
+use sparesults::QueryResultsSerializer;
+use spareval::QueryResults;
 use std::fs::File;
 use std::io::BufRead;
 use std::io::BufReader;
 use std::io::BufWriter;
-use std::io::Write;
+use std::io::Read;
 use std::path::Path;
 use std::sync::Arc;
 use std::{fs, vec};
 use tempfile::{tempdir, Builder, NamedTempFile};
 
-use oxigraph::sparql::dataset::HDTDatasetView;
-use oxigraph::sparql::evaluate_hdt_query;
-use oxigraph::sparql::results::QueryResultsFormat;
-use oxigraph::sparql::QueryOptions;
+use hdt::sparql::query;
+use hdt::sparql::HdtDataset;
 
 #[derive(clap::ValueEnum, Clone, Default, Debug, PartialEq)]
 pub enum DeOutput {
@@ -86,96 +88,116 @@ pub async fn do_query(
         ));
     }
 
-    let dataset = HDTDatasetView::new(&hdt_path_vec);
+    let dataset = HdtDataset::new(
+        &hdt_path_vec
+            .iter()
+            .map(|s| s.as_str())
+            .collect::<Vec<&str>>(),
+    )?;
 
     let mut output = String::new();
     for rq in query_files {
-        // let dataset = HDTDatasetView::new(hdt_path_vec.clone());
-        let sparql_query_string = match fs::read_to_string(rq) {
-            Ok(s) => s,
-            Err(e) => {
-                file_cleanup(dir_path_vec.clone()).await;
-                return Err(anyhow::anyhow!("Error reading query file {rq}: {:?}", e));
-            }
-        };
+        let mut f = File::open(rq)?;
+        let mut buffer = String::new();
 
-        let res = match evaluate_hdt_query(
-            dataset.clone(),
-            sparql_query_string.as_str(),
-            QueryOptions::default(),
-            false,
-            [],
-        ) {
-            Ok((r, _explaination)) => r,
+        f.read_to_string(&mut buffer)?;
+        let qr = match query(&buffer, dataset.clone()) {
+            Ok(r) => r,
             Err(e) => {
                 error!("problem executing the hdt query: {e}");
                 file_cleanup(dir_path_vec.clone()).await;
-                return Err(e.into());
+                return Err(anyhow::anyhow!("{e}"));
             }
         };
 
         let results_tmp_file = NamedTempFile::new().unwrap();
-        let results = match res {
-            Ok(qr) => match out {
-                DeOutput::CSV | DeOutput::TSV | DeOutput::JSON | DeOutput::XML => {
-                    let result_format = if *out == DeOutput::CSV {
-                        QueryResultsFormat::Csv
-                    } else if *out == DeOutput::TSV {
-                        QueryResultsFormat::Tsv
-                    } else if *out == DeOutput::JSON {
-                        QueryResultsFormat::Json
-                    } else {
-                        QueryResultsFormat::Xml
-                    };
-                    qr.write(&results_tmp_file, result_format)
+
+        match qr {
+            QueryResults::Solutions(query_solution_iter) => {
+                let result_format = if *out == DeOutput::CSV {
+                    QueryResultsFormat::Csv
+                } else if *out == DeOutput::TSV {
+                    QueryResultsFormat::Tsv
+                } else if *out == DeOutput::JSON {
+                    QueryResultsFormat::Json
+                } else if *out == DeOutput::XML {
+                    QueryResultsFormat::Xml
+                } else {
+                    error!("ASK queries support only CSV, TSV, JSON, or XML");
+                    return Err(anyhow::anyhow!(
+                        "ASK queries support only CSV, TSV, JSON, or XML"
+                    ));
+                };
+                let results_writer = QueryResultsSerializer::from_format(result_format);
+                let mut serializer = results_writer
+                    .serialize_solutions_to_writer(
+                        &results_tmp_file,
+                        query_solution_iter.variables().into(),
+                    )
+                    .unwrap();
+                for s in query_solution_iter {
+                    let s = s?;
+                    serializer.serialize(&s).expect("fixme2");
                 }
-                DeOutput::N3
-                | DeOutput::NQUADS
-                | DeOutput::NTRIPLE
-                | DeOutput::RDFXML
-                | DeOutput::TRIG
-                | DeOutput::TURTLE => {
-                    let result_format = if *out == DeOutput::N3 {
-                        RdfFormat::N3
-                    } else if *out == DeOutput::NQUADS {
-                        RdfFormat::NQuads
-                    } else if *out == DeOutput::NTRIPLE {
-                        RdfFormat::NTriples
-                    } else if *out == DeOutput::RDFXML {
-                        RdfFormat::RdfXml
-                    } else if *out == DeOutput::TRIG {
-                        RdfFormat::TriG
-                    } else {
-                        RdfFormat::Turtle
-                    };
-                    qr.write_graph(&results_tmp_file, result_format)
+            }
+            QueryResults::Boolean(result) => {
+                let result_format = if *out == DeOutput::CSV {
+                    QueryResultsFormat::Csv
+                } else if *out == DeOutput::TSV {
+                    QueryResultsFormat::Tsv
+                } else if *out == DeOutput::JSON {
+                    QueryResultsFormat::Json
+                } else if *out == DeOutput::XML {
+                    QueryResultsFormat::Xml
+                } else {
+                    warn!(
+                        "ASK queries support only CSV, TSV, JSON, or XML. Defaulting to CSV format"
+                    );
+                    QueryResultsFormat::Csv
+                };
+                let results_writer = QueryResultsSerializer::from_format(result_format);
+                results_writer
+                    .serialize_boolean_to_writer(&results_tmp_file, result)
+                    .expect("fixme");
+            }
+            QueryResults::Graph(query_triple_iter) => {
+                let result_format = if *out == DeOutput::N3 {
+                    RdfFormat::N3
+                } else if *out == DeOutput::NQUADS {
+                    RdfFormat::NQuads
+                } else if *out == DeOutput::NTRIPLE {
+                    RdfFormat::NTriples
+                } else if *out == DeOutput::RDFXML {
+                    RdfFormat::RdfXml
+                } else if *out == DeOutput::TRIG {
+                    RdfFormat::TriG
+                } else if *out == DeOutput::TURTLE {
+                    RdfFormat::Turtle
+                } else {
+                    warn!("CONSTRUCT and DESCRIBE queries only support NQ, NT, RDFXML, TRIG, and TTL formats. Defaulting to NTriple format");
+                    RdfFormat::NTriples
+                };
+                let mut serializer =
+                    RdfSerializer::from_format(result_format).for_writer(&results_tmp_file);
+                for triple in query_triple_iter {
+                    let triple = triple?;
+                    serializer.serialize_triple(&triple)?
                 }
-            },
-            Err(e) => {
-                error!("error evaluating the hdt query: {e}");
-                file_cleanup(dir_path_vec.clone()).await;
-                return Err(e.into());
+                serializer.finish()?;
             }
         };
 
-        match results {
-            Ok(s) => {
-                let file = File::open(s);
-                let reader = BufReader::new(file.unwrap());
-                for line in reader.lines() {
-                    let l = line.unwrap();
-                    println!("{l}");
-                    if output.is_empty() {
-                        output = l.clone();
-                    } else {
-                        output = format!("{output}\n{l}");
-                    }
-                }
+        let file = File::open(results_tmp_file);
+        let reader = BufReader::new(file.unwrap());
+        for line in reader.lines() {
+            let l = line.unwrap();
+            println!("{l}");
+            if output.is_empty() {
+                output = l.clone();
+            } else {
+                output = format!("{output}\n{l}");
             }
-            Err(e) => {
-                error!("Error processing query: {e:?}");
-            }
-        };
+        }
     }
 
     // TODO this needs to be run on success and before any return Err()
@@ -261,25 +283,20 @@ async fn handle_files(files: Vec<String>) -> (Vec<String>, Vec<String>, Option<a
 
         debug!("Running RDF2HDT");
 
-        match hdt::Hdt::read_nt(std::path::Path::new(converted_rdf.to_str().unwrap())) {
-            Ok(h) => {
-                let mut writer = BufWriter::new(&named_tempfile);
-                if let Err(e) = h.write(&mut writer) {
-                    return (
-                        dir_path_vec,
-                        hdt_path_vec,
-                        Some(anyhow::anyhow!("failed writing hdt file: {e}")),
-                    );
-                }
-                if let Err(e) = writer.flush() {
-                    return (
-                        dir_path_vec,
-                        hdt_path_vec,
-                        Some(anyhow::anyhow!("failed writing hdt file: {e}")),
-                    );
+        match hdt::Hdt::read_nt(Path::new(converted_rdf.to_str().unwrap())) {
+            Ok(hdt_conv) => {
+                let mut buf = BufWriter::new(&named_tempfile);
+                match hdt_conv.write(&mut buf) {
+                    Ok(_) => {}
+                    Err(e) => {
+                        return (
+                            dir_path_vec,
+                            hdt_path_vec,
+                            Some(anyhow::anyhow!("failed to write converted HDT file: {e}")),
+                        );
+                    }
                 }
             }
-
             Err(e) => error!(
                 "error converting plain RDF file {:?} to HDT: {e}",
                 rdf_tempfile.path()

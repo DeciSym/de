@@ -2,11 +2,11 @@
 // Licensed under the BSD 3-Clause License (see LICENSE file in the project root).
 
 use log::{debug, error, warn};
-use oxigraph::io::RdfFormat::{self, NTriples};
-use oxigraph::io::RdfSerializer;
-use oxigraph::io::{RdfParseError, RdfParser};
-use oxigraph::model::GraphName::DefaultGraph;
-use oxigraph::model::TripleRef;
+use oxrdf::GraphName::DefaultGraph;
+use oxrdf::TripleRef;
+use oxrdfio::RdfFormat::{self, NTriples};
+use oxrdfio::RdfSerializer;
+use oxrdfio::{RdfParseError, RdfParser};
 use std::io::BufReader;
 use std::io::BufWriter;
 use std::io::Write;

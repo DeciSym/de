@@ -27,9 +27,12 @@ clap = { version = "4.5" }
 clap-verbosity-flag = { version = "3.0", default-features = false, features = ["log"] }
 env_logger = { version = "0.11", default-features = false }
 exitcode = "1.1"
-hdt = { git = "https://github.com/GregHanson/hdt/", default-features = false, features = ["sophia"], branch = "w3c-rdf-tests" }
+hdt = { git = "https://github.com/GregHanson/hdt/", default-features = false, features = ["sophia", "sparql"], branch = "w3c-rdf-tests" }
 log = "0.4"
-oxigraph = { git = "https://github.com/DeciSym/oxigraph/", branch = "greghanson/test-spareval", default-features = false }
+oxrdf = "0.2"
+oxrdfio = "0.1"
+sparesults = "0.2"
+spareval = "0.1"
 tempfile = {version = "3.19"}
 tokio = { version = "1.44", default-features = false, features = ["full"] }
 
