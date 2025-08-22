@@ -7,6 +7,7 @@ use hdt::header::Header;
 use log::{debug, error};
 use std::path::Path;
 
+/// display some HDT file statistics
 pub fn show_content(hdt_files: &[String], indent: String) -> anyhow::Result<(), anyhow::Error> {
     debug!("Getting HDT info ...");
 

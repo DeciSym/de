@@ -1,3 +1,8 @@
+[![Latest Version](https://img.shields.io/crates/v/de.svg)](https://crates.io/crates/de)
+[![Lint](https://github.com/DeciSym/de/actions/workflows/format_check.yml/badge.svg)](https://github.com/DeciSym/de/actions/workflows/format_check.yml)
+[![Build](https://github.com/DeciSym/de/actions/workflows/test_build.yml/badge.svg)](https://github.com/DeciSym/de/actions/workflows/test_build.yml)
+[![Documentation](https://docs.rs/de/badge.svg)](https://docs.rs/de/)
+
 # DeciSym Engine
 
 **DeciSym Engine (`de`)** is a command-line tool for creating, querying, and inspecting RDF data in the [HDT (Header, Dictionary, Triples)](http://www.rdfhdt.org/) format. It enables efficient semantic data workflows using SPARQL and supports a variety of RDF and result serialization formats.
@@ -14,15 +19,14 @@
 
 Download the latest release version and install the .deb
 ```bash
-wget url-to-enginefile
-sudo dpkg -I path-to-deb
+cargo install de
 ```
 
 Or clone and build from source (requires Rust and Cargo):
 
 ```bash
-git clone https://github.com/yourusername/decisym-engine.git
-cd decisym-engine
+git clone https://github.com/DeciSym/de.git
+cd de
 cargo build --release
 ```
 

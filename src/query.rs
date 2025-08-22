@@ -28,37 +28,37 @@ use hdt::sparql::HdtDataset;
 #[derive(clap::ValueEnum, Clone, Default, Debug, PartialEq)]
 pub enum DeOutput {
     #[default]
-    /// https://www.w3.org/TR/sparql11-results-csv-tsv/
+    /// <https://www.w3.org/TR/sparql11-results-csv-tsv/>
     CSV,
 
-    /// https://www.w3.org/TR/sparql11-results-csv-tsv/
+    /// <https://www.w3.org/TR/sparql11-results-csv-tsv/>
     TSV,
 
-    /// https://www.w3.org/TR/sparql11-results-json/
+    /// <https://www.w3.org/TR/sparql11-results-json/>
     JSON,
 
-    /// https://www.w3.org/TR/rdf-sparql-XMLres
+    /// <https://www.w3.org/TR/rdf-sparql-XMLres>
     XML,
 
-    /// https://w3c.github.io/N3/spec/
+    /// <https://w3c.github.io/N3/spec/>
     N3,
 
-    /// https://www.w3.org/TR/n-quads/
+    /// <https://www.w3.org/TR/n-quads/>
     NQUADS,
 
-    /// https://www.w3.org/TR/rdf-syntax-grammar/
+    /// <https://www.w3.org/TR/rdf-syntax-grammar/>
     RDFXML,
 
-    /// https://www.w3.org/TR/n-triples/
+    /// <https://www.w3.org/TR/n-triples/>
     NTRIPLE,
 
-    /// https://www.w3.org/TR/trig/
+    /// <https://www.w3.org/TR/trig/>
     TRIG,
 
-    /// https://www.w3.org/TR/turtle/
+    /// <https://www.w3.org/TR/turtle/>
     TURTLE,
 }
-// Function that will be used to handle querying multiple local HDTs
+/// Execute a list of sparql queries over a list of RDF files. Non-HDT data files are converted to temporary HDT files before query execution
 pub async fn do_query(
     data_files: &[String],
     query_files: &Vec<String>,
@@ -66,7 +66,7 @@ pub async fn do_query(
 ) -> anyhow::Result<String, anyhow::Error> {
     debug!("Executing querying ...");
 
-    // fail fast on input validation before files start getting mounted
+    // fail fast on input validation
     for rq in query_files.clone() {
         let path = Path::new(&rq);
         if !path.exists() {
@@ -80,12 +80,9 @@ pub async fn do_query(
 
     let (dir_path_vec, hdt_path_vec, e) = handle_files(data_files.to_owned()).await;
 
-    if e.is_some() {
+    if let Some(e) = e {
         file_cleanup(dir_path_vec.clone()).await;
-        return Err(anyhow::anyhow!(
-            "Error reading data files: {:?}",
-            e.unwrap()
-        ));
+        return Err(anyhow::anyhow!("Error reading data files: {e}",));
     }
 
     let dataset = HdtDataset::new(
@@ -101,7 +98,7 @@ pub async fn do_query(
         let mut buffer = String::new();
 
         f.read_to_string(&mut buffer)?;
-        let qr = match query(&buffer, dataset.clone()) {
+        let qr = match query(&buffer, dataset.clone(), None) {
             Ok(r) => r,
             Err(e) => {
                 error!("problem executing the hdt query: {e}");
@@ -110,7 +107,7 @@ pub async fn do_query(
             }
         };
 
-        let results_tmp_file = NamedTempFile::new().unwrap();
+        let mut results_tmp_file = NamedTempFile::new().unwrap();
 
         match qr {
             QueryResults::Solutions(query_solution_iter) => {
@@ -131,14 +128,20 @@ pub async fn do_query(
                 let results_writer = QueryResultsSerializer::from_format(result_format);
                 let mut serializer = results_writer
                     .serialize_solutions_to_writer(
-                        &results_tmp_file,
+                        &mut results_tmp_file,
                         query_solution_iter.variables().into(),
                     )
                     .unwrap();
                 for s in query_solution_iter {
                     let s = s?;
-                    serializer.serialize(&s).expect("fixme2");
+                    if let Err(e) = serializer.serialize(&s) {
+                        error!("error serializing query solutions to desired output format: {e}");
+                        return Err(anyhow::anyhow!(
+                            "error serializing query solutions to desired output format: {e}"
+                        ));
+                    }
                 }
+                serializer.finish()?;
             }
             QueryResults::Boolean(result) => {
                 let result_format = if *out == DeOutput::CSV {
@@ -156,9 +159,14 @@ pub async fn do_query(
                     QueryResultsFormat::Csv
                 };
                 let results_writer = QueryResultsSerializer::from_format(result_format);
-                results_writer
-                    .serialize_boolean_to_writer(&results_tmp_file, result)
-                    .expect("fixme");
+                if let Err(e) =
+                    results_writer.serialize_boolean_to_writer(&mut results_tmp_file, result)
+                {
+                    error!("error serializing query solutions to desired output format: {e}");
+                    return Err(anyhow::anyhow!(
+                        "error serializing query solutions to desired output format: {e}"
+                    ));
+                }
             }
             QueryResults::Graph(query_triple_iter) => {
                 let result_format = if *out == DeOutput::N3 {
@@ -178,7 +186,7 @@ pub async fn do_query(
                     RdfFormat::NTriples
                 };
                 let mut serializer =
-                    RdfSerializer::from_format(result_format).for_writer(&results_tmp_file);
+                    RdfSerializer::from_format(result_format).for_writer(&mut results_tmp_file);
                 for triple in query_triple_iter {
                     let triple = triple?;
                     serializer.serialize_triple(&triple)?
@@ -190,7 +198,7 @@ pub async fn do_query(
         let file = File::open(results_tmp_file);
         let reader = BufReader::new(file.unwrap());
         for line in reader.lines() {
-            let l = line.unwrap();
+            let l = line?;
             println!("{l}");
             if output.is_empty() {
                 output = l.clone();

@@ -15,26 +15,13 @@ use std::io::Write;
 use std::io::{copy, BufReader};
 use std::path::Path;
 use std::sync::Arc;
-use tempfile::{tempdir, Builder, NamedTempFile};
+use tempfile::{Builder, NamedTempFile};
 
+/// Creates a HDT file from
 pub fn do_create(hdt_name: &str, data: &[String]) -> anyhow::Result<String, anyhow::Error> {
     debug!("Creating HDT...");
-    // Creating a tempdir to be passed to panoplia as the directory.
-    let tmp_dir: tempfile::TempDir = match tempdir() {
-        Ok(d) => d,
-        Err(e) => {
-            return Err(anyhow::anyhow!(
-                "Error creating temporary working dir: {:?}",
-                e
-            ))
-        }
-    };
-    // creating a tempfile hold all the contents of the rdf inputs files
-    let mut tmp_file = match Builder::new()
-        .suffix(".nt")
-        .append(true)
-        .tempfile_in(tmp_dir.path())
-    {
+    // creating a tempfile to hold all the contents of the rdf input files
+    let mut tmp_file = match Builder::new().suffix(".nt").append(true).tempfile() {
         Ok(f) => f,
         Err(e) => return Err(anyhow::anyhow!("Error creating temporary file: {:?}", e)),
     };
@@ -78,12 +65,13 @@ pub fn do_create(hdt_name: &str, data: &[String]) -> anyhow::Result<String, anyh
     Ok("".to_string())
 }
 
+/// Converts a list of RDF files to NTriple RDF
+/// returns the name of the file containing combined NTriple RDF and the names of any unhandled files
 pub fn files_to_rdf(
     data: &[String],
     out_file: &mut NamedTempFile,
     converter: Arc<dyn Rdf2Nt>,
 ) -> anyhow::Result<(String, Vec<String>), anyhow::Error> {
-    // let mut converted_files = 0;
     let mut nt_files = vec![];
     let mut files_to_convert = vec![];
     let mut unrecognized_files = vec![];

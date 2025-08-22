@@ -12,6 +12,8 @@ use std::io::BufWriter;
 use std::io::Write;
 use std::path::Path;
 
+/// Trait for different RDF libraries to implement for converting a list of files into NTriple RDF
+/// returns stats on converted data via ConvertResult
 pub trait Rdf2Nt {
     fn convert_to_nt(
         &self,
@@ -21,11 +23,13 @@ pub trait Rdf2Nt {
 }
 
 #[derive(Debug, Default)]
+/// Object for returning stats of converted RDF files
 pub struct ConvertResult {
     pub converted: i32,
     pub unhandled: Vec<String>,
 }
 
+/// Rdf2Nt implementation using oxrdf and oxrdfio crates
 pub struct OxRdfConvert {}
 
 impl Rdf2Nt for OxRdfConvert {
