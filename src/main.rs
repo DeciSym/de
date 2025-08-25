@@ -1,11 +1,10 @@
 // Copyright (c) 2025, Decisym, LLC
 // Licensed under the BSD 3-Clause License (see LICENSE file in the project root).
 
-// This code handles the CLI
 use clap::{Parser, Subcommand};
 use de::*;
 use log::error;
-// Building clap structs using derive
+
 #[derive(Parser)]
 #[command(author, version, about="CLI tool for creating and querying HDT files", long_about = None)]
 #[command(propagate_version = true)]
@@ -62,7 +61,10 @@ async fn main() {
             sparql,
             output,
         } => query::do_query(data, sparql, output).await,
-        Commands::Create { output_name, data } => create::do_create(output_name, data),
+        Commands::Create { output_name, data } => match create::do_create(output_name, data) {
+            Ok(_) => Ok("".to_string()),
+            Err(e) => Err(e),
+        },
         Commands::View { data } => match view::view_hdt(data) {
             Ok(v) => Ok(v),
             Err(e) => Err(e),

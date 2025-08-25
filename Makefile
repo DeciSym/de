@@ -4,7 +4,6 @@ TAG ?= latest
 VERSION ?= 0.0.0-test
 
 init:
-	mkdir -p deps
 	scripts/download-sample-bench.sh
 	
 lint:
@@ -29,8 +28,11 @@ clean:
 
 docker: release
 	docker build -f scripts/Dockerfile -t ${HUB}/de:${TAG} \
-		--build-arg DE=${VERSION} \
+		--build-arg VERSION=${VERSION} \
 		.
+	docker run --rm -v ${PWD}/tests/resources:/data \
+	    ${HUB}/de:${TAG} \
+	    query --data /data/pineapple.ttl --sparql /data/query-fruit-color.rq
 
 docker.run: docker
 	docker run -it --rm -v ${PWD}/tests:/data ${HUB}/de:${TAG}

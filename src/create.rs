@@ -1,8 +1,6 @@
 // Copyright (c) 2025, Decisym, LLC
 // Licensed under the BSD 3-Clause License (see LICENSE file in the project root).
 
-// This file handles the create subcommand
-
 use crate::rdf2nt::ConvertResult;
 use crate::rdf2nt::OxRdfConvert;
 use crate::rdf2nt::Rdf2Nt;
@@ -17,8 +15,8 @@ use std::path::Path;
 use std::sync::Arc;
 use tempfile::{Builder, NamedTempFile};
 
-/// Creates a HDT file from
-pub fn do_create(hdt_name: &str, data: &[String]) -> anyhow::Result<String, anyhow::Error> {
+/// Creates a HDT file from RDF source
+pub fn do_create(hdt_name: &str, data: &[String]) -> anyhow::Result<hdt::Hdt, anyhow::Error> {
     debug!("Creating HDT...");
     // creating a tempfile to hold all the contents of the rdf input files
     let mut tmp_file = match Builder::new().suffix(".nt").append(true).tempfile() {
@@ -42,7 +40,7 @@ pub fn do_create(hdt_name: &str, data: &[String]) -> anyhow::Result<String, anyh
         ));
     }
 
-    match hdt::Hdt::read_nt(std::path::Path::new(&combined_rdf_path)) {
+    let new_hdt = match hdt::Hdt::read_nt(std::path::Path::new(&combined_rdf_path)) {
         Ok(h) => {
             let out_file = OpenOptions::new()
                 .create(true)
@@ -52,17 +50,22 @@ pub fn do_create(hdt_name: &str, data: &[String]) -> anyhow::Result<String, anyh
             let mut writer = BufWriter::new(out_file);
             h.write(&mut writer)?;
             writer.flush()?;
+            h
         }
         Err(e) => return Err(anyhow::anyhow!("Error converting combined RDF to HDT: {e}")),
     };
 
-    fs::remove_file(tmp_file.path()).expect("didnt remove tempfile containing all RDF Data");
+    let _ = fs::remove_file(tmp_file.path());
 
-    assert!(Path::exists(Path::new(hdt_name)));
+    if !Path::exists(Path::new(hdt_name)) {
+        return Err(anyhow::anyhow!(
+            "failed to create HDT in requested location {hdt_name}"
+        ));
+    }
     // Prints location of HDT assuming HDT is generated
     debug!("HDT file created at {hdt_name}");
 
-    Ok("".to_string())
+    Ok(new_hdt)
 }
 
 /// Converts a list of RDF files to NTriple RDF

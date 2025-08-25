@@ -1,8 +1,6 @@
 // Copyright (c) 2025, Decisym, LLC
 // Licensed under the BSD 3-Clause License (see LICENSE file in the project root).
 
-// This file handles the query subcommand
-
 use crate::create;
 use crate::rdf2nt::OxRdfConvert;
 use anyhow::Error;
@@ -126,12 +124,10 @@ pub async fn do_query(
                     ));
                 };
                 let results_writer = QueryResultsSerializer::from_format(result_format);
-                let mut serializer = results_writer
-                    .serialize_solutions_to_writer(
-                        &mut results_tmp_file,
-                        query_solution_iter.variables().into(),
-                    )
-                    .unwrap();
+                let mut serializer = results_writer.serialize_solutions_to_writer(
+                    &mut results_tmp_file,
+                    query_solution_iter.variables().into(),
+                )?;
                 for s in query_solution_iter {
                     let s = s?;
                     if let Err(e) = serializer.serialize(&s) {
@@ -195,8 +191,8 @@ pub async fn do_query(
             }
         };
 
-        let file = File::open(results_tmp_file);
-        let reader = BufReader::new(file.unwrap());
+        let file = File::open(results_tmp_file)?;
+        let reader = BufReader::new(file);
         for line in reader.lines() {
             let l = line?;
             println!("{l}");
@@ -323,7 +319,6 @@ async fn handle_files(files: Vec<String>) -> (Vec<String>, Vec<String>, Option<a
 
 // performs directory removal for a list of directories
 pub async fn file_cleanup(dirs: Vec<String>) {
-    // TODO need to either change everything to pass a vec of strings or change other functions to pass a vec
     debug!("Cleaning up environment");
     for dir in dirs.iter() {
         if let Err(e) = fs::remove_dir_all(dir) {

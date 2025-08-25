@@ -119,6 +119,67 @@ http://example.org/Banana"#
     }
 
     #[tokio::test]
+    async fn test_query_results_format() -> anyhow::Result<()> {
+        let tmp_dir: tempfile::TempDir = match tempdir() {
+            Ok(d) => d,
+            Err(e) => {
+                return Err(anyhow::anyhow!(
+                    "Error creating temporary working dir: {:?}",
+                    e
+                ))
+            }
+        };
+        let pineapple_hdt = format!("{}/pineapple.hdt", tmp_dir.as_ref().display());
+        assert!(create::do_create(
+            &pineapple_hdt.clone(),
+            &["tests/resources/pineapple.ttl".to_string()],
+        )
+        .is_ok());
+
+        let data_files = vec![pineapple_hdt];
+        let query_files = vec!["tests/resources/query-fruit-color.rq".to_string()];
+        let res = query::do_query(&data_files, &query_files, &query::DeOutput::CSV).await;
+        assert!(res.is_ok());
+
+        assert_eq!(
+            res.unwrap().replace("\r", ""),
+            r#"fruit,color
+http://example.org/Pineapple,yellow"#
+        );
+
+        let res = query::do_query(&data_files, &query_files, &query::DeOutput::TSV).await;
+        assert!(res.is_ok());
+
+        assert_eq!(
+            res.unwrap().replace("\r", ""),
+            "?fruit\t?color\n<http://example.org/Pineapple>\t\"yellow\""
+        );
+
+        let res = query::do_query(&data_files, &query_files, &query::DeOutput::JSON).await;
+        assert!(res.is_ok());
+
+        assert_eq!(
+            res.unwrap().replace("\r", ""),
+            r#"{"head":{"vars":["fruit","color"]},"results":{"bindings":[{"fruit":{"type":"uri","value":"http://example.org/Pineapple"},"color":{"type":"literal","value":"yellow"}}]}}"#
+        );
+
+        let res = query::do_query(&data_files, &query_files, &query::DeOutput::XML).await;
+        assert!(res.is_ok());
+
+        assert_eq!(
+            res.unwrap().replace("\r", ""),
+            r#"<?xml version="1.0"?><sparql xmlns="http://www.w3.org/2005/sparql-results#"><head><variable name="fruit"/><variable name="color"/></head><results><result><binding name="fruit"><uri>http://example.org/Pineapple</uri></binding><binding name="color"><literal>yellow</literal></binding></result></results></sparql>"#
+        );
+
+        // ASK queries only support CSV, TSV, JSON, or XML
+        let res = query::do_query(&data_files, &query_files, &query::DeOutput::NTRIPLE).await;
+        assert!(res.is_err());
+        tmp_dir.close()?;
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn test_combine_and_query_two_rdfs() -> anyhow::Result<()> {
         let tmp_dir: tempfile::TempDir = match tempdir() {
             Ok(d) => d,

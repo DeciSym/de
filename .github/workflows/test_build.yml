@@ -1,4 +1,4 @@
-name: Building the Decisym Engine and testing subcommands
+name: Build and Test
 
 on: 
   schedule:
@@ -39,11 +39,6 @@ jobs:
     - uses: Swatinem/rust-cache@v2
       with:
         shared-key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-    - name: Build DE
-      run: cargo build && sudo cp target/debug/de /usr/local/bin 
-
-    - name: Download dependency binaries
-      run: make init
 
     - name: Run Rust integration tests
       run: make test

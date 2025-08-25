@@ -1,5 +1,4 @@
 *.hdt.index.v1-1
-/deps
 /target
 /tests/resources/superhero-ttl.zip
 /tests/resources/superhero.ttl

@@ -1,11 +1,12 @@
 FROM ubuntu:jammy
 
-ARG DE
+ARG VERSION
 
 WORKDIR /engine
 
-RUN apt update
+ADD target/debian/de_${VERSION}_amd64.deb /engine
 
-ADD target/debian/de_${DE}_amd64.deb /engine
+RUN apt install /engine/de_${VERSION}_amd64.deb -y
+RUN rm -f apt install /engine/de_${VERSION}_amd64.deb
 
-RUN apt install /engine/de_${DE}_amd64.deb -y
+ENTRYPOINT ["de"]

@@ -12,3 +12,4 @@ fi
 curl -L  https://github.com/wallscope/superhero-rdf/raw/refs/heads/master/data/superhero-ttl.zip -o $SCRIPT_DIR/../tests/resources/superhero-ttl.zip
 sudo apt-get install unzip -y
 unzip -o $SCRIPT_DIR/../tests/resources/superhero-ttl.zip -d $SCRIPT_DIR/../tests/resources/
+rm -f $SCRIPT_DIR/../tests/resources/superhero-ttl.zip

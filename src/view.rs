@@ -20,7 +20,12 @@ pub fn show_content(hdt_files: &[String], indent: String) -> anyhow::Result<(), 
                 path
             ));
         }
-        let file = std::fs::File::open(path).expect("error opening file");
+        let file = match std::fs::File::open(path) {
+            Ok(f) => f,
+            Err(e) => {
+                return Err(anyhow!("error opening HDT file {path:?}: {e}"));
+            }
+        };
         let mut reader = std::io::BufReader::new(file);
         // seek past the start of the file, nothing in here worth displaying
         match ControlInfo::read(&mut reader) {

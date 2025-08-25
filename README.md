@@ -17,12 +17,17 @@
 
 ## Installation
 
-Download the latest release version and install the .deb
+1. Download the latest [release](https://github.com/DeciSym/de/releases) version and install the .deb
 ```bash
-cargo install de
+apt install de_${VERSION}_amd64.deb -y
 ```
 
-Or clone and build from source (requires Rust and Cargo):
+2. Run with Docker:
+```bash
+docker run --rm decisym/de:latest --help
+```
+
+3. Build from source (requires Rust and Cargo):
 
 ```bash
 git clone https://github.com/DeciSym/de.git
@@ -30,11 +35,12 @@ cd de
 cargo build --release
 ```
 
-## Usage Overview
-
+4. **COMING SOON** Install the CLI with `cargo install`
 ```bash
-de [OPTIONS] <COMMAND>
+cargo install de
 ```
+
+## Usage Overview
 
 Available commands:
 
@@ -44,11 +50,10 @@ Available commands:
 - `check` – Check for required CLI dependencies
 - `help` – Show command-specific help
 
-Use `de <COMMAND> --help` for detailed usage.
 
-## Commands
+### Commands
 
-### `create`
+#### `create`
 
 Convert RDF data into a `.hdt` file.
 
@@ -56,7 +61,7 @@ Convert RDF data into a `.hdt` file.
 de create --output-name data.hdt --data example.ttl
 ```
 
-#### Options:
+##### Options:
 
 - `-o, --output-name <OUTPUT_NAME>`: Name of the output HDT file (should end in `.hdt`) **[required]**
 - `-d, --data <DATA>`: One or more RDF source files (e.g., `.ttl`, `.nt`) to include in the HDT
@@ -64,31 +69,9 @@ de create --output-name data.hdt --data example.ttl
 - `-q, --quiet`: Suppress output
 - `-h, --help`: Show help
 
-#### Example execution 
-
-```bash
-de create --output-name apple.hdt --data apple.ttl
-```
-ex apple.ttl:
-```
-@prefix ex: <http://example.org/>.
-@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>.
-@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#>.
-
-ex:Apple rdf:type ex:Fruit;
-  rdfs:label "Apple";
-  ex:variety "Red Delicious";
-  ex:color "Red";
-  ex:weight "150 grams";
-  ex:origin "United States";
-  ex:isOrganic true.
-
-ex:Fruit rdf:type rdfs:Class;
-  rdfs:label "Fruit".
-```
 ---
 
-### `query`
+#### `query`
 
 Execute a SPARQL query over RDF and/or HDT files.
 
@@ -96,7 +79,7 @@ Execute a SPARQL query over RDF and/or HDT files.
 de query --data data.hdt --sparql query.rq --output json
 ```
 
-#### Options:
+##### Options:
 
 - `-d, --data <DATA>`: One or more RDF or HDT files to query
 - `-s, --sparql <SPARQL>`: Path to SPARQL query file (`.rq`) **[required]**
@@ -117,18 +100,11 @@ de query --data data.hdt --sparql query.rq --output json
 - `-q, --quiet`: Suppress output
 - `-h, --help`: Show help
 
-#### Example execution:
+##### Example execution:
 
 ```bash
 de create --output-name apple.hdt --data apple.ttl
-```
-
-```bash
 de query --data apple.hdt --sparql query-color.rq
-```
-
-output:
-```
 fruit,color
 http://example.org/Apple,Red
 ```
@@ -165,7 +141,7 @@ ORDER BY DESC(?fruit)
 ```
 ---
 
-### `view`
+#### `view`
 
 Print metadata and statistics about an HDT file.
 
@@ -173,7 +149,7 @@ Print metadata and statistics about an HDT file.
 de view --data data.hdt
 ```
 
-#### Options:
+##### Options:
 
 - `-d, --data <DATA>`: One or more HDT files
 - `-v, --verbose`: Increase verbosity
@@ -182,13 +158,6 @@ de view --data data.hdt
 
 ---
 
-## Logging
+## License
 
-Control verbosity with:
-
-- `-v`, `--verbose`: Use multiple times (`-vv`, `-vvv`) for more detail
-- `-q`, `--quiet`: Suppress non-critical output
-
----
-
-
+This project is licensed under the BSD 3-Clause License - see the [LICENSE](LICENSE) file for details.
