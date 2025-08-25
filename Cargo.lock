@@ -669,7 +669,7 @@ checksum = "9229cfe53dfd69f0609a49f65461bd93001ea1ef889cd5529dd176593f5338a1"
 [[package]]
 name = "hdt"
 version = "0.4.0-alpha"
-source = "git+https://github.com/GregHanson/hdt/?branch=w3c-rdf-tests#5f625b0598a44c01ce138dd4e5875321c4635ddf"
+source = "git+https://github.com/GregHanson/hdt/?branch=stable-sparql#5f625b0598a44c01ce138dd4e5875321c4635ddf"
 dependencies = [
  "bytesize",
  "crc",

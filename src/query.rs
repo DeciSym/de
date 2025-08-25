@@ -21,7 +21,6 @@ use std::{fs, vec};
 use tempfile::{tempdir, Builder, NamedTempFile};
 
 use hdt::sparql::query;
-use hdt::sparql::HdtDataset;
 
 #[derive(clap::ValueEnum, Clone, Default, Debug, PartialEq)]
 pub enum DeOutput {
@@ -83,7 +82,7 @@ pub async fn do_query(
         return Err(anyhow::anyhow!("Error reading data files: {e}",));
     }
 
-    let dataset = HdtDataset::new(
+    let dataset = hdt::sparql::HdtDataset::new(
         &hdt_path_vec
             .iter()
             .map(|s| s.as_str())
