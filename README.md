@@ -47,7 +47,6 @@ Available commands:
 - `create` – Convert RDF data into an HDT file
 - `query` – Execute SPARQL queries on HDT/RDF data
 - `view` – View metadata and statistics for an HDT file
-- `check` – Check for required CLI dependencies
 - `help` – Show command-specific help
 
 

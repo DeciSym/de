@@ -44,20 +44,7 @@ pub fn show_content(hdt_files: &[String], indent: String) -> anyhow::Result<(), 
         };
         println!("{indent}{f}:");
         for t in h.body {
-            let o = format!("{:?}", t.object);
-            let s: Vec<&str> = o.split("\"").collect();
-
-            match t.predicate.as_str() {
-                "http://rdfs.org/ns/void#distinctObjects"
-                | "http://rdfs.org/ns/void#distinctSubjects"
-                | "http://rdfs.org/ns/void#properties"
-                | "http://rdfs.org/ns/void#triples"
-                | "http://purl.org/HDT/hdt#hdtSize"
-                | "http://purl.org/HDT/hdt#originalSize" => {
-                    println!("{indent}\t{}: {}", t.predicate, s[1])
-                }
-                _ => {}
-            }
+            println!("{indent}\t{}: {:?}", t.predicate, t.object)
         }
     }
 
