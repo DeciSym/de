@@ -5,12 +5,8 @@ use crate::rdf2nt::ConvertResult;
 use crate::rdf2nt::OxRdfConvert;
 use crate::rdf2nt::Rdf2Nt;
 use log::*;
-use std::fs;
-use std::fs::File;
-use std::fs::OpenOptions;
-use std::io::BufWriter;
-use std::io::Write;
-use std::io::{copy, BufReader};
+use std::fs::{self, File, OpenOptions};
+use std::io::{copy, BufReader, BufWriter, Write};
 use std::path::Path;
 use std::sync::Arc;
 use tempfile::{Builder, NamedTempFile};
@@ -19,15 +15,16 @@ use tempfile::{Builder, NamedTempFile};
 pub fn do_create(hdt_name: &str, data: &[String]) -> anyhow::Result<hdt::Hdt, anyhow::Error> {
     debug!("Creating HDT...");
     // creating a tempfile to hold all the contents of the rdf input files
-    let mut tmp_file = match Builder::new().suffix(".nt").append(true).tempfile() {
-        Ok(f) => f,
-        Err(e) => return Err(anyhow::anyhow!("Error creating temporary file: {:?}", e)),
-    };
+    let mut tmp_file = Builder::new()
+        .suffix(".nt")
+        .append(true)
+        .tempfile()
+        .map_err(|e| anyhow::anyhow!("Error creating temporary file: {:?}", e))?;
 
     let (combined_rdf_path, unknown_files) =
         files_to_rdf(data, &mut tmp_file, Arc::new(OxRdfConvert {}))?;
     if !unknown_files.is_empty() {
-        for f in unknown_files.clone().iter() {
+        for f in &unknown_files {
             if !Path::new(f).exists() {
                 error!("file {f:?} could not be found on local machine");
             }
@@ -40,24 +37,21 @@ pub fn do_create(hdt_name: &str, data: &[String]) -> anyhow::Result<hdt::Hdt, an
         ));
     }
 
-    let new_hdt = match hdt::Hdt::read_nt(std::path::Path::new(&combined_rdf_path)) {
-        Ok(h) => {
-            let out_file = OpenOptions::new()
-                .create(true)
-                .write(true)
-                .truncate(true)
-                .open(hdt_name)?;
-            let mut writer = BufWriter::new(out_file);
-            h.write(&mut writer)?;
-            writer.flush()?;
-            h
-        }
-        Err(e) => return Err(anyhow::anyhow!("Error converting combined RDF to HDT: {e}")),
-    };
+    let new_hdt = hdt::Hdt::read_nt(Path::new(&combined_rdf_path))
+        .map_err(|e| anyhow::anyhow!("Error converting combined RDF to HDT: {e}"))?;
+
+    let out_file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(hdt_name)?;
+    let mut writer = BufWriter::new(out_file);
+    new_hdt.write(&mut writer)?;
+    writer.flush()?;
 
     let _ = fs::remove_file(tmp_file.path());
 
-    if !Path::exists(Path::new(hdt_name)) {
+    if !Path::new(hdt_name).exists() {
         return Err(anyhow::anyhow!(
             "failed to create HDT in requested location {hdt_name}"
         ));
@@ -96,13 +90,11 @@ pub fn files_to_rdf(
     }
 
     let conv_res = if !files_to_convert.is_empty() {
-        match converter.convert_to_nt(files_to_convert, out_file.as_file()) {
-            Ok(r) => {
-                unrecognized_files.extend(r.unhandled.clone());
-                r
-            }
-            Err(e) => return Err(anyhow::anyhow!("Error converting file(s) to NT: {e}")),
-        }
+        let r = converter
+            .convert_to_nt(files_to_convert, out_file.as_file())
+            .map_err(|e| anyhow::anyhow!("Error converting file(s) to NT: {e}"))?;
+        unrecognized_files.extend(r.unhandled.clone());
+        r
     } else {
         ConvertResult::default()
     };
@@ -111,29 +103,23 @@ pub fn files_to_rdf(
     // inefficient when creating an HDT file from one large file
     if nt_files.len() > 1 || conv_res.converted != 0 {
         for nt_file in nt_files {
-            let source = match File::open(&nt_file) {
-                Ok(f) => f,
-                Err(e) => return Err(anyhow::anyhow!("Error opening file {:?}: {:?}", nt_file, e)),
-            };
+            let source = File::open(&nt_file)
+                .map_err(|e| anyhow::anyhow!("Error opening file {:?}: {:?}", nt_file, e))?;
             let mut source_reader = BufReader::new(source);
 
-            match copy(&mut source_reader, out_file) {
-                Ok(g) => g,
-                Err(e) => {
-                    return Err(anyhow::anyhow!(
-                        "Error copying file {:?}: {:?} ",
-                        &nt_file,
-                        e
-                    ))
-                }
-            };
+            copy(&mut source_reader, out_file)
+                .map_err(|e| anyhow::anyhow!("Error copying file {:?}: {:?}", &nt_file, e))?;
         }
     } else if nt_files.len() == 1 && conv_res.converted == 0 {
         return Ok((nt_files[0].clone(), unrecognized_files));
     }
 
     Ok((
-        out_file.path().to_str().unwrap().to_string(),
+        out_file
+            .path()
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("Invalid UTF-8 in temp file path"))?
+            .to_string(),
         unrecognized_files,
     ))
 }

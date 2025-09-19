@@ -4,6 +4,7 @@
 use clap::{Parser, Subcommand};
 use de::*;
 use log::error;
+use std::io::{stdout, BufWriter};
 
 #[derive(Parser)]
 #[command(author, version, about="CLI tool for creating and querying HDT files", long_about = None)]
@@ -53,19 +54,19 @@ async fn main() {
     env_logger::Builder::new()
         .filter_level(cli.verbose.log_level_filter())
         .init();
-
+    let mut stdout_writer = BufWriter::new(stdout());
     // Matching CLI input to commands
     let result = match &cli.command {
         Commands::Query {
             data,
             sparql,
             output,
-        } => query::do_query(data, sparql, output).await,
+        } => query::do_query(data, sparql, output, &mut stdout_writer).await,
         Commands::Create { output_name, data } => match create::do_create(output_name, data) {
-            Ok(_) => Ok("".to_string()),
+            Ok(_) => Ok(()),
             Err(e) => Err(e),
         },
-        Commands::View { data } => match view::view_hdt(data) {
+        Commands::View { data } => match view::view_hdt(data, &mut stdout_writer) {
             Ok(v) => Ok(v),
             Err(e) => Err(e),
         },

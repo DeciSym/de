@@ -10,14 +10,11 @@ use oxrdfio::RdfSerializer;
 use sparesults::QueryResultsFormat;
 use sparesults::QueryResultsSerializer;
 use spareval::QueryResults;
+use std::fs;
 use std::fs::File;
-use std::io::BufRead;
-use std::io::BufReader;
-use std::io::BufWriter;
-use std::io::Read;
+use std::io::{BufWriter, Read, Write};
 use std::path::Path;
 use std::sync::Arc;
-use std::{fs, vec};
 use tempfile::{tempdir, Builder, NamedTempFile};
 
 use hdt::sparql::query;
@@ -56,15 +53,16 @@ pub enum DeOutput {
     TURTLE,
 }
 /// Execute a list of sparql queries over a list of RDF files. Non-HDT data files are converted to temporary HDT files before query execution
-pub async fn do_query(
+pub async fn do_query<W: Write>(
     data_files: &[String],
-    query_files: &Vec<String>,
+    query_files: &[String],
     out: &DeOutput,
-) -> anyhow::Result<String, anyhow::Error> {
+    writer: &mut BufWriter<W>,
+) -> anyhow::Result<()> {
     debug!("Executing querying ...");
 
     // fail fast on input validation
-    for rq in query_files.clone() {
+    for rq in query_files {
         let path = Path::new(&rq);
         if !path.exists() {
             error!("query file {rq:?} could not be found on local machine");
@@ -89,7 +87,6 @@ pub async fn do_query(
             .collect::<Vec<&str>>(),
     )?;
 
-    let mut output = String::new();
     for rq in query_files {
         let mut f = File::open(rq)?;
         let mut buffer = String::new();
@@ -104,84 +101,74 @@ pub async fn do_query(
             }
         };
 
-        let mut results_tmp_file = NamedTempFile::new().unwrap();
-
         match qr {
             QueryResults::Solutions(query_solution_iter) => {
-                let result_format = if *out == DeOutput::CSV {
-                    QueryResultsFormat::Csv
-                } else if *out == DeOutput::TSV {
-                    QueryResultsFormat::Tsv
-                } else if *out == DeOutput::JSON {
-                    QueryResultsFormat::Json
-                } else if *out == DeOutput::XML {
-                    QueryResultsFormat::Xml
-                } else {
-                    error!("ASK queries support only CSV, TSV, JSON, or XML");
-                    return Err(anyhow::anyhow!(
-                        "ASK queries support only CSV, TSV, JSON, or XML"
-                    ));
+                let result_format = match out {
+                    DeOutput::CSV => QueryResultsFormat::Csv,
+                    DeOutput::TSV => QueryResultsFormat::Tsv,
+                    DeOutput::JSON => QueryResultsFormat::Json,
+                    DeOutput::XML => QueryResultsFormat::Xml,
+                    _ => {
+                        error!("ASK queries support only CSV, TSV, JSON, or XML");
+                        return Err(anyhow::anyhow!(
+                            "ASK queries support only CSV, TSV, JSON, or XML"
+                        ));
+                    }
                 };
                 let results_writer = QueryResultsSerializer::from_format(result_format);
                 let mut serializer = results_writer.serialize_solutions_to_writer(
-                    &mut results_tmp_file,
+                    &mut *writer,
                     query_solution_iter.variables().into(),
                 )?;
                 for s in query_solution_iter {
                     let s = s?;
-                    if let Err(e) = serializer.serialize(&s) {
+                    serializer.serialize(&s).map_err(|e| {
                         error!("error serializing query solutions to desired output format: {e}");
-                        return Err(anyhow::anyhow!(
+                        anyhow::anyhow!(
                             "error serializing query solutions to desired output format: {e}"
-                        ));
-                    }
+                        )
+                    })?;
                 }
                 serializer.finish()?;
             }
             QueryResults::Boolean(result) => {
-                let result_format = if *out == DeOutput::CSV {
-                    QueryResultsFormat::Csv
-                } else if *out == DeOutput::TSV {
-                    QueryResultsFormat::Tsv
-                } else if *out == DeOutput::JSON {
-                    QueryResultsFormat::Json
-                } else if *out == DeOutput::XML {
-                    QueryResultsFormat::Xml
-                } else {
-                    warn!(
-                        "ASK queries support only CSV, TSV, JSON, or XML. Defaulting to CSV format"
-                    );
-                    QueryResultsFormat::Csv
+                let result_format = match out {
+                    DeOutput::CSV => QueryResultsFormat::Csv,
+                    DeOutput::TSV => QueryResultsFormat::Tsv,
+                    DeOutput::JSON => QueryResultsFormat::Json,
+                    DeOutput::XML => QueryResultsFormat::Xml,
+                    _ => {
+                        warn!(
+                            "ASK queries support only CSV, TSV, JSON, or XML. Defaulting to CSV format"
+                        );
+                        QueryResultsFormat::Csv
+                    }
                 };
                 let results_writer = QueryResultsSerializer::from_format(result_format);
-                if let Err(e) =
-                    results_writer.serialize_boolean_to_writer(&mut results_tmp_file, result)
-                {
-                    error!("error serializing query solutions to desired output format: {e}");
-                    return Err(anyhow::anyhow!(
-                        "error serializing query solutions to desired output format: {e}"
-                    ));
-                }
+                results_writer
+                    .serialize_boolean_to_writer(&mut *writer, result)
+                    .map_err(|e| {
+                        error!("error serializing query solutions to desired output format: {e}");
+                        anyhow::anyhow!(
+                            "error serializing query solutions to desired output format: {e}"
+                        )
+                    })?;
             }
             QueryResults::Graph(query_triple_iter) => {
-                let result_format = if *out == DeOutput::N3 {
-                    RdfFormat::N3
-                } else if *out == DeOutput::NQUADS {
-                    RdfFormat::NQuads
-                } else if *out == DeOutput::NTRIPLE {
-                    RdfFormat::NTriples
-                } else if *out == DeOutput::RDFXML {
-                    RdfFormat::RdfXml
-                } else if *out == DeOutput::TRIG {
-                    RdfFormat::TriG
-                } else if *out == DeOutput::TURTLE {
-                    RdfFormat::Turtle
-                } else {
-                    warn!("CONSTRUCT and DESCRIBE queries only support NQ, NT, RDFXML, TRIG, and TTL formats. Defaulting to NTriple format");
-                    RdfFormat::NTriples
+                let result_format = match out {
+                    DeOutput::N3 => RdfFormat::N3,
+                    DeOutput::NQUADS => RdfFormat::NQuads,
+                    DeOutput::NTRIPLE => RdfFormat::NTriples,
+                    DeOutput::RDFXML => RdfFormat::RdfXml,
+                    DeOutput::TRIG => RdfFormat::TriG,
+                    DeOutput::TURTLE => RdfFormat::Turtle,
+                    _ => {
+                        warn!("CONSTRUCT and DESCRIBE queries only support NQ, NT, RDFXML, TRIG, and TTL formats. Defaulting to NTriple format");
+                        RdfFormat::NTriples
+                    }
                 };
                 let mut serializer =
-                    RdfSerializer::from_format(result_format).for_writer(&mut results_tmp_file);
+                    RdfSerializer::from_format(result_format).for_writer(&mut *writer);
                 for triple in query_triple_iter {
                     let triple = triple?;
                     serializer.serialize_triple(&triple)?
@@ -189,24 +176,13 @@ pub async fn do_query(
                 serializer.finish()?;
             }
         };
-
-        let file = File::open(results_tmp_file)?;
-        let reader = BufReader::new(file);
-        for line in reader.lines() {
-            let l = line?;
-            println!("{l}");
-            if output.is_empty() {
-                output = l.clone();
-            } else {
-                output = format!("{output}\n{l}");
-            }
-        }
     }
+    writer.flush()?;
 
     // TODO this needs to be run on success and before any return Err()
     file_cleanup(dir_path_vec.clone()).await;
 
-    Ok(output)
+    Ok(())
 }
 
 async fn handle_files(files: Vec<String>) -> (Vec<String>, Vec<String>, Option<anyhow::Error>) {
@@ -235,7 +211,7 @@ async fn handle_files(files: Vec<String>) -> (Vec<String>, Vec<String>, Option<a
         .unwrap();
 
     let (combined_rdf_path, unknown_files) =
-        match create::files_to_rdf(&files.clone(), &mut rdf_tempfile, Arc::new(OxRdfConvert {})) {
+        match create::files_to_rdf(&files, &mut rdf_tempfile, Arc::new(OxRdfConvert {})) {
             Ok((p, u)) => (p, u),
             Err(e) => {
                 return (
@@ -255,7 +231,7 @@ async fn handle_files(files: Vec<String>) -> (Vec<String>, Vec<String>, Option<a
             );
         }
         if file.ends_with(".hdt") {
-            hdt_path_vec.push(file.clone())
+            hdt_path_vec.push(file.to_string())
         }
         // should be able to query plain rdf files directly
         else {

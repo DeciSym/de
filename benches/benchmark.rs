@@ -1,12 +1,12 @@
 use criterion::{criterion_group, criterion_main, Criterion};
 use de::*;
 use pprof::criterion::{Output, PProfProfiler};
-use std::time::Duration;
+use std::{fs::OpenOptions, io::BufWriter, time::Duration};
 use tempfile::tempdir;
 
 fn query(c: &mut Criterion) {
     // ######### NOTE ###########
-    // requires dependent binaries and tests/resources/superhero.ttl
+    // requires tests/resources/superhero.ttl, run 'make init'
     // ##########################
     let tmp_dir: tempfile::TempDir = tempdir().unwrap();
     let fname = format!("{}/rdf.hdt", tmp_dir.as_ref().display());
@@ -21,7 +21,13 @@ fn query(c: &mut Criterion) {
         b.iter(|| create::do_create(test_hdt, std::slice::from_ref(&source_rdf)));
     });
     group.finish();
-
+    let null_path = if cfg!(windows) { "NUL" } else { "/dev/null" };
+    let mut null_writer = BufWriter::new(
+        OpenOptions::new()
+            .write(true)
+            .open(null_path)
+            .expect("failed to create bufwriter"),
+    );
     let mut group = c.benchmark_group("query single hdt file");
     group.sample_size(10);
     group.measurement_time(Duration::from_secs(25));
@@ -33,10 +39,11 @@ fn query(c: &mut Criterion) {
                     .build()
                     .unwrap()
                     .block_on(async {
-                        let _ = query::do_query(
+                        query::do_query(
                             std::slice::from_ref(&source_rdf),
-                            &vec!["tests/resources/hero-height.rq".to_string()],
+                            &["tests/resources/hero-height.rq".to_string()],
                             &query::DeOutput::CSV,
+                            &mut null_writer,
                         )
                         .await
                         .unwrap();
@@ -57,10 +64,11 @@ fn query(c: &mut Criterion) {
                     .build()
                     .unwrap()
                     .block_on(async {
-                        let _ = query::do_query(
+                        query::do_query(
                             std::slice::from_ref(&source_rdf),
-                            &vec!["tests/resources/hero-height.rq".to_string()],
+                            &["tests/resources/hero-height.rq".to_string()],
                             &query::DeOutput::CSV,
+                            &mut null_writer,
                         )
                         .await
                         .unwrap();

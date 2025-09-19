@@ -1,6 +1,6 @@
 [package]
 name = "de"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["bharath181 <bharathselvaraj18@gmail.com>", "Greg Hanson <g.isaac.hanson@gmail.com>"]
 edition = "2021"
 license = "BSD-3-Clause"

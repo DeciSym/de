@@ -5,10 +5,17 @@ use anyhow::anyhow;
 use hdt::containers::ControlInfo;
 use hdt::header::Header;
 use log::{debug, error};
-use std::path::Path;
+use std::{
+    io::{BufWriter, Write},
+    path::Path,
+};
 
 /// display some HDT file statistics
-pub fn show_content(hdt_files: &[String], indent: String) -> anyhow::Result<(), anyhow::Error> {
+pub fn show_content<W: Write>(
+    hdt_files: &[String],
+    indent: String,
+    writer: &mut BufWriter<W>,
+) -> anyhow::Result<(), anyhow::Error> {
     debug!("Getting HDT info ...");
 
     for f in hdt_files {
@@ -42,32 +49,38 @@ pub fn show_content(hdt_files: &[String], indent: String) -> anyhow::Result<(), 
                 return Err(anyhow!("error reading header for HDT file {f}: {e}"));
             }
         };
-        println!("{indent}{f}:");
+        writeln!(writer, "{indent}{f}:")?;
         for t in h.body {
-            println!("{indent}\t{}: {:?}", t.predicate, t.object)
+            writeln!(writer, "{indent}\t{}: {:?}", t.predicate, t.object)?
         }
     }
 
+    writer.flush()?;
     Ok(())
 }
 
-pub fn view_hdt(hdt_files: &[String]) -> anyhow::Result<String, anyhow::Error> {
-    debug!("Calling view::show_content");
-    match show_content(hdt_files, String::new()) {
+pub fn view_hdt<W: Write>(hdt_files: &[String], writer: &mut BufWriter<W>) -> anyhow::Result<()> {
+    match show_content(hdt_files, String::new(), writer) {
         Ok(_) => {}
         Err(e) => return Err(e),
     };
 
-    Ok("".to_string())
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
+    use std::io::BufWriter;
+
     use crate::view;
     #[test]
     fn test_view() -> anyhow::Result<()> {
-        view::view_hdt(&["tests/resources/apple.hdt".to_string()])
-            .expect("failed to load hdt file");
+        let mut stdout_writer = BufWriter::new(Vec::new());
+        view::view_hdt(
+            &["tests/resources/apple.hdt".to_string()],
+            &mut stdout_writer,
+        )
+        .expect("failed to load hdt file");
         Ok(())
     }
 }

@@ -3,8 +3,26 @@
 
 mod integration {
     use de::*;
-    use std::path::Path;
+    use std::{fs::OpenOptions, io::BufWriter, path::Path};
     use tempfile::tempdir;
+
+    fn devnull_writer() -> std::io::Result<BufWriter<std::fs::File>> {
+        let path = if cfg!(windows) { "NUL" } else { "/dev/null" };
+        Ok(BufWriter::new(OpenOptions::new().write(true).open(path)?))
+    }
+
+    // Helper to create a writer that captures output for testing
+    fn create_test_writer() -> BufWriter<Vec<u8>> {
+        BufWriter::new(Vec::new())
+    }
+
+    // Helper to extract captured output from test writer
+    fn get_output_from_writer(mut writer: BufWriter<Vec<u8>>) -> std::io::Result<String> {
+        use std::io::Write;
+        writer.flush()?;
+        let buffer = writer.into_inner()?;
+        Ok(String::from_utf8_lossy(&buffer).to_string())
+    }
 
     #[test]
     fn test_do_create_rdf() -> anyhow::Result<()> {
@@ -47,7 +65,7 @@ mod integration {
         );
         assert!(Path::new(&new_hdt).exists());
 
-        assert!(view::view_hdt(&[new_hdt]).is_ok());
+        assert!(view::view_hdt(&[new_hdt], &mut devnull_writer()?).is_ok());
 
         tmp_dir.close()?;
         Ok(())
@@ -73,11 +91,19 @@ mod integration {
 
         let data_files = vec![new_hdt];
         let query_files = vec!["tests/resources/query-color.rq".to_string()];
-        let res = query::do_query(&data_files, &query_files, &query::DeOutput::CSV).await;
+        let mut writer = create_test_writer();
+        let res = query::do_query(
+            &data_files,
+            &query_files,
+            &query::DeOutput::CSV,
+            &mut writer,
+        )
+        .await;
         assert!(res.is_ok());
 
+        let output = get_output_from_writer(writer)?;
         assert_eq!(
-            res.unwrap().replace("\r", ""),
+            output.replace("\r", "").trim(),
             r#"fruit
 http://example.org/Banana"#
         );
@@ -106,11 +132,19 @@ http://example.org/Banana"#
 
         let data_files = vec![new_hdt];
         let query_files = vec!["tests/resources/query-color.rq".to_string()];
-        let res = query::do_query(&data_files, &query_files, &query::DeOutput::CSV).await;
+        let mut writer = create_test_writer();
+        let res = query::do_query(
+            &data_files,
+            &query_files,
+            &query::DeOutput::CSV,
+            &mut writer,
+        )
+        .await;
         assert!(res.is_ok());
 
+        let output = get_output_from_writer(writer)?;
         assert_eq!(
-            res.unwrap().replace("\r", ""),
+            output.replace("\r", "").trim(),
             r#"fruit
 http://example.org/Banana"#
         );
@@ -138,41 +172,80 @@ http://example.org/Banana"#
 
         let data_files = vec![pineapple_hdt];
         let query_files = vec!["tests/resources/query-fruit-color.rq".to_string()];
-        let res = query::do_query(&data_files, &query_files, &query::DeOutput::CSV).await;
+        let mut writer = create_test_writer();
+        let res = query::do_query(
+            &data_files,
+            &query_files,
+            &query::DeOutput::CSV,
+            &mut writer,
+        )
+        .await;
         assert!(res.is_ok());
 
+        let output = get_output_from_writer(writer)?;
         assert_eq!(
-            res.unwrap().replace("\r", ""),
+            output.replace("\r", "").trim(),
             r#"fruit,color
 http://example.org/Pineapple,yellow"#
         );
 
-        let res = query::do_query(&data_files, &query_files, &query::DeOutput::TSV).await;
+        let mut writer2 = create_test_writer();
+        let res = query::do_query(
+            &data_files,
+            &query_files,
+            &query::DeOutput::TSV,
+            &mut writer2,
+        )
+        .await;
         assert!(res.is_ok());
 
+        let output2 = get_output_from_writer(writer2)?;
         assert_eq!(
-            res.unwrap().replace("\r", ""),
+            output2.replace("\r", "").trim(),
             "?fruit\t?color\n<http://example.org/Pineapple>\t\"yellow\""
         );
 
-        let res = query::do_query(&data_files, &query_files, &query::DeOutput::JSON).await;
+        let mut writer3 = create_test_writer();
+        let res = query::do_query(
+            &data_files,
+            &query_files,
+            &query::DeOutput::JSON,
+            &mut writer3,
+        )
+        .await;
         assert!(res.is_ok());
 
+        let output3 = get_output_from_writer(writer3)?;
         assert_eq!(
-            res.unwrap().replace("\r", ""),
+            output3.replace("\r", "").trim(),
             r#"{"head":{"vars":["fruit","color"]},"results":{"bindings":[{"fruit":{"type":"uri","value":"http://example.org/Pineapple"},"color":{"type":"literal","value":"yellow"}}]}}"#
         );
 
-        let res = query::do_query(&data_files, &query_files, &query::DeOutput::XML).await;
+        let mut writer4 = create_test_writer();
+        let res = query::do_query(
+            &data_files,
+            &query_files,
+            &query::DeOutput::XML,
+            &mut writer4,
+        )
+        .await;
         assert!(res.is_ok());
 
+        let output4 = get_output_from_writer(writer4)?;
         assert_eq!(
-            res.unwrap().replace("\r", ""),
+            output4.replace("\r", "").trim(),
             r#"<?xml version="1.0"?><sparql xmlns="http://www.w3.org/2005/sparql-results#"><head><variable name="fruit"/><variable name="color"/></head><results><result><binding name="fruit"><uri>http://example.org/Pineapple</uri></binding><binding name="color"><literal>yellow</literal></binding></result></results></sparql>"#
         );
 
         // ASK queries only support CSV, TSV, JSON, or XML
-        let res = query::do_query(&data_files, &query_files, &query::DeOutput::NTRIPLE).await;
+        let mut writer5 = create_test_writer();
+        let res = query::do_query(
+            &data_files,
+            &query_files,
+            &query::DeOutput::NTRIPLE,
+            &mut writer5,
+        )
+        .await;
         assert!(res.is_err());
         tmp_dir.close()?;
 
@@ -203,11 +276,19 @@ http://example.org/Pineapple,yellow"#
 
         let data_files = vec![new_hdt];
         let query_files = vec!["tests/resources/query-color.rq".to_string()];
-        let res = query::do_query(&data_files, &query_files, &query::DeOutput::CSV).await;
+        let mut writer = create_test_writer();
+        let res = query::do_query(
+            &data_files,
+            &query_files,
+            &query::DeOutput::CSV,
+            &mut writer,
+        )
+        .await;
         assert!(res.is_ok());
 
+        let output = get_output_from_writer(writer)?;
         assert_eq!(
-            res.unwrap().replace("\r", ""),
+            output.replace("\r", "").trim(),
             r#"fruit
 http://example.org/Pineapple
 http://example.org/Banana"#
@@ -224,11 +305,19 @@ http://example.org/Banana"#
         ];
 
         let query_files = vec!["tests/resources/query-color.rq".to_string()];
-        let res = query::do_query(&data_files, &query_files, &query::DeOutput::CSV).await;
+        let mut writer = create_test_writer();
+        let res = query::do_query(
+            &data_files,
+            &query_files,
+            &query::DeOutput::CSV,
+            &mut writer,
+        )
+        .await;
         assert!(res.is_ok());
 
+        let output = get_output_from_writer(writer)?;
         assert_eq!(
-            res.unwrap().replace("\r", ""),
+            output.replace("\r", "").trim(),
             r#"fruit
 http://example.org/Pineapple
 http://example.org/Banana"#
@@ -263,11 +352,13 @@ http://example.org/Banana"#
         }
 
         let query_files = vec!["tests/resources/query-color.rq".to_string()];
-        let res = query::do_query(&pkgs, &query_files, &query::DeOutput::CSV).await;
+        let mut writer = create_test_writer();
+        let res = query::do_query(&pkgs, &query_files, &query::DeOutput::CSV, &mut writer).await;
         assert!(res.is_ok());
 
+        let output = get_output_from_writer(writer)?;
         assert_eq!(
-            res.unwrap().replace("\r", ""),
+            output.replace("\r", "").trim(),
             r#"fruit
 http://example.org/Pineapple
 http://example.org/Banana"#

@@ -7,9 +7,7 @@ use oxrdf::TripleRef;
 use oxrdfio::RdfFormat::{self, NTriples};
 use oxrdfio::RdfSerializer;
 use oxrdfio::{RdfParseError, RdfParser};
-use std::io::BufReader;
-use std::io::BufWriter;
-use std::io::Write;
+use std::io::{BufReader, BufWriter, Write};
 use std::path::Path;
 
 /// Trait for different RDF libraries to implement for converting a list of files into NTriple RDF
@@ -19,7 +17,7 @@ pub trait Rdf2Nt {
         &self,
         file_paths: Vec<String>,
         output_file: &std::fs::File,
-    ) -> anyhow::Result<ConvertResult, anyhow::Error>;
+    ) -> anyhow::Result<ConvertResult>;
 }
 
 #[derive(Debug, Default)]
@@ -37,14 +35,12 @@ impl Rdf2Nt for OxRdfConvert {
         &self,
         file_paths: Vec<String>,
         output_file: &std::fs::File,
-    ) -> anyhow::Result<ConvertResult, anyhow::Error> {
+    ) -> anyhow::Result<ConvertResult> {
         let mut res = ConvertResult::default();
         let mut dest_writer = BufWriter::new(output_file);
-        for file in file_paths {
-            let source = match std::fs::File::open(&file) {
-                Ok(f) => f,
-                Err(e) => return Err(anyhow::anyhow!("Error opening file {:?}: {:?}", file, e)),
-            };
+        for file in &file_paths {
+            let source = std::fs::File::open(file)
+                .map_err(|e| anyhow::anyhow!("Error opening file {:?}: {:?}", file, e))?;
             let source_reader = BufReader::new(source);
 
             debug!("converting {} to nt format", &file);
@@ -52,51 +48,51 @@ impl Rdf2Nt for OxRdfConvert {
             let mut serializer =
                 RdfSerializer::from_format(NTriples).for_writer(dest_writer.by_ref());
             let v = std::time::Instant::now();
-            let rdf_format = if let Some(t) =
-                RdfFormat::from_extension(Path::new(&file).extension().unwrap().to_str().unwrap())
+            let rdf_format = match Path::new(&file)
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .and_then(RdfFormat::from_extension)
             {
-                t
-            } else if file.ends_with(".owl") {
-                // OWL files should be in XML format: https://www.w3.org/TR/owl-xmlsyntax/
-                RdfFormat::RdfXml
-            } else {
-                res.unhandled.push(file.clone());
-                continue;
+                Some(format) => format,
+                None if file.ends_with(".owl") => {
+                    // OWL files should be in XML format: https://www.w3.org/TR/owl-xmlsyntax/
+                    RdfFormat::RdfXml
+                }
+                None => {
+                    res.unhandled.push(file.to_string());
+                    continue;
+                }
             };
             let quads = RdfParser::from_format(rdf_format).for_reader(source_reader);
             for q in quads {
                 let q = match q {
                     Ok(v) => v,
-                    Err(e) => {
-                        match e {
-                            RdfParseError::Io(v) => {
-                                // I/O error while reading file
-                                return Err(anyhow::anyhow!("Error reading file {file}: {v}"));
-                            }
-                            RdfParseError::Syntax(syn_err) => {
-                                if rdf_format == RdfFormat::RdfXml {
-                                    // XML file extensions are not guaranteed to be RdfXML
-                                    res.unhandled.push(file.clone());
-                                    continue;
-                                } else {
-                                    // based on file extension, should have been able to parse
-                                    error!("syntax error for RDF file {file}: {syn_err}");
-                                    return Err(anyhow::anyhow!(
-                                        "syntax error for RDF file {file}: {syn_err}"
-                                    ));
-                                }
-                            }
+                    Err(RdfParseError::Io(v)) => {
+                        // I/O error while reading file
+                        return Err(anyhow::anyhow!("Error reading file {file}: {v}"));
+                    }
+                    Err(RdfParseError::Syntax(syn_err)) => {
+                        if rdf_format == RdfFormat::RdfXml {
+                            // XML file extensions are not guaranteed to be RdfXML
+                            res.unhandled.push(file.to_string());
+                            break;
+                        } else {
+                            // based on file extension, should have been able to parse
+                            error!("syntax error for RDF file {file}: {syn_err}");
+                            return Err(anyhow::anyhow!(
+                                "syntax error for RDF file {file}: {syn_err}"
+                            ));
                         }
                     }
                 };
                 if q.graph_name != DefaultGraph {
                     warn!("HDT does not support named graphs, merging triples for {file}");
                 }
-                serializer.serialize_triple(TripleRef {
-                    subject: q.subject.as_ref(),
-                    predicate: q.predicate.as_ref(),
-                    object: q.object.as_ref(),
-                })?
+                serializer.serialize_triple(TripleRef::new(
+                    q.subject.as_ref(),
+                    q.predicate.as_ref(),
+                    q.object.as_ref(),
+                ))?
             }
 
             serializer.finish()?;
