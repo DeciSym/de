@@ -3,6 +3,7 @@
 
 use crate::create;
 use crate::rdf2nt::OxRdfConvert;
+use crate::sparql;
 use anyhow::Error;
 use log::*;
 use oxrdfio::RdfFormat;
@@ -16,8 +17,6 @@ use std::io::{BufWriter, Read, Write};
 use std::path::Path;
 use std::sync::Arc;
 use tempfile::{tempdir, Builder, NamedTempFile};
-
-use hdt::sparql::query;
 
 #[derive(clap::ValueEnum, Clone, Default, Debug, PartialEq)]
 pub enum DeOutput {
@@ -80,19 +79,14 @@ pub async fn do_query<W: Write>(
         return Err(anyhow::anyhow!("Error reading data files: {e}",));
     }
 
-    let dataset = hdt::sparql::HdtDataset::new(
-        &hdt_path_vec
-            .iter()
-            .map(|s| s.as_str())
-            .collect::<Vec<&str>>(),
-    )?;
+    let dataset = sparql::AggregateHDT::new(&hdt_path_vec)?;
 
     for rq in query_files {
         let mut f = File::open(rq)?;
         let mut buffer = String::new();
 
         f.read_to_string(&mut buffer)?;
-        let qr = match query(&buffer, dataset.clone(), None) {
+        let qr = match sparql::query(&buffer, &dataset, None) {
             Ok(r) => r,
             Err(e) => {
                 error!("problem executing the hdt query: {e}");
