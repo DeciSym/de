@@ -5,5 +5,6 @@ pub mod create;
 pub mod query;
 pub mod rdf2nt;
 pub mod serve;
+pub mod service_description;
 pub mod sparql;
 pub mod view;

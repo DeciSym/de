@@ -1,22 +1,25 @@
 use std::{
+    collections::HashMap,
     fs::File,
-    io::{BufReader, Error, ErrorKind},
+    io::{BufReader, BufWriter, Error, ErrorKind, Write},
+    path::Path,
     str::FromStr,
+    sync::{Arc, RwLock},
 };
 
-use oxrdf::{BlankNode, NamedNode, Term};
+use oxrdf::{BlankNode, NamedNode, NamedOrBlankNodeRef, Term};
 use spareval::{InternalQuad, QueryEvaluationError, QueryEvaluator, QueryableDataset};
 use spargebra::SparqlParser;
 
 /// Boundry over a Header-Dictionary-Triplies (HDT) storage layer.
 pub struct AggregateHDT {
-    // collection of HDT files in the dataset
-    hdts: Vec<hdt::Hdt>,
+    // Map graph names (URIs) to HDT files
+    hdts: Arc<RwLock<HashMap<String, hdt::Hdt>>>,
 }
 
 impl AggregateHDT {
     pub fn new(paths: &[String]) -> Result<Self, anyhow::Error> {
-        let mut hdts: Vec<hdt::Hdt> = Vec::new();
+        let mut hdts: HashMap<String, hdt::Hdt> = HashMap::new();
         if paths.is_empty() {
             return Err(anyhow::anyhow!("no hdt files detected"));
         }
@@ -24,12 +27,144 @@ impl AggregateHDT {
             // TODO catch error and proceed to next file?
             let mut reader = BufReader::new(File::open(path).expect("failed to open HDT file"));
             let hdt = hdt::Hdt::read(&mut reader).unwrap();
-            hdts.push(hdt);
+            hdts.insert(
+                format!(
+                    "file:///{}",
+                    Path::new(path).file_name().unwrap().to_str().unwrap()
+                ),
+                hdt,
+            );
             continue;
         }
 
-        Ok(Self { hdts })
+        Ok(Self {
+            hdts: Arc::new(RwLock::new(hdts)),
+        })
     }
+
+    pub fn contains_named_graph(&self, target: &NamedNode) -> Result<bool, anyhow::Error> {
+        let hdts = self.hdts.read().unwrap();
+        Ok(hdts.contains_key(target.clone().into_string().as_str()))
+    }
+
+    pub fn insert_named_graph(
+        &self,
+        graph_name: &NamedNode,
+        file_path: &Path,
+    ) -> Result<(), anyhow::Error> {
+        let extension = file_path
+            .extension()
+            .and_then(|s| s.to_str())
+            .ok_or_else(|| anyhow::anyhow!("File has no extension: {:?}", file_path))?;
+
+        let hdt = match extension {
+            "hdt" => {
+                // Read HDT file directly
+                let mut reader = BufReader::new(File::open(file_path)?);
+                hdt::Hdt::read(&mut reader)?
+            }
+            "nt" => {
+                // Convert NT to HDT
+                // First, create a temporary HDT file
+                let tmp_hdt = tempfile::Builder::new().suffix(".hdt").tempfile()?;
+                let (hdt_file, _hdt_path) = tmp_hdt.keep()?;
+
+                // Read the NT file and convert to HDT
+                let h = hdt::Hdt::read_nt(file_path)?;
+                let mut hdt_writer = BufWriter::new(&hdt_file);
+
+                h.write(&mut hdt_writer)?;
+                hdt_writer.flush()?;
+                h
+            }
+            _ => {
+                return Err(anyhow::anyhow!(
+                    "Unsupported file extension: {}. Only .hdt and .nt are supported.",
+                    extension
+                ));
+            }
+        };
+
+        let mut hdts = self.hdts.write().unwrap();
+        hdts.insert(graph_name.clone().into_string(), hdt);
+        Ok(())
+    }
+
+    pub fn remove_named_graph(&self, graph_name: &NamedNode) -> Result<bool, anyhow::Error> {
+        let mut hdts = self.hdts.write().unwrap();
+        Ok(hdts.remove(graph_name.as_str()).is_some())
+    }
+
+    pub fn clear(&self) -> Result<(), anyhow::Error> {
+        let mut hdts = self.hdts.write().unwrap();
+        hdts.clear();
+        Ok(())
+    }
+
+    pub fn named_graphs(&self) -> Vec<NamedNode> {
+        let hdts = self.hdts.read().unwrap();
+        hdts.keys().filter_map(|k| NamedNode::new(k).ok()).collect()
+    }
+
+    /// Iterate over all HDTs in the HashMap.
+    /// Accepts a closure that receives the graph name and HDT reference for each entry.
+    pub fn iter<F>(&self, mut f: F)
+    where
+        F: FnMut(&String, &hdt::Hdt),
+    {
+        let hdts = self.hdts.read().unwrap();
+        for (key, hdt) in hdts.iter() {
+            f(key, hdt);
+        }
+    }
+
+    /// Iterate over all triples from all HDTs in the HashMap.
+    /// Accepts a closure that receives the graph name and a triple (StringTriple) for each entry.
+    pub fn iter_triples_all<F>(&self, mut f: F)
+    where
+        F: FnMut(&String, [Arc<str>; 3]),
+    {
+        let hdts = self.hdts.read().unwrap();
+        for (graph_name, hdt) in hdts.iter() {
+            for triple in hdt.triples_all() {
+                f(graph_name, triple);
+            }
+        }
+    }
+
+    /// Collect all triples from all HDTs and return them as a Vec with their graph names.
+    /// This is useful for scenarios where you need a consumable iterator.
+    pub fn collect_all_triples(&self) -> Vec<(String, [Arc<str>; 3])> {
+        let hdts = self.hdts.read().unwrap();
+        let mut result = Vec::new();
+        for (graph_name, hdt) in hdts.iter() {
+            for triple in hdt.triples_all() {
+                result.push((graph_name.clone(), triple));
+            }
+        }
+        result
+    }
+}
+
+pub fn graph_to_file(name: NamedOrBlankNodeRef) -> Option<String> {
+    if let NamedOrBlankNodeRef::NamedNode(n) = name {
+        let res = n.to_string().parse::<http::Uri>();
+        let Ok(uri) = res else {
+            return None;
+        };
+        let paths = uri.path().split("/").collect::<Vec<_>>();
+        if let Some(p) = paths.last() {
+            return Some(
+                Path::new(p)
+                    .file_stem()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .to_string(),
+            );
+        }
+    }
+    None
 }
 
 /// Create the correct term for a given resource string.
@@ -89,20 +224,31 @@ impl<'a> QueryableDataset<'a> for &'a AggregateHDT {
         object: Option<&String>,
         graph_name: Option<Option<&String>>,
     ) -> impl Iterator<Item = Result<InternalQuad<Self::InternalTerm>, Error>> + use<'a> {
-        if let Some(Some(graph_name)) = graph_name {
-            return vec![Err(Error::new(
-                ErrorKind::InvalidData,
-                format!("HDT does not support named graph: {graph_name:?}"),
-            ))]
-            .into_iter();
-        }
+        // if let Some(Some(graph_name)) = graph_name {
+        //     return vec![Err(Error::new(
+        //         ErrorKind::InvalidData,
+        //         format!("HDT does not support named graph: {graph_name:?}"),
+        //     ))]
+        //     .into_iter();
+        // }
         let mut v: Vec<Result<InternalQuad<_>, Error>> = Vec::new();
         // let subject_owned = subject.cloned();
         // let predicate_owned = predicate.cloned();
         // let object_owned = object.cloned();
-        for data in &self.hdts {
+        for (graph, data) in self.hdts.read().unwrap().iter() {
+            if let Some(Some(graph_name)) = graph_name {
+                if graph != graph_name {
+                    continue;
+                }
+            }
             for triple in data.internal_quads_for_pattern(subject, predicate, object, None) {
-                v.push(triple);
+                let t = triple.unwrap();
+                v.push(Ok(InternalQuad {
+                    subject: t.subject,
+                    predicate: t.predicate,
+                    object: t.object,
+                    graph_name: Some(graph.to_string()),
+                }));
             }
         }
         v.into_iter()
@@ -126,5 +272,150 @@ pub fn query<'a>(
         .with_base_iri(base.unwrap_or("http://example.com/"))
         .expect(&format!("invalid base iri provided: {base:?}"))
         .parse_query(q)?;
-    QueryEvaluator::new().execute(hdt, &query)
+    QueryEvaluator::new().prepare(&query).execute(hdt)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    /// Helper function to get the path to a test HDT file
+    fn get_test_hdt_path(filename: &str) -> String {
+        let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        path.push(filename);
+        path.to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn test_contains_named_graph_found() {
+        // Create an AggregateHDT with test.hdt
+        let test_hdt_path = get_test_hdt_path("test.hdt");
+        let store = AggregateHDT::new(&[test_hdt_path]).expect("Failed to create AggregateHDT");
+
+        // Test 1: Graph should be found with file:/// URI scheme matching the filename
+        let graph_name = NamedNode::new("file:///test.hdt").expect("Failed to create NamedNode");
+        let result = store.contains_named_graph(&graph_name);
+        assert!(
+            result.is_ok(),
+            "contains_named_graph should not return error"
+        );
+        assert!(
+            result.unwrap(),
+            "Graph 'file:///test.hdt' should be found in the store"
+        );
+    }
+
+    #[test]
+    fn test_contains_named_graph_not_found() {
+        // Create an AggregateHDT with test.hdt
+        let test_hdt_path = get_test_hdt_path("test.hdt");
+        let store = AggregateHDT::new(&[test_hdt_path]).expect("Failed to create AggregateHDT");
+
+        // Test 1: Graph with different filename should not be found
+        let missing_graph =
+            NamedNode::new("file:///nonexistent.hdt").expect("Failed to create NamedNode");
+        let result = store.contains_named_graph(&missing_graph);
+        assert!(
+            result.is_ok(),
+            "contains_named_graph should not return error"
+        );
+        assert!(
+            !result.unwrap(),
+            "Graph 'file:///nonexistent.hdt' should not be found"
+        );
+
+        // Test 2: Graph with non-file URI scheme should not be found
+        let http_graph =
+            NamedNode::new("http://example.org/test.hdt").expect("Failed to create NamedNode");
+        let result_http = store.contains_named_graph(&http_graph);
+        assert!(
+            result_http.is_ok(),
+            "contains_named_graph should not return error"
+        );
+        assert!(
+            !result_http.unwrap(),
+            "Graph with http:// scheme should not be found (only file:// supported)"
+        );
+
+        // Test 3: Graph with different stem should not be found
+        let wrong_stem = NamedNode::new("file:///different").expect("Failed to create NamedNode");
+        let result_wrong = store.contains_named_graph(&wrong_stem);
+        assert!(
+            result_wrong.is_ok(),
+            "contains_named_graph should not return error"
+        );
+        assert!(
+            !result_wrong.unwrap(),
+            "Graph 'file:///different' should not be found"
+        );
+    }
+
+    #[test]
+    fn test_contains_named_graph_multiple_graphs() {
+        // Create an AggregateHDT with multiple HDT files
+        let test_hdt = get_test_hdt_path("test.hdt");
+        let literal_hdt = get_test_hdt_path("literal.hdt");
+        let store = AggregateHDT::new(&[test_hdt, literal_hdt])
+            .expect("Failed to create AggregateHDT with multiple files");
+
+        // Test 1: First graph should be found
+        let graph1 = NamedNode::new("file:///test.hdt").expect("Failed to create NamedNode");
+        assert!(
+            store.contains_named_graph(&graph1).unwrap(),
+            "First graph 'test' should be found"
+        );
+
+        // Test 2: Second graph should be found
+        let graph2 = NamedNode::new("file:///literal.hdt").expect("Failed to create NamedNode");
+        assert!(
+            store.contains_named_graph(&graph2).unwrap(),
+            "Second graph 'literal' should be found"
+        );
+
+        // Test 3: Non-existent graph should not be found
+        let missing = NamedNode::new("file:///missing.hdt").expect("Failed to create NamedNode");
+        assert!(
+            !store.contains_named_graph(&missing).unwrap(),
+            "Non-existent graph should not be found"
+        );
+    }
+
+    #[test]
+    fn test_contains_named_graph_after_insert() {
+        // Create an AggregateHDT with one HDT file
+        let test_hdt_path = get_test_hdt_path("test.hdt");
+        let store = AggregateHDT::new(std::slice::from_ref(&test_hdt_path))
+            .expect("Failed to create AggregateHDT");
+
+        // Graph should exist initially
+        let existing_graph =
+            NamedNode::new("file:///test.hdt").expect("Failed to create NamedNode");
+        assert!(
+            store.contains_named_graph(&existing_graph).unwrap(),
+            "Initial graph should exist"
+        );
+
+        // Insert a new graph
+        let new_graph =
+            NamedNode::new("http://example.org/newgraph").expect("Failed to create NamedNode");
+
+        // Before insertion, should not exist
+        assert!(
+            !store.contains_named_graph(&new_graph).unwrap(),
+            "New graph should not exist before insertion"
+        );
+
+        // Insert the graph
+        let hdt_path = Path::new(&test_hdt_path);
+        store
+            .insert_named_graph(&new_graph, hdt_path)
+            .expect("Failed to insert named graph");
+
+        // After insertion, should exist
+        assert!(
+            store.contains_named_graph(&new_graph).unwrap(),
+            "New graph should exist after insertion"
+        );
+    }
 }

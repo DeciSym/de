@@ -80,7 +80,7 @@ async fn main() {
             Ok(v) => Ok(v),
             Err(e) => Err(e),
         },
-        Commands::Serve { location, bind } => de::serve::serve(&location, &bind),
+        Commands::Serve { location, bind } => de::serve::serve(location, bind),
     };
 
     match result {
