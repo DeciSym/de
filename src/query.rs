@@ -3,6 +3,7 @@
 
 use crate::create;
 use crate::rdf2nt::OxRdfConvert;
+use crate::sparql;
 use anyhow::Error;
 use log::*;
 use oxrdfio::RdfFormat;
@@ -16,8 +17,6 @@ use std::io::{BufWriter, Read, Write};
 use std::path::Path;
 use std::sync::Arc;
 use tempfile::{tempdir, Builder, NamedTempFile};
-
-use hdt::sparql::query;
 
 #[derive(clap::ValueEnum, Clone, Default, Debug, PartialEq)]
 pub enum DeOutput {
@@ -80,19 +79,15 @@ pub async fn do_query<W: Write>(
         return Err(anyhow::anyhow!("Error reading data files: {e}",));
     }
 
-    let dataset = hdt::sparql::HdtDataset::new(
-        &hdt_path_vec
-            .iter()
-            .map(|s| s.as_str())
-            .collect::<Vec<&str>>(),
-    )?;
+    let dataset = sparql::AggregateHdt::new(&hdt_path_vec)
+        .map_err(|e| anyhow::anyhow!("error initializting HDT files: {e}"))?;
 
     for rq in query_files {
         let mut f = File::open(rq)?;
         let mut buffer = String::new();
 
         f.read_to_string(&mut buffer)?;
-        let qr = match query(&buffer, dataset.clone(), None) {
+        let qr = match sparql::query(&buffer, &dataset, None) {
             Ok(r) => r,
             Err(e) => {
                 error!("problem executing the hdt query: {e}");
@@ -210,17 +205,29 @@ async fn handle_files(files: Vec<String>) -> (Vec<String>, Vec<String>, Option<a
         .tempfile_in(t_path)
         .unwrap();
 
-    let (combined_rdf_path, unknown_files) =
-        match create::files_to_rdf(&files, &mut rdf_tempfile, Arc::new(OxRdfConvert {})) {
-            Ok((p, u)) => (p, u),
-            Err(e) => {
-                return (
-                    dir_path_vec,
-                    hdt_path_vec,
-                    Some(Error::msg(format!("error processing files to RDF {e}"))),
-                );
-            }
-        };
+    let mut files_to_convert = vec![];
+    for f in &files {
+        if f.ends_with(".hdt") {
+            hdt_path_vec.push(f.to_string())
+        } else {
+            files_to_convert.push(f.to_string());
+        }
+    }
+
+    let (combined_rdf_path, unknown_files) = match create::files_to_rdf(
+        &files_to_convert,
+        &mut rdf_tempfile,
+        Arc::new(OxRdfConvert {}),
+    ) {
+        Ok((p, u)) => (p, u),
+        Err(e) => {
+            return (
+                dir_path_vec,
+                hdt_path_vec,
+                Some(Error::msg(format!("error processing files to RDF {e}"))),
+            );
+        }
+    };
 
     for file in unknown_files.iter() {
         if !Path::new(file).exists() {

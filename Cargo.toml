@@ -1,6 +1,6 @@
 [package]
 name = "de"
-version = "0.2.0"
+version = "0.3.0"
 authors = ["bharath181 <bharathselvaraj18@gmail.com>", "Greg Hanson <g.isaac.hanson@gmail.com>"]
 edition = "2021"
 license = "BSD-3-Clause"
@@ -25,12 +25,14 @@ clap = { version = "4.5" }
 clap-verbosity-flag = { version = "3.0", default-features = false, features = ["log"] }
 env_logger = { version = "0.11", default-features = false }
 exitcode = "1.1"
-hdt = { git = "https://github.com/GregHanson/hdt/", default-features = false, features = ["sophia", "sparql"], branch = "stable-sparql" } # waiting for 0.4.0 release
+hdt = { git = "https://github.com/KonradHoeffner/hdt/", default-features = false, features = ["nt", "sparql"], tag = "0.5.0" } # waiting for 0.5.0 release
 log = "0.4"
-oxrdf = "0.2"
-oxrdfio = "0.1"
-sparesults = "0.2"
-spareval = "0.1"
+oxrdf = "0.3"
+oxrdfio = "0.2"
+rayon = "1.11.0"
+sparesults = "0.3"
+spareval = "0.2"
+spargebra = "0.4.1"
 tempfile = {version = "3.19"}
 tokio = { version = "1.44", default-features = false, features = ["full"] }
 

@@ -4,4 +4,5 @@
 pub mod create;
 pub mod query;
 pub mod rdf2nt;
+pub mod sparql;
 pub mod view;
