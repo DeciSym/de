@@ -31,7 +31,7 @@ impl AggregateHdt {
 /// Create the correct term for a given resource string.
 /// Slow, use the appropriate method if you know which type (Literal, URI, or blank node) the string has.
 // Based on https://github.com/KonradHoeffner/hdt/blob/871db777db3220dc4874af022287975b31d72d3a/src/hdt_graph.rs#L64
-fn hdt_bgp_str_to_term(s: &str) -> Result<Term, Error> {
+pub fn hdt_bgp_str_to_term(s: &str) -> Result<Term, Error> {
     match s.chars().next() {
         None => Err(Error::new(ErrorKind::InvalidData, "empty input")),
         // Double-quote delimiters are used around the string.
@@ -66,7 +66,7 @@ fn hdt_bgp_str_to_term(s: &str) -> Result<Term, Error> {
 }
 
 /// Convert triple string formats from OxRDF to HDT.
-fn term_to_hdt_bgp_str(term: Term) -> String {
+pub fn term_to_hdt_bgp_str(term: Term) -> String {
     match term {
         Term::NamedNode(named_node) => named_node.into_string(),
         Term::Literal(literal) => literal.to_string(),
@@ -133,6 +133,5 @@ pub fn query<'a>(
         .with_base_iri(base_iri.unwrap_or("http://example.com/".to_string()))
         .unwrap()
         .parse_query(q)?;
-    //.unwrap_or_else(|_| panic!("error processing SPARQL query:\n{q}"));
     QueryEvaluator::new().prepare(&query).execute(hdt)
 }

@@ -4,7 +4,7 @@
 use clap::{Parser, Subcommand};
 use de::*;
 use log::error;
-use std::io::{stdout, BufWriter};
+use std::io::{stdout, BufWriter, Write};
 
 #[derive(Parser)]
 #[command(author, version, about="CLI tool for creating and querying HDT files", long_about = None)]
@@ -66,12 +66,9 @@ async fn main() {
             Ok(_) => Ok(()),
             Err(e) => Err(e),
         },
-        Commands::View { data } => match view::view_hdt(data, &mut stdout_writer) {
-            Ok(v) => Ok(v),
-            Err(e) => Err(e),
-        },
+        Commands::View { data } => view::view_hdt(data, &mut stdout_writer),
     };
-
+    stdout_writer.flush().unwrap();
     match result {
         Ok(_) => std::process::exit(exitcode::OK),
         Err(e) => {

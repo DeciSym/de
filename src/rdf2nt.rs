@@ -63,6 +63,7 @@ impl Rdf2Nt for OxRdfConvert {
                     continue;
                 }
             };
+            // TODO oxrdfio does offer split_file_for_parallel_parsing() which greatly improves performance, but only available for NT or NQ formats
             let quads = RdfParser::from_format(rdf_format).for_reader(source_reader);
             for q in quads {
                 let q = match q {
