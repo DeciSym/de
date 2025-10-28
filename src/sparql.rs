@@ -250,7 +250,7 @@ impl<'a> QueryableDataset<'a> for &'a AggregateHdt {
                             subject: subject.to_string(),
                             predicate: predicate.to_string(),
                             object: object.to_string(),
-                            graph_name: None,
+                            graph_name: Some(g.to_string()),
                         })
                     })
                     .collect::<Vec<_>>()
