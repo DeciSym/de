@@ -2,10 +2,10 @@ use oxrdf::NamedOrBlankNodeRef;
 use spareval::{InternalQuad, QueryEvaluationError, QueryEvaluator, QueryableDataset};
 use spargebra::term::{BlankNode, NamedNode, Term};
 use spargebra::SparqlParser;
+use std::io::Write;
 use std::{
     collections::HashMap,
-    fs::File,
-    io::{BufReader, BufWriter, Error, ErrorKind, Write},
+    io::{Error, ErrorKind},
     path::Path,
     str::FromStr,
     sync::{Arc, RwLock},
@@ -14,27 +14,27 @@ use std::{
 /// Boundry over a Header-Dictionary-Triplies (HDT) storage layer.
 pub struct AggregateHdt {
     // Map graph names (URIs) to HDT files
-    hdts: Arc<RwLock<HashMap<String, hdt::Hdt>>>,
+    hdts: Arc<RwLock<HashMap<String, hdt::hdt::HdtHybrid>>>,
 }
 
 impl AggregateHdt {
     pub fn new(paths: &[String]) -> anyhow::Result<Self> {
         use rayon::prelude::*;
-        let mut hdts: HashMap<String, hdt::Hdt> = HashMap::new();
+        let mut hdts: HashMap<String, hdt::hdt::HdtHybrid> = HashMap::new();
         if paths.is_empty() {
             return Err(anyhow::anyhow!("no hdt files detected").into());
         }
 
-        let graphs: Vec<(String, hdt::Hdt)> = paths
+        let graphs: Vec<(String, hdt::hdt::HdtHybrid)> = paths
             .par_iter()
-            .map(|p| -> anyhow::Result<(String, hdt::Hdt)> {
-                let reader = BufReader::new(std::fs::File::open(p)?);
+            .map(|p| -> anyhow::Result<(String, hdt::hdt::HdtHybrid)> {
                 Ok((
                     format!(
                         "file:///{}",
                         Path::new(p).file_name().unwrap().to_str().unwrap()
                     ),
-                    hdt::Hdt::read(reader)?,
+                    hdt::hdt::Hdt::new_hybrid_cache(Path::new(p))
+                        .map_err(|e| anyhow::anyhow!("{}", e))?,
                 ))
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -65,27 +65,27 @@ impl AggregateHdt {
 
         let hdt = match extension {
             "hdt" => {
-                // Read HDT file directly
-                let mut reader = BufReader::new(File::open(file_path)?);
-                hdt::Hdt::read(&mut reader)?
+                // Read HDT file directly with hybrid cache
+                hdt::hdt::Hdt::new_hybrid_cache(file_path).map_err(|e| anyhow::anyhow!("{}", e))?
             }
             "nt" => {
                 // Convert NT to HDT
                 // First, create a temporary HDT file
                 let tmp_hdt = tempfile::Builder::new().suffix(".hdt").tempfile()?;
-                let (hdt_file, _hdt_path) = tmp_hdt.keep()?;
+                let (hdt_file, hdt_path) = tmp_hdt.keep()?;
 
                 // Read the NT file and convert to HDT
                 let h = hdt::Hdt::read_nt(file_path)?;
-                let mut hdt_writer = BufWriter::new(&hdt_file);
+                let mut hdt_writer = std::io::BufWriter::new(&hdt_file);
 
                 h.write(&mut hdt_writer)?;
                 hdt_writer.flush()?;
-                h
+                hdt::hdt::Hdt::new_hybrid_cache(hdt_path.as_path())
+                    .map_err(|e| anyhow::anyhow!("{}", e))?
             }
             _ => {
                 return Err(anyhow::anyhow!(
-                    "Unsupported file extension: {}. Only .hdt and .nt are supported.",
+                    "Unsupported file extension: {}. Only .hdt is supported.",
                     extension
                 ));
             }
@@ -116,7 +116,7 @@ impl AggregateHdt {
     /// Accepts a closure that receives the graph name and HDT reference for each entry.
     pub fn iter<F>(&self, mut f: F)
     where
-        F: FnMut(&String, &hdt::Hdt),
+        F: FnMut(&String, &hdt::hdt::HdtHybrid),
     {
         let hdts = self.hdts.read().unwrap();
         for (key, hdt) in hdts.iter() {
