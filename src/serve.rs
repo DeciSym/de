@@ -32,7 +32,7 @@ use url::form_urlencoded;
 
 use crate::{
     service_description::{generate_service_description, EndpointKind},
-    sparql::AggregateHDT,
+    sparql::AggregateHdt,
 };
 
 type HttpError = (StatusCode, String);
@@ -74,8 +74,8 @@ pub fn serve(
         eprintln!("  - {}", path);
     }
 
-    // Create the AggregateHDT store from the found HDT files
-    let store = AggregateHDT::new(&hdt_paths)?;
+    // Create the AggregateHdt store from the found HDT files
+    let store = AggregateHdt::new(&hdt_paths)?;
 
     // let timeout = timeout_s.map(Duration::from_secs);
     let mut server = if cors {
@@ -137,7 +137,7 @@ fn cors_middleware(
 
 fn handle_request(
     request: &mut Request<Body>,
-    store: &AggregateHDT,
+    store: &AggregateHdt,
     // read_only: bool,
     union_default_graph: bool,
     // timeout: Option<Duration>,
@@ -583,7 +583,7 @@ fn limited_body(request: &mut Request<Body>) -> Result<Vec<u8>, HttpError> {
 }
 
 fn configure_and_evaluate_sparql_query(
-    store: &AggregateHDT,
+    store: &AggregateHdt,
     encoded: &[&[u8]],
     mut query: Option<String>,
     request: &Request<Body>,
@@ -625,7 +625,7 @@ fn configure_and_evaluate_sparql_query(
 }
 
 fn evaluate_sparql_query(
-    store: &AggregateHDT,
+    store: &AggregateHdt,
     query: &str,
     _use_default_graph_as_union: bool,
     _default_graph_uris: Vec<String>,
@@ -742,7 +742,7 @@ fn evaluate_sparql_query(
 // No conversion functions needed!
 
 fn configure_and_evaluate_sparql_update(
-    store: &AggregateHDT,
+    store: &AggregateHdt,
     encoded: &[&[u8]],
     mut update: Option<String>,
     request: &Request<Body>,
@@ -782,7 +782,7 @@ fn configure_and_evaluate_sparql_update(
 }
 
 fn evaluate_sparql_update(
-    store: &AggregateHDT,
+    store: &AggregateHdt,
     update: &str,
     _use_default_graph_as_union: bool,
     _default_graph_uris: Vec<String>,
@@ -1038,7 +1038,7 @@ fn store_target(request: &Request<Body>) -> Result<Option<NamedGraphName>, HttpE
 }
 
 fn assert_that_graph_exists(
-    store: &AggregateHDT,
+    store: &AggregateHdt,
     target: &NamedGraphName,
 ) -> Result<(), HttpError> {
     if match target {
@@ -1189,7 +1189,7 @@ fn content_type(request: &Request<Body>) -> Option<String> {
 }
 
 fn web_load_graph(
-    store: &AggregateHDT,
+    store: &AggregateHdt,
     request: &mut Request<Body>,
     format: RdfFormat,
     to_graph_name: &GraphName,
@@ -1243,14 +1243,14 @@ fn web_load_graph(
 }
 
 fn web_load_dataset(
-    store: &AggregateHDT,
+    store: &AggregateHdt,
     request: &mut Request<Body>,
     format: RdfFormat,
 ) -> Result<String, HttpError> {
     web_load_graph(store, request, format, &GraphName::DefaultGraph)
 }
 
-// fn web_bulk_loader<'a>(store: &'a AggregateHDT, request: &Request<Body>) -> BulkLoader<'a> {
+// fn web_bulk_loader<'a>(store: &'a AggregateHdt, request: &Request<Body>) -> BulkLoader<'a> {
 //     let start = Instant::now();
 //     let mut loader = store.bulk_loader().on_progress(move |size| {
 //         let elapsed = start.elapsed();

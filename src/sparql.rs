@@ -1,3 +1,7 @@
+use oxrdf::NamedOrBlankNodeRef;
+use spareval::{InternalQuad, QueryEvaluationError, QueryEvaluator, QueryableDataset};
+use spargebra::term::{BlankNode, NamedNode, Term};
+use spargebra::SparqlParser;
 use std::{
     collections::HashMap,
     fs::File,
@@ -7,34 +11,36 @@ use std::{
     sync::{Arc, RwLock},
 };
 
-use oxrdf::{BlankNode, NamedNode, NamedOrBlankNodeRef, Term};
-use spareval::{InternalQuad, QueryEvaluationError, QueryEvaluator, QueryableDataset};
-use spargebra::SparqlParser;
-
 /// Boundry over a Header-Dictionary-Triplies (HDT) storage layer.
-pub struct AggregateHDT {
+pub struct AggregateHdt {
     // Map graph names (URIs) to HDT files
     hdts: Arc<RwLock<HashMap<String, hdt::Hdt>>>,
 }
 
-impl AggregateHDT {
-    pub fn new(paths: &[String]) -> Result<Self, anyhow::Error> {
+impl AggregateHdt {
+    pub fn new(paths: &[String]) -> anyhow::Result<Self> {
+        use rayon::prelude::*;
         let mut hdts: HashMap<String, hdt::Hdt> = HashMap::new();
         if paths.is_empty() {
-            return Err(anyhow::anyhow!("no hdt files detected"));
+            return Err(anyhow::anyhow!("no hdt files detected").into());
         }
-        for path in paths {
-            // TODO catch error and proceed to next file?
-            let mut reader = BufReader::new(File::open(path).expect("failed to open HDT file"));
-            let hdt = hdt::Hdt::read(&mut reader).unwrap();
-            hdts.insert(
-                format!(
-                    "file:///{}",
-                    Path::new(path).file_name().unwrap().to_str().unwrap()
-                ),
-                hdt,
-            );
-            continue;
+
+        let graphs: Vec<(String, hdt::Hdt)> = paths
+            .par_iter()
+            .map(|p| -> anyhow::Result<(String, hdt::Hdt)> {
+                let reader = BufReader::new(std::fs::File::open(p)?);
+                Ok((
+                    format!(
+                        "file:///{}",
+                        Path::new(p).file_name().unwrap().to_str().unwrap()
+                    ),
+                    hdt::Hdt::read(reader)?,
+                ))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        for (graph, h) in graphs {
+            hdts.insert(graph, h);
         }
 
         Ok(Self {
@@ -170,7 +176,7 @@ pub fn graph_to_file(name: NamedOrBlankNodeRef) -> Option<String> {
 /// Create the correct term for a given resource string.
 /// Slow, use the appropriate method if you know which type (Literal, URI, or blank node) the string has.
 // Based on https://github.com/KonradHoeffner/hdt/blob/871db777db3220dc4874af022287975b31d72d3a/src/hdt_graph.rs#L64
-fn hdt_bgp_str_to_term(s: &str) -> Result<Term, Error> {
+pub fn hdt_bgp_str_to_term(s: &str) -> Result<Term, Error> {
     match s.chars().next() {
         None => Err(Error::new(ErrorKind::InvalidData, "empty input")),
         // Double-quote delimiters are used around the string.
@@ -205,7 +211,7 @@ fn hdt_bgp_str_to_term(s: &str) -> Result<Term, Error> {
 }
 
 /// Convert triple string formats from OxRDF to HDT.
-fn term_to_hdt_bgp_str(term: Term) -> String {
+pub fn term_to_hdt_bgp_str(term: Term) -> String {
     match term {
         Term::NamedNode(named_node) => named_node.into_string(),
         Term::Literal(literal) => literal.to_string(),
@@ -213,7 +219,7 @@ fn term_to_hdt_bgp_str(term: Term) -> String {
     }
 }
 
-impl<'a> QueryableDataset<'a> for &'a AggregateHDT {
+impl<'a> QueryableDataset<'a> for &'a AggregateHdt {
     type InternalTerm = String;
     type Error = Error;
 
@@ -224,33 +230,33 @@ impl<'a> QueryableDataset<'a> for &'a AggregateHDT {
         object: Option<&String>,
         graph_name: Option<Option<&String>>,
     ) -> impl Iterator<Item = Result<InternalQuad<Self::InternalTerm>, Error>> + use<'a> {
-        // if let Some(Some(graph_name)) = graph_name {
-        //     return vec![Err(Error::new(
-        //         ErrorKind::InvalidData,
-        //         format!("HDT does not support named graph: {graph_name:?}"),
-        //     ))]
-        //     .into_iter();
-        // }
-        let mut v: Vec<Result<InternalQuad<_>, Error>> = Vec::new();
-        // let subject_owned = subject.cloned();
-        // let predicate_owned = predicate.cloned();
-        // let object_owned = object.cloned();
-        for (graph, data) in self.hdts.read().unwrap().iter() {
-            if let Some(Some(graph_name)) = graph_name {
-                if graph != graph_name {
-                    continue;
+        use rayon::prelude::*;
+        let [ps, pp, po] = [subject, predicate, object].map(|x| x.map(String::as_str));
+        // Query each HDT for BGP by string values in parallel.
+        let v: Vec<_> = self
+            .hdts
+            .read()
+            .unwrap()
+            .par_iter()
+            .flat_map(|(g, h)| {
+                if let Some(Some(graph_name)) = graph_name {
+                    if g != graph_name {
+                        return vec![];
+                    }
                 }
-            }
-            for triple in data.internal_quads_for_pattern(subject, predicate, object, None) {
-                let t = triple.unwrap();
-                v.push(Ok(InternalQuad {
-                    subject: t.subject,
-                    predicate: t.predicate,
-                    object: t.object,
-                    graph_name: Some(graph.to_string()),
-                }));
-            }
-        }
+                h.triples_with_pattern(ps, pp, po)
+                    .map(|[subject, predicate, object]| {
+                        Ok(InternalQuad {
+                            subject: subject.to_string(),
+                            predicate: predicate.to_string(),
+                            object: object.to_string(),
+                            graph_name: None,
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+
         v.into_iter()
     }
 
@@ -265,12 +271,12 @@ impl<'a> QueryableDataset<'a> for &'a AggregateHDT {
 
 pub fn query<'a>(
     q: &str,
-    hdt: &'a AggregateHDT,
-    base: Option<&str>,
+    hdt: &'a AggregateHdt,
+    base_iri: Option<String>,
 ) -> Result<spareval::QueryResults<'a>, QueryEvaluationError> {
     let query = SparqlParser::new()
-        .with_base_iri(base.unwrap_or("http://example.com/"))
-        .expect(&format!("invalid base iri provided: {base:?}"))
+        .with_base_iri(base_iri.unwrap_or("http://example.com/".to_string()))
+        .unwrap()
         .parse_query(q)?;
     QueryEvaluator::new().prepare(&query).execute(hdt)
 }
@@ -291,7 +297,7 @@ mod tests {
     fn test_contains_named_graph_found() {
         // Create an AggregateHDT with test.hdt
         let test_hdt_path = get_test_hdt_path("test.hdt");
-        let store = AggregateHDT::new(&[test_hdt_path]).expect("Failed to create AggregateHDT");
+        let store = AggregateHdt::new(&[test_hdt_path]).expect("Failed to create AggregateHDT");
 
         // Test 1: Graph should be found with file:/// URI scheme matching the filename
         let graph_name = NamedNode::new("file:///test.hdt").expect("Failed to create NamedNode");
@@ -310,7 +316,7 @@ mod tests {
     fn test_contains_named_graph_not_found() {
         // Create an AggregateHDT with test.hdt
         let test_hdt_path = get_test_hdt_path("test.hdt");
-        let store = AggregateHDT::new(&[test_hdt_path]).expect("Failed to create AggregateHDT");
+        let store = AggregateHdt::new(&[test_hdt_path]).expect("Failed to create AggregateHDT");
 
         // Test 1: Graph with different filename should not be found
         let missing_graph =
@@ -356,7 +362,7 @@ mod tests {
         // Create an AggregateHDT with multiple HDT files
         let test_hdt = get_test_hdt_path("test.hdt");
         let literal_hdt = get_test_hdt_path("literal.hdt");
-        let store = AggregateHDT::new(&[test_hdt, literal_hdt])
+        let store = AggregateHdt::new(&[test_hdt, literal_hdt])
             .expect("Failed to create AggregateHDT with multiple files");
 
         // Test 1: First graph should be found
@@ -385,7 +391,7 @@ mod tests {
     fn test_contains_named_graph_after_insert() {
         // Create an AggregateHDT with one HDT file
         let test_hdt_path = get_test_hdt_path("test.hdt");
-        let store = AggregateHDT::new(std::slice::from_ref(&test_hdt_path))
+        let store = AggregateHdt::new(std::slice::from_ref(&test_hdt_path))
             .expect("Failed to create AggregateHDT");
 
         // Graph should exist initially

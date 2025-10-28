@@ -79,7 +79,8 @@ pub async fn do_query<W: Write>(
         return Err(anyhow::anyhow!("Error reading data files: {e}",));
     }
 
-    let dataset = sparql::AggregateHDT::new(&hdt_path_vec)?;
+    let dataset = sparql::AggregateHdt::new(&hdt_path_vec)
+        .map_err(|e| anyhow::anyhow!("error initializting HDT files: {e}"))?;
 
     for rq in query_files {
         let mut f = File::open(rq)?;
