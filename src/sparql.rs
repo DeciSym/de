@@ -22,7 +22,7 @@ impl AggregateHdt {
         use rayon::prelude::*;
         let mut hdts: HashMap<String, hdt::hdt::HdtHybrid> = HashMap::new();
         if paths.is_empty() {
-            return Err(anyhow::anyhow!("no hdt files detected").into());
+            return Err(anyhow::anyhow!("no hdt files detected"));
         }
 
         let graphs: Vec<(String, hdt::hdt::HdtHybrid)> = paths
@@ -33,7 +33,7 @@ impl AggregateHdt {
                         "file:///{}",
                         Path::new(p).file_name().unwrap().to_str().unwrap()
                     ),
-                    hdt::hdt::Hdt::new_hybrid_cache(Path::new(p))
+                    hdt::hdt::Hdt::new_hybrid_cache(Path::new(p), true)
                         .map_err(|e| anyhow::anyhow!("{}", e))?,
                 ))
             })
@@ -46,11 +46,6 @@ impl AggregateHdt {
         Ok(Self {
             hdts: Arc::new(RwLock::new(hdts)),
         })
-    }
-
-    pub fn contains_named_graph(&self, target: &NamedNode) -> Result<bool, anyhow::Error> {
-        let hdts = self.hdts.read().unwrap();
-        Ok(hdts.contains_key(target.clone().into_string().as_str()))
     }
 
     pub fn insert_named_graph(
@@ -66,7 +61,8 @@ impl AggregateHdt {
         let hdt = match extension {
             "hdt" => {
                 // Read HDT file directly with hybrid cache
-                hdt::hdt::Hdt::new_hybrid_cache(file_path).map_err(|e| anyhow::anyhow!("{}", e))?
+                hdt::hdt::Hdt::new_hybrid_cache(file_path, true)
+                    .map_err(|e| anyhow::anyhow!("{}", e))?
             }
             "nt" => {
                 // Convert NT to HDT
@@ -80,7 +76,7 @@ impl AggregateHdt {
 
                 h.write(&mut hdt_writer)?;
                 hdt_writer.flush()?;
-                hdt::hdt::Hdt::new_hybrid_cache(hdt_path.as_path())
+                hdt::hdt::Hdt::new_hybrid_cache(hdt_path.as_path(), true)
                     .map_err(|e| anyhow::anyhow!("{}", e))?
             }
             _ => {
@@ -107,11 +103,6 @@ impl AggregateHdt {
         Ok(())
     }
 
-    pub fn named_graphs(&self) -> Vec<NamedNode> {
-        let hdts = self.hdts.read().unwrap();
-        hdts.keys().filter_map(|k| NamedNode::new(k).ok()).collect()
-    }
-
     /// Iterate over all HDTs in the HashMap.
     /// Accepts a closure that receives the graph name and HDT reference for each entry.
     pub fn iter<F>(&self, mut f: F)
@@ -121,20 +112,6 @@ impl AggregateHdt {
         let hdts = self.hdts.read().unwrap();
         for (key, hdt) in hdts.iter() {
             f(key, hdt);
-        }
-    }
-
-    /// Iterate over all triples from all HDTs in the HashMap.
-    /// Accepts a closure that receives the graph name and a triple (StringTriple) for each entry.
-    pub fn iter_triples_all<F>(&self, mut f: F)
-    where
-        F: FnMut(&String, [Arc<str>; 3]),
-    {
-        let hdts = self.hdts.read().unwrap();
-        for (graph_name, hdt) in hdts.iter() {
-            for triple in hdt.triples_all() {
-                f(graph_name, triple);
-            }
         }
     }
 
@@ -267,6 +244,21 @@ impl<'a> QueryableDataset<'a> for &'a AggregateHdt {
     fn externalize_term(&self, term: String) -> Result<Term, Error> {
         hdt_bgp_str_to_term(&term)
     }
+
+    /// Fetches the list of dataset named graphs
+    fn internal_named_graphs(
+        &self,
+    ) -> impl Iterator<Item = Result<Self::InternalTerm, Self::Error>> + use<'a> {
+        let hdts = self.hdts.read().unwrap();
+        let keys: Vec<String> = hdts.keys().cloned().collect();
+        keys.into_iter().map(Ok)
+    }
+
+    /// Returns if the dataset contains a given named graph
+    fn contains_internal_graph_name(&self, graph_name: &String) -> Result<bool, Self::Error> {
+        let hdts = self.hdts.read().unwrap();
+        Ok(hdts.contains_key(graph_name))
+    }
 }
 
 pub fn query<'a>(
@@ -297,11 +289,11 @@ mod tests {
     fn test_contains_named_graph_found() {
         // Create an AggregateHDT with test.hdt
         let test_hdt_path = get_test_hdt_path("test.hdt");
-        let store = AggregateHdt::new(&[test_hdt_path]).expect("Failed to create AggregateHDT");
+        let store = &AggregateHdt::new(&[test_hdt_path]).expect("Failed to create AggregateHDT");
 
         // Test 1: Graph should be found with file:/// URI scheme matching the filename
-        let graph_name = NamedNode::new("file:///test.hdt").expect("Failed to create NamedNode");
-        let result = store.contains_named_graph(&graph_name);
+        let graph_name = "file:///test.hdt".to_string();
+        let result = store.contains_internal_graph_name(&graph_name);
         assert!(
             result.is_ok(),
             "contains_named_graph should not return error"
@@ -316,12 +308,11 @@ mod tests {
     fn test_contains_named_graph_not_found() {
         // Create an AggregateHDT with test.hdt
         let test_hdt_path = get_test_hdt_path("test.hdt");
-        let store = AggregateHdt::new(&[test_hdt_path]).expect("Failed to create AggregateHDT");
+        let store = &AggregateHdt::new(&[test_hdt_path]).expect("Failed to create AggregateHDT");
 
         // Test 1: Graph with different filename should not be found
-        let missing_graph =
-            NamedNode::new("file:///nonexistent.hdt").expect("Failed to create NamedNode");
-        let result = store.contains_named_graph(&missing_graph);
+        let missing_graph = "file:///nonexistent.hdt".to_string();
+        let result = store.contains_internal_graph_name(&missing_graph);
         assert!(
             result.is_ok(),
             "contains_named_graph should not return error"
@@ -332,9 +323,8 @@ mod tests {
         );
 
         // Test 2: Graph with non-file URI scheme should not be found
-        let http_graph =
-            NamedNode::new("http://example.org/test.hdt").expect("Failed to create NamedNode");
-        let result_http = store.contains_named_graph(&http_graph);
+        let http_graph = "http://example.org/test.hdt".to_string();
+        let result_http = store.contains_internal_graph_name(&http_graph);
         assert!(
             result_http.is_ok(),
             "contains_named_graph should not return error"
@@ -345,8 +335,8 @@ mod tests {
         );
 
         // Test 3: Graph with different stem should not be found
-        let wrong_stem = NamedNode::new("file:///different").expect("Failed to create NamedNode");
-        let result_wrong = store.contains_named_graph(&wrong_stem);
+        let wrong_stem = "file:///different".to_string();
+        let result_wrong = store.contains_internal_graph_name(&wrong_stem);
         assert!(
             result_wrong.is_ok(),
             "contains_named_graph should not return error"
@@ -362,27 +352,27 @@ mod tests {
         // Create an AggregateHDT with multiple HDT files
         let test_hdt = get_test_hdt_path("test.hdt");
         let literal_hdt = get_test_hdt_path("literal.hdt");
-        let store = AggregateHdt::new(&[test_hdt, literal_hdt])
+        let store = &AggregateHdt::new(&[test_hdt, literal_hdt])
             .expect("Failed to create AggregateHDT with multiple files");
 
         // Test 1: First graph should be found
-        let graph1 = NamedNode::new("file:///test.hdt").expect("Failed to create NamedNode");
+        let graph1 = "file:///test.hdt".to_string();
         assert!(
-            store.contains_named_graph(&graph1).unwrap(),
+            store.contains_internal_graph_name(&graph1).unwrap(),
             "First graph 'test' should be found"
         );
 
         // Test 2: Second graph should be found
-        let graph2 = NamedNode::new("file:///literal.hdt").expect("Failed to create NamedNode");
+        let graph2 = "file:///literal.hdt".to_string();
         assert!(
-            store.contains_named_graph(&graph2).unwrap(),
+            store.contains_internal_graph_name(&graph2).unwrap(),
             "Second graph 'literal' should be found"
         );
 
         // Test 3: Non-existent graph should not be found
-        let missing = NamedNode::new("file:///missing.hdt").expect("Failed to create NamedNode");
+        let missing = "file:///missing.hdt".to_string();
         assert!(
-            !store.contains_named_graph(&missing).unwrap(),
+            !store.contains_internal_graph_name(&missing).unwrap(),
             "Non-existent graph should not be found"
         );
     }
@@ -391,36 +381,34 @@ mod tests {
     fn test_contains_named_graph_after_insert() {
         // Create an AggregateHDT with one HDT file
         let test_hdt_path = get_test_hdt_path("test.hdt");
-        let store = AggregateHdt::new(std::slice::from_ref(&test_hdt_path))
+        let store = &AggregateHdt::new(std::slice::from_ref(&test_hdt_path))
             .expect("Failed to create AggregateHDT");
 
         // Graph should exist initially
-        let existing_graph =
-            NamedNode::new("file:///test.hdt").expect("Failed to create NamedNode");
+        let existing_graph = "file:///test.hdt".to_string();
         assert!(
-            store.contains_named_graph(&existing_graph).unwrap(),
+            store.contains_internal_graph_name(&existing_graph).unwrap(),
             "Initial graph should exist"
         );
 
         // Insert a new graph
-        let new_graph =
-            NamedNode::new("http://example.org/newgraph").expect("Failed to create NamedNode");
+        let new_graph = "http://example.org/newgraph".to_string();
 
         // Before insertion, should not exist
         assert!(
-            !store.contains_named_graph(&new_graph).unwrap(),
+            !store.contains_internal_graph_name(&new_graph).unwrap(),
             "New graph should not exist before insertion"
         );
 
         // Insert the graph
         let hdt_path = Path::new(&test_hdt_path);
         store
-            .insert_named_graph(&new_graph, hdt_path)
+            .insert_named_graph(&NamedNode::new(&new_graph).unwrap(), hdt_path)
             .expect("Failed to insert named graph");
 
         // After insertion, should exist
         assert!(
-            store.contains_named_graph(&new_graph).unwrap(),
+            store.contains_internal_graph_name(&new_graph).unwrap(),
             "New graph should exist after insertion"
         );
     }
