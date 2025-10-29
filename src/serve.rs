@@ -7,6 +7,7 @@ use http::{
     uri::PathAndQuery,
     HeaderValue, Method, Request, Response, StatusCode,
 };
+use log::debug;
 use oxhttp::{model::Body, Server};
 use oxiri::Iri;
 use oxrdf::{GraphName, NamedNode, NamedOrBlankNode, TripleRef};
@@ -636,7 +637,7 @@ fn evaluate_sparql_query(
     // let mut evaluator = default_sparql_evaluator()
     //     .with_base_iri(base_url(request))
     //     .map_err(bad_request)?;
-
+    debug!("quer: {query}");
     let stuff = SparqlParser::new()
         .with_base_iri(base_url(request))
         .map_err(bad_request)?
@@ -888,16 +889,74 @@ fn evaluate_sparql_update(
                 ));
             }
 
-            GraphUpdateOperation::Clear { .. } => {
-                return Err(bad_request(
-                    "CLEAR is not allowed. Only INSERT DATA to new graphs is permitted.",
-                ));
+            GraphUpdateOperation::Clear { graph, silent } => {
+                use spargebra::algebra::GraphTarget;
+
+                match graph {
+                    GraphTarget::NamedNode(graph_name) => {
+                        // Allow CLEAR for named graphs (will remove the graph)
+                        let exists = store
+                            .contains_internal_graph_name(&graph_name.clone().into_string())
+                            .map_err(internal_server_error)?;
+
+                        if !exists && !silent {
+                            return Err(bad_request(format!(
+                                "Graph {} does not exist.",
+                                graph_name
+                            )));
+                        }
+                    }
+                    GraphTarget::DefaultGraph => {
+                        return Err(bad_request(
+                            "CLEAR DEFAULT is not supported. Only named graphs can be cleared.",
+                        ));
+                    }
+                    GraphTarget::NamedGraphs => {
+                        return Err(bad_request(
+                            "CLEAR NAMED is not supported. Please specify individual graphs.",
+                        ));
+                    }
+                    GraphTarget::AllGraphs => {
+                        return Err(bad_request(
+                            "CLEAR ALL is not supported. Please specify individual graphs.",
+                        ));
+                    }
+                }
             }
 
-            GraphUpdateOperation::Drop { .. } => {
-                return Err(bad_request(
-                    "DROP is not allowed. Only INSERT DATA to new graphs is permitted.",
-                ));
+            GraphUpdateOperation::Drop { graph, silent } => {
+                use spargebra::algebra::GraphTarget;
+
+                match graph {
+                    GraphTarget::NamedNode(graph_name) => {
+                        // Allow DROP for named graphs (will remove the graph)
+                        let exists = store
+                            .contains_internal_graph_name(&graph_name.clone().into_string())
+                            .map_err(internal_server_error)?;
+
+                        if !exists && !silent {
+                            return Err(bad_request(format!(
+                                "Graph {} does not exist.",
+                                graph_name
+                            )));
+                        }
+                    }
+                    GraphTarget::DefaultGraph => {
+                        return Err(bad_request(
+                            "DROP DEFAULT is not supported. Only named graphs can be dropped.",
+                        ));
+                    }
+                    GraphTarget::NamedGraphs => {
+                        return Err(bad_request(
+                            "DROP NAMED is not supported. Please specify individual graphs.",
+                        ));
+                    }
+                    GraphTarget::AllGraphs => {
+                        return Err(bad_request(
+                            "DROP ALL is not supported. Please specify individual graphs.",
+                        ));
+                    }
+                }
             }
         }
     }
@@ -995,6 +1054,51 @@ fn evaluate_sparql_update(
                     ));
                 } else {
                     return Err(bad_request("LOAD to default graph is not allowed"));
+                }
+            }
+
+            GraphUpdateOperation::Clear { graph, silent } => {
+                use spargebra::algebra::GraphTarget;
+
+                if let GraphTarget::NamedNode(graph_name) = graph {
+                    // Check if graph exists
+                    let exists = store
+                        .contains_internal_graph_name(&graph_name.clone().into_string())
+                        .map_err(internal_server_error)?;
+
+                    if exists {
+                        // Remove the graph
+                        store
+                            .remove_named_graph(graph_name)
+                            .map_err(internal_server_error)?;
+                        eprintln!("CLEAR GRAPH {} - graph removed", graph_name);
+                    } else if !silent {
+                        return Err(bad_request(format!("Graph {} does not exist", graph_name)));
+                    }
+                }
+            }
+
+            GraphUpdateOperation::Drop { graph, silent } => {
+                use spargebra::algebra::GraphTarget;
+
+                if let GraphTarget::NamedNode(graph_name) = graph {
+                    // Check if graph exists
+                    let exists = store
+                        .contains_internal_graph_name(&graph_name.clone().into_string())
+                        .map_err(internal_server_error)?;
+
+                    if exists {
+                        // Remove the graph
+                        let removed = store
+                            .remove_named_graph(graph_name)
+                            .map_err(internal_server_error)?;
+
+                        if removed {
+                            eprintln!("DROP GRAPH {} - graph removed", graph_name);
+                        }
+                    } else if !silent {
+                        return Err(bad_request(format!("Graph {} does not exist", graph_name)));
+                    }
                 }
             }
 

@@ -245,7 +245,6 @@ impl<'a> QueryableDataset<'a> for &'a AggregateHdt {
         hdt_bgp_str_to_term(&term)
     }
 
-    /// Fetches the list of dataset named graphs
     fn internal_named_graphs(
         &self,
     ) -> impl Iterator<Item = Result<Self::InternalTerm, Self::Error>> + use<'a> {
@@ -254,7 +253,6 @@ impl<'a> QueryableDataset<'a> for &'a AggregateHdt {
         keys.into_iter().map(Ok)
     }
 
-    /// Returns if the dataset contains a given named graph
     fn contains_internal_graph_name(&self, graph_name: &String) -> Result<bool, Self::Error> {
         let hdts = self.hdts.read().unwrap();
         Ok(hdts.contains_key(graph_name))
