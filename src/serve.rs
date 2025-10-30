@@ -629,49 +629,33 @@ fn evaluate_sparql_query(
     query: &str,
     _use_default_graph_as_union: bool,
     _default_graph_uris: Vec<String>,
-    _named_graph_uris: Vec<String>,
+    named_graph_uris: Vec<String>,
     request: &Request<Body>,
     // timeout: Option<Duration>,
 ) -> Result<Response<Body>, HttpError> {
-    // let mut evaluator = default_sparql_evaluator()
-    //     .with_base_iri(base_url(request))
-    //     .map_err(bad_request)?;
-    debug!("quer: {query}");
+    debug!("query: {query}");
     let stuff = SparqlParser::new()
         .with_base_iri(base_url(request))
         .map_err(bad_request)?
         .parse_query(query)
         .map_err(bad_request)?;
 
-    // if use_default_graph_as_union {
-    //     if !default_graph_uris.is_empty() || !named_graph_uris.is_empty() {
-    //         return Err(bad_request(
-    //             "default-graph-uri or named-graph-uri and union-default-graph should not be set at the same time",
-    //         ));
-    //     }
-    //     prepared.dataset_mut().set_default_graph_as_union()
-    // } else if !default_graph_uris.is_empty() || !named_graph_uris.is_empty() {
-    //     prepared.dataset_mut().set_default_graph(
-    //         default_graph_uris
-    //             .into_iter()
-    //             .map(|e| Ok(NamedNode::new(e)?.into()))
-    //             .collect::<Result<Vec<GraphName>, IriParseError>>()
-    //             .map_err(bad_request)?,
-    //     );
-    //     prepared.dataset_mut().set_available_named_graphs(
-    //         named_graph_uris
-    //             .into_iter()
-    //             .map(|e| Ok(NamedNode::new(e)?.into()))
-    //             .collect::<Result<Vec<NamedOrBlankNode>, IriParseError>>()
-    //             .map_err(bad_request)?,
-    //     );
-    // }
-    let s = &store
+    // Get snapshot and configure dataset
+    // Note: union_default_graph is always true - default graph is union of all available named graphs
+    let s = store
         .get_snapshot()
         .map_err(|_| internal_server_error("message"))?;
+
+    // Configure available named graphs if specified
+    let s = if !named_graph_uris.is_empty() {
+        s.with_named_graphs(named_graph_uris)
+    } else {
+        s
+    };
+
     let results = QueryEvaluator::new()
         .prepare(&stuff)
-        .execute(s)
+        .execute(&s)
         .map_err(internal_server_error)?;
     match results {
         QueryResults::Solutions(solutions) => {

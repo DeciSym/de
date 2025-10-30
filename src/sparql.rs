@@ -21,6 +21,18 @@ pub struct AggregateHdt {
 pub struct AggregateHdtSnapshot {
     // Map graph names (URIs) to HDT instances
     pub hdts: HashMap<String, hdt::hdt::HdtHybrid>,
+    /// Available named graphs. If None, all graphs in hdts are available.
+    /// The default graph is always the union of all available named graphs.
+    pub named_graph_names: Option<Vec<String>>,
+}
+
+impl AggregateHdtSnapshot {
+    /// Configure which named graphs are available for querying.
+    /// The default graph will be the union of these graphs.
+    pub fn with_named_graphs(mut self, graphs: Vec<String>) -> Self {
+        self.named_graph_names = Some(graphs);
+        self
+    }
 }
 
 impl AggregateHdt {
@@ -82,7 +94,10 @@ impl AggregateHdt {
             .into_iter()
             .collect();
 
-        Ok(AggregateHdtSnapshot { hdts })
+        Ok(AggregateHdtSnapshot {
+            hdts,
+            named_graph_names: None,
+        })
     }
 
     pub fn contains_graph_name(&self, graph_name: &String) -> Result<bool, anyhow::Error> {
@@ -286,19 +301,41 @@ impl<'a> QueryableDataset<'a> for &'a AggregateHdtSnapshot {
         let subject_pattern = subject.cloned();
         let predicate_pattern = predicate.cloned();
         let object_pattern = object.cloned();
-        let graph_filter = graph_name.and_then(|x| x.cloned());
+
+        // Clone graph_name to avoid capturing anonymous lifetime
+        // graph_name is Option<Option<&Arc<str>>>, we need Option<Option<Arc<str>>>
+        let graph_name_owned = graph_name.map(|inner| inner.cloned());
+
+        // Clone dataset configuration for use in closures
+        let named_graph_names = self.named_graph_names.clone();
 
         // Create a chaining iterator that collects from each HDT sequentially
         // Still need to collect per-HDT due to Box<dyn Iterator> lifetime constraints
         self.hdts
             .iter()
             .filter(move |(g, _h)| {
-                // Filter by graph name if specified
-                if let Some(ref target_graph) = graph_filter {
-                    let g_arc: Arc<str> = Arc::from(g.as_str());
-                    &g_arc == target_graph
+                // First check if this graph is in the allowed named graphs
+                let is_allowed = if let Some(ref allowed) = named_graph_names {
+                    allowed.contains(g)
                 } else {
-                    true
+                    true // All graphs available
+                };
+
+                if !is_allowed {
+                    return false;
+                }
+
+                match &graph_name_owned {
+                    // Query for default graph: Some(None)
+                    // Default graph is always union of all available named graphs
+                    Some(None) => true,
+                    // Query for specific named graph: Some(Some(graph))
+                    Some(Some(target_graph)) => {
+                        let g_arc: Arc<str> = Arc::from(g.as_str());
+                        &g_arc == target_graph
+                    }
+                    // Query across all graphs: None
+                    None => true,
                 }
             })
             .flat_map(move |(graph_name, hdt)| {
