@@ -12,40 +12,81 @@ use std::{
 };
 
 /// Boundry over a Header-Dictionary-Triplies (HDT) storage layer.
+/// Stores file paths only; HDT instances are created per-request for better concurrency.
 pub struct AggregateHdt {
-    // Map graph names (URIs) to HDT files
-    hdts: Arc<RwLock<HashMap<String, hdt::hdt::HdtHybrid>>>,
+    // Map graph names (URIs) to file paths on disk
+    file_paths: Arc<RwLock<HashMap<String, std::path::PathBuf>>>,
+}
+
+pub struct AggregateHdtSnapshot {
+    // Map graph names (URIs) to HDT instances
+    pub hdts: HashMap<String, hdt::hdt::HdtHybrid>,
 }
 
 impl AggregateHdt {
     pub fn new(paths: &[String]) -> anyhow::Result<Self> {
-        use rayon::prelude::*;
-        let mut hdts: HashMap<String, hdt::hdt::HdtHybrid> = HashMap::new();
+        let mut file_paths: HashMap<String, std::path::PathBuf> = HashMap::new();
         if paths.is_empty() {
             return Err(anyhow::anyhow!("no hdt files detected"));
         }
 
-        let graphs: Vec<(String, hdt::hdt::HdtHybrid)> = paths
-            .par_iter()
-            .map(|p| -> anyhow::Result<(String, hdt::hdt::HdtHybrid)> {
-                Ok((
-                    format!(
-                        "file:///{}",
-                        Path::new(p).file_name().unwrap().to_str().unwrap()
-                    ),
-                    hdt::hdt::Hdt::new_hybrid_cache(Path::new(p), true)
-                        .map_err(|e| anyhow::anyhow!("{}", e))?,
-                ))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        for p in paths {
+            let path = Path::new(p);
 
-        for (graph, h) in graphs {
-            hdts.insert(graph, h);
+            // Verify the file exists
+            if !path.exists() {
+                return Err(anyhow::anyhow!("HDT file does not exist: {}", p));
+            }
+
+            // Create graph name from filename
+            let graph_name = format!(
+                "file:///{}",
+                path.file_name()
+                    .ok_or_else(|| anyhow::anyhow!("Invalid file path: {}", p))?
+                    .to_str()
+                    .ok_or_else(|| anyhow::anyhow!("Invalid filename encoding: {}", p))?
+            );
+
+            file_paths.insert(graph_name, path.to_path_buf());
         }
 
         Ok(Self {
-            hdts: Arc::new(RwLock::new(hdts)),
+            file_paths: Arc::new(RwLock::new(file_paths)),
         })
+    }
+
+    pub fn get_snapshot(&self) -> Result<AggregateHdtSnapshot, Box<dyn std::error::Error>> {
+        use rayon::prelude::*;
+
+        let file_paths_guard = self.file_paths.read().unwrap();
+
+        // Collect (graph_name, file_path) pairs for parallel processing
+        let paths_vec: Vec<(String, std::path::PathBuf)> = file_paths_guard
+            .iter()
+            .map(|(g, p)| (g.clone(), p.clone()))
+            .collect();
+        drop(file_paths_guard);
+
+        // Load all HDTs in parallel
+        let hdts: HashMap<String, hdt::hdt::HdtHybrid> = paths_vec
+            .par_iter()
+            .map(
+                |(graph_name, path)| -> anyhow::Result<(String, hdt::hdt::HdtHybrid)> {
+                    let hdt = hdt::hdt::Hdt::new_hybrid_cache(path, true).map_err(|e| {
+                        anyhow::anyhow!("Failed to load HDT from {:?}: {}", path, e)
+                    })?;
+                    Ok((graph_name.clone(), hdt))
+                },
+            )
+            .collect::<anyhow::Result<Vec<_>>>()?
+            .into_iter()
+            .collect();
+
+        Ok(AggregateHdtSnapshot { hdts })
+    }
+
+    pub fn contains_graph_name(&self, graph_name: &String) -> Result<bool, anyhow::Error> {
+        Ok(self.file_paths.read().unwrap().contains_key(graph_name))
     }
 
     pub fn insert_named_graph(
@@ -58,11 +99,13 @@ impl AggregateHdt {
             .and_then(|s| s.to_str())
             .ok_or_else(|| anyhow::anyhow!("File has no extension: {:?}", file_path))?;
 
-        let hdt = match extension {
+        let final_path = match extension {
             "hdt" => {
-                // Read HDT file directly with hybrid cache
-                hdt::hdt::Hdt::new_hybrid_cache(file_path, true)
-                    .map_err(|e| anyhow::anyhow!("{}", e))?
+                // Use HDT file directly
+                if !file_path.exists() {
+                    return Err(anyhow::anyhow!("HDT file does not exist: {:?}", file_path));
+                }
+                file_path.to_path_buf()
             }
             "nt" => {
                 // Convert NT to HDT
@@ -76,53 +119,97 @@ impl AggregateHdt {
 
                 h.write(&mut hdt_writer)?;
                 hdt_writer.flush()?;
-                hdt::hdt::Hdt::new_hybrid_cache(hdt_path.as_path(), true)
-                    .map_err(|e| anyhow::anyhow!("{}", e))?
+                hdt_path
             }
             _ => {
                 return Err(anyhow::anyhow!(
-                    "Unsupported file extension: {}. Only .hdt is supported.",
+                    "Unsupported file extension: {}. Only .hdt and .nt are supported.",
                     extension
                 ));
             }
         };
 
-        let mut hdts = self.hdts.write().unwrap();
-        hdts.insert(graph_name.clone().into_string(), hdt);
+        let mut file_paths = self.file_paths.write().unwrap();
+        file_paths.insert(graph_name.clone().into_string(), final_path);
         Ok(())
     }
 
     pub fn remove_named_graph(&self, graph_name: &NamedNode) -> Result<bool, anyhow::Error> {
-        let mut hdts = self.hdts.write().unwrap();
-        Ok(hdts.remove(graph_name.as_str()).is_some())
+        let mut file_paths = self.file_paths.write().unwrap();
+        if let Some(path) = file_paths.remove(graph_name.as_str()) {
+            // Delete the HDT file from disk
+            if path.exists() {
+                std::fs::remove_file(&path)?;
+                eprintln!("Deleted HDT file: {:?}", path);
+            }
+
+            // Delete associated cache files
+            if let Some(parent) = path.parent() {
+                if let Some(filename) = path.file_name() {
+                    let filename_str = filename.to_string_lossy();
+
+                    if let Ok(entries) = std::fs::read_dir(parent) {
+                        for entry in entries.flatten() {
+                            let entry_path = entry.path();
+                            if let Some(entry_name) = entry_path.file_name() {
+                                let entry_name_str = entry_name.to_string_lossy();
+
+                                // Check if this is a cache file for our HDT
+                                if entry_name_str.starts_with(&*filename_str)
+                                    && (entry_name_str.contains(".index.")
+                                        || entry_name_str.ends_with(".cache"))
+                                {
+                                    if let Err(e) = std::fs::remove_file(&entry_path) {
+                                        eprintln!(
+                                            "Warning: Failed to delete cache file {:?}: {}",
+                                            entry_path, e
+                                        );
+                                    } else {
+                                        eprintln!("Deleted cache file: {:?}", entry_path);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
 
     pub fn clear(&self) -> Result<(), anyhow::Error> {
-        let mut hdts = self.hdts.write().unwrap();
-        hdts.clear();
+        let mut file_paths = self.file_paths.write().unwrap();
+        file_paths.clear();
         Ok(())
     }
 
-    /// Iterate over all HDTs in the HashMap.
-    /// Accepts a closure that receives the graph name and HDT reference for each entry.
+    /// Iterate over all HDT file paths in the HashMap.
+    /// Accepts a closure that receives the graph name and file path for each entry.
     pub fn iter<F>(&self, mut f: F)
     where
-        F: FnMut(&String, &hdt::hdt::HdtHybrid),
+        F: FnMut(&String, &std::path::PathBuf),
     {
-        let hdts = self.hdts.read().unwrap();
-        for (key, hdt) in hdts.iter() {
-            f(key, hdt);
+        let file_paths = self.file_paths.read().unwrap();
+        for (key, path) in file_paths.iter() {
+            f(key, path);
         }
     }
 
     /// Collect all triples from all HDTs and return them as a Vec with their graph names.
     /// This is useful for scenarios where you need a consumable iterator.
+    /// NOTE: This creates HDT instances for all graphs, so it may be memory-intensive.
     pub fn collect_all_triples(&self) -> Vec<(String, [Arc<str>; 3])> {
-        let hdts = self.hdts.read().unwrap();
+        let file_paths = self.file_paths.read().unwrap();
         let mut result = Vec::new();
-        for (graph_name, hdt) in hdts.iter() {
-            for triple in hdt.triples_all() {
-                result.push((graph_name.clone(), triple));
+        for (graph_name, path) in file_paths.iter() {
+            // Create HDT instance for this file
+            if let Ok(hdt) = hdt::hdt::Hdt::new_hybrid_cache(path, true) {
+                for triple in hdt.triples_all() {
+                    result.push((graph_name.clone(), triple));
+                }
             }
         }
         result
@@ -196,7 +283,7 @@ pub fn term_to_hdt_bgp_str(term: Term) -> String {
     }
 }
 
-impl<'a> QueryableDataset<'a> for &'a AggregateHdt {
+impl<'a> QueryableDataset<'a> for &'a AggregateHdtSnapshot {
     type InternalTerm = String;
     type Error = Error;
 
@@ -212,8 +299,6 @@ impl<'a> QueryableDataset<'a> for &'a AggregateHdt {
         // Query each HDT for BGP by string values in parallel.
         let v: Vec<_> = self
             .hdts
-            .read()
-            .unwrap()
             .par_iter()
             .flat_map(|(g, h)| {
                 if let Some(Some(graph_name)) = graph_name {
@@ -248,20 +333,18 @@ impl<'a> QueryableDataset<'a> for &'a AggregateHdt {
     fn internal_named_graphs(
         &self,
     ) -> impl Iterator<Item = Result<Self::InternalTerm, Self::Error>> + use<'a> {
-        let hdts = self.hdts.read().unwrap();
-        let keys: Vec<String> = hdts.keys().cloned().collect();
+        let keys: Vec<String> = self.hdts.keys().cloned().collect();
         keys.into_iter().map(Ok)
     }
 
     fn contains_internal_graph_name(&self, graph_name: &String) -> Result<bool, Self::Error> {
-        let hdts = self.hdts.read().unwrap();
-        Ok(hdts.contains_key(graph_name))
+        Ok(self.hdts.contains_key(graph_name))
     }
 }
 
 pub fn query<'a>(
     q: &str,
-    hdt: &'a AggregateHdt,
+    hdt: &'a AggregateHdtSnapshot,
     base_iri: Option<String>,
 ) -> Result<spareval::QueryResults<'a>, QueryEvaluationError> {
     let query = SparqlParser::new()
@@ -287,7 +370,10 @@ mod tests {
     fn test_contains_named_graph_found() {
         // Create an AggregateHDT with test.hdt
         let test_hdt_path = get_test_hdt_path("test.hdt");
-        let store = &AggregateHdt::new(&[test_hdt_path]).expect("Failed to create AggregateHDT");
+        let store = &AggregateHdt::new(&[test_hdt_path])
+            .expect("Failed to create AggregateHDT")
+            .get_snapshot()
+            .expect("msg");
 
         // Test 1: Graph should be found with file:/// URI scheme matching the filename
         let graph_name = "file:///test.hdt".to_string();
@@ -306,7 +392,10 @@ mod tests {
     fn test_contains_named_graph_not_found() {
         // Create an AggregateHDT with test.hdt
         let test_hdt_path = get_test_hdt_path("test.hdt");
-        let store = &AggregateHdt::new(&[test_hdt_path]).expect("Failed to create AggregateHDT");
+        let store = &AggregateHdt::new(&[test_hdt_path])
+            .expect("Failed to create AggregateHDT")
+            .get_snapshot()
+            .expect("msg");
 
         // Test 1: Graph with different filename should not be found
         let missing_graph = "file:///nonexistent.hdt".to_string();
@@ -351,7 +440,9 @@ mod tests {
         let test_hdt = get_test_hdt_path("test.hdt");
         let literal_hdt = get_test_hdt_path("literal.hdt");
         let store = &AggregateHdt::new(&[test_hdt, literal_hdt])
-            .expect("Failed to create AggregateHDT with multiple files");
+            .expect("Failed to create AggregateHDT with multiple files")
+            .get_snapshot()
+            .expect("msg");
 
         // Test 1: First graph should be found
         let graph1 = "file:///test.hdt".to_string();
@@ -382,10 +473,14 @@ mod tests {
         let store = &AggregateHdt::new(std::slice::from_ref(&test_hdt_path))
             .expect("Failed to create AggregateHDT");
 
+        let snapshot = &store.get_snapshot().expect("msg");
+
         // Graph should exist initially
         let existing_graph = "file:///test.hdt".to_string();
         assert!(
-            store.contains_internal_graph_name(&existing_graph).unwrap(),
+            snapshot
+                .contains_internal_graph_name(&existing_graph)
+                .unwrap(),
             "Initial graph should exist"
         );
 
@@ -394,7 +489,7 @@ mod tests {
 
         // Before insertion, should not exist
         assert!(
-            !store.contains_internal_graph_name(&new_graph).unwrap(),
+            !snapshot.contains_internal_graph_name(&new_graph).unwrap(),
             "New graph should not exist before insertion"
         );
 
@@ -406,7 +501,7 @@ mod tests {
 
         // After insertion, should exist
         assert!(
-            store.contains_internal_graph_name(&new_graph).unwrap(),
+            !snapshot.contains_internal_graph_name(&new_graph).unwrap(),
             "New graph should exist after insertion"
         );
     }

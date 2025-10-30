@@ -269,9 +269,11 @@ fn handle_request(
             if let Some(target) = store_target(request)? {
                 assert_that_graph_exists(store, &target)?;
                 let format = rdf_content_negotiation(request)?;
-
+                let s = &store
+                    .get_snapshot()
+                    .map_err(|_| internal_server_error("message"))?;
                 // TODO: Implement proper graph retrieval
-                let triples: Vec<_> = store
+                let triples: Vec<_> = s
                     .internal_quads_for_pattern(
                         None,
                         None,
@@ -389,7 +391,7 @@ fn handle_request(
                 let new = !match &target {
                     NamedGraphName::NamedNode(target) => {
                         if store
-                            .contains_internal_graph_name(&target.clone().into_string())
+                            .contains_graph_name(&target.clone().into_string())
                             .map_err(internal_server_error)?
                         {
                             store
@@ -434,7 +436,7 @@ fn handle_request(
                     NamedGraphName::DefaultGraph => todo!(),
                     NamedGraphName::NamedNode(target) => {
                         if store
-                            .contains_internal_graph_name(&target.clone().into_string())
+                            .contains_graph_name(&target.clone().into_string())
                             .map_err(internal_server_error)?
                         {
                             store
@@ -667,10 +669,12 @@ fn evaluate_sparql_query(
     //             .map_err(bad_request)?,
     //     );
     // }
-
+    let s = &store
+        .get_snapshot()
+        .map_err(|_| internal_server_error("message"))?;
     let results = QueryEvaluator::new()
         .prepare(&stuff)
-        .execute(store)
+        .execute(s)
         .map_err(internal_server_error)?;
     match results {
         QueryResults::Solutions(solutions) => {
@@ -797,7 +801,6 @@ fn evaluate_sparql_update(
         .map_err(|e| bad_request(format!("Invalid base IRI: {}", e)))?
         .parse_update(update)
         .map_err(|e| bad_request(format!("Invalid SPARQL update: {}", e)))?;
-
     // Validate operations - only allow CREATE and INSERT DATA to new graphs
     // Reject any operations that modify existing graphs
     for op in &update_ops.operations {
@@ -806,7 +809,7 @@ fn evaluate_sparql_update(
             GraphUpdateOperation::Create { graph, silent } => {
                 // Check if graph already exists
                 let exists = store
-                    .contains_internal_graph_name(&graph.clone().into_string())
+                    .contains_graph_name(&graph.clone().into_string())
                     .map_err(internal_server_error)?;
 
                 if exists && !silent {
@@ -837,7 +840,7 @@ fn evaluate_sparql_update(
                 // Check that all target graphs don't already exist
                 for graph in graphs_used {
                     if store
-                        .contains_internal_graph_name(&graph.clone().into_string())
+                        .contains_graph_name(&graph.clone().into_string())
                         .map_err(internal_server_error)?
                     {
                         return Err(bad_request(format!(
@@ -858,7 +861,7 @@ fn evaluate_sparql_update(
 
                 if let SparqlGraphName::NamedNode(graph) = destination {
                     let exists = store
-                        .contains_internal_graph_name(&graph.clone().into_string())
+                        .contains_graph_name(&graph.clone().into_string())
                         .map_err(internal_server_error)?;
 
                     if exists && !silent {
@@ -896,7 +899,7 @@ fn evaluate_sparql_update(
                     GraphTarget::NamedNode(graph_name) => {
                         // Allow CLEAR for named graphs (will remove the graph)
                         let exists = store
-                            .contains_internal_graph_name(&graph_name.clone().into_string())
+                            .contains_graph_name(&graph_name.clone().into_string())
                             .map_err(internal_server_error)?;
 
                         if !exists && !silent {
@@ -931,7 +934,7 @@ fn evaluate_sparql_update(
                     GraphTarget::NamedNode(graph_name) => {
                         // Allow DROP for named graphs (will remove the graph)
                         let exists = store
-                            .contains_internal_graph_name(&graph_name.clone().into_string())
+                            .contains_graph_name(&graph_name.clone().into_string())
                             .map_err(internal_server_error)?;
 
                         if !exists && !silent {
@@ -968,7 +971,7 @@ fn evaluate_sparql_update(
                 // CREATE is a no-op - graph will be created on first INSERT DATA
                 // Just verify it doesn't already exist (already checked in validation)
                 let exists = store
-                    .contains_internal_graph_name(&graph.clone().into_string())
+                    .contains_graph_name(&graph.clone().into_string())
                     .map_err(internal_server_error)?;
 
                 if !exists {
@@ -1063,7 +1066,7 @@ fn evaluate_sparql_update(
                 if let GraphTarget::NamedNode(graph_name) = graph {
                     // Check if graph exists
                     let exists = store
-                        .contains_internal_graph_name(&graph_name.clone().into_string())
+                        .contains_graph_name(&graph_name.clone().into_string())
                         .map_err(internal_server_error)?;
 
                     if exists {
@@ -1084,7 +1087,7 @@ fn evaluate_sparql_update(
                 if let GraphTarget::NamedNode(graph_name) = graph {
                     // Check if graph exists
                     let exists = store
-                        .contains_internal_graph_name(&graph_name.clone().into_string())
+                        .contains_graph_name(&graph_name.clone().into_string())
                         .map_err(internal_server_error)?;
 
                     if exists {
@@ -1148,7 +1151,7 @@ fn assert_that_graph_exists(
     if match target {
         NamedGraphName::DefaultGraph => true,
         NamedGraphName::NamedNode(target) => store
-            .contains_internal_graph_name(&target.clone().into_string())
+            .contains_graph_name(&target.clone().into_string())
             .map_err(internal_server_error)?,
     } {
         Ok(())

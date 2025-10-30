@@ -81,13 +81,14 @@ pub async fn do_query<W: Write>(
 
     let dataset = sparql::AggregateHdt::new(&hdt_path_vec)
         .map_err(|e| anyhow::anyhow!("error initializting HDT files: {e}"))?;
+    let snapshot = dataset.get_snapshot().map_err(|e| anyhow::anyhow!("{e}"))?;
 
     for rq in query_files {
         let mut f = File::open(rq)?;
         let mut buffer = String::new();
 
         f.read_to_string(&mut buffer)?;
-        let qr = match sparql::query(&buffer, &dataset, None) {
+        let qr = match sparql::query(&buffer, &snapshot, None) {
             Ok(r) => r,
             Err(e) => {
                 error!("problem executing the hdt query: {e}");
