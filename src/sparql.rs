@@ -186,18 +186,6 @@ impl AggregateHdt {
         Ok(())
     }
 
-    /// Iterate over all HDT file paths in the HashMap.
-    /// Accepts a closure that receives the graph name and file path for each entry.
-    pub fn iter<F>(&self, mut f: F)
-    where
-        F: FnMut(&String, &std::path::PathBuf),
-    {
-        let file_paths = self.file_paths.read().unwrap();
-        for (key, path) in file_paths.iter() {
-            f(key, path);
-        }
-    }
-
     /// Collect all triples from all HDTs and return them as a Vec with their graph names.
     /// This is useful for scenarios where you need a consumable iterator.
     /// NOTE: This creates HDT instances for all graphs, so it may be memory-intensive.
@@ -284,61 +272,79 @@ pub fn term_to_hdt_bgp_str(term: Term) -> String {
 }
 
 impl<'a> QueryableDataset<'a> for &'a AggregateHdtSnapshot {
-    type InternalTerm = String;
+    type InternalTerm = Arc<str>;
     type Error = Error;
 
     fn internal_quads_for_pattern(
         &self,
-        subject: Option<&String>,
-        predicate: Option<&String>,
-        object: Option<&String>,
-        graph_name: Option<Option<&String>>,
+        subject: Option<&Arc<str>>,
+        predicate: Option<&Arc<str>>,
+        object: Option<&Arc<str>>,
+        graph_name: Option<Option<&Arc<str>>>,
     ) -> impl Iterator<Item = Result<InternalQuad<Self::InternalTerm>, Error>> + use<'a> {
-        use rayon::prelude::*;
-        let [ps, pp, po] = [subject, predicate, object].map(|x| x.map(String::as_str));
-        // Query each HDT for BGP by string values in parallel.
-        let v: Vec<_> = self
-            .hdts
-            .par_iter()
-            .flat_map(|(g, h)| {
-                if let Some(Some(graph_name)) = graph_name {
-                    if g != graph_name {
-                        return vec![];
-                    }
+        // Clone Arc<str> pattern parameters (cheap - just increments ref count)
+        let subject_pattern = subject.cloned();
+        let predicate_pattern = predicate.cloned();
+        let object_pattern = object.cloned();
+        let graph_filter = graph_name.and_then(|x| x.cloned());
+
+        // Create a chaining iterator that collects from each HDT sequentially
+        // Still need to collect per-HDT due to Box<dyn Iterator> lifetime constraints
+        self.hdts
+            .iter()
+            .filter(move |(g, _h)| {
+                // Filter by graph name if specified
+                if let Some(ref target_graph) = graph_filter {
+                    let g_arc: Arc<str> = Arc::from(g.as_str());
+                    &g_arc == target_graph
+                } else {
+                    true
                 }
-                h.triples_with_pattern(ps, pp, po)
-                    .map(|[subject, predicate, object]| {
+            })
+            .flat_map(move |(graph_name, hdt)| {
+                let ps = subject_pattern.as_ref().map(|s| s.as_ref());
+                let pp = predicate_pattern.as_ref().map(|p| p.as_ref());
+                let po = object_pattern.as_ref().map(|o| o.as_ref());
+
+                // Convert graph_name to Arc<str> once per HDT (cheap)
+                let graph_arc: Arc<str> = Arc::from(graph_name.as_str());
+
+                // Collect triples from this HDT
+                // We still need to collect because triples_with_pattern returns Box<dyn Iterator>
+                // which has lifetime constraints that prevent returning it directly
+                let triples: Vec<[Arc<str>; 3]> = hdt.triples_with_pattern(ps, pp, po).collect();
+
+                // No .to_string() conversions needed! Just use the Arc<str> directly
+                triples
+                    .into_iter()
+                    .map(move |[subject, predicate, object]| {
                         Ok(InternalQuad {
-                            subject: subject.to_string(),
-                            predicate: predicate.to_string(),
-                            object: object.to_string(),
-                            graph_name: Some(g.to_string()),
+                            subject,                             // Arc<str> - no conversion!
+                            predicate,                           // Arc<str> - no conversion!
+                            object,                              // Arc<str> - no conversion!
+                            graph_name: Some(graph_arc.clone()), // Cheap clone
                         })
                     })
-                    .collect::<Vec<_>>()
             })
-            .collect();
-
-        v.into_iter()
     }
 
-    fn internalize_term(&self, term: Term) -> Result<String, Error> {
-        Ok(term_to_hdt_bgp_str(term))
+    fn internalize_term(&self, term: Term) -> Result<Arc<str>, Error> {
+        Ok(Arc::from(term_to_hdt_bgp_str(term)))
     }
 
-    fn externalize_term(&self, term: String) -> Result<Term, Error> {
+    fn externalize_term(&self, term: Arc<str>) -> Result<Term, Error> {
         hdt_bgp_str_to_term(&term)
     }
 
     fn internal_named_graphs(
         &self,
     ) -> impl Iterator<Item = Result<Self::InternalTerm, Self::Error>> + use<'a> {
-        let keys: Vec<String> = self.hdts.keys().cloned().collect();
+        let keys: Vec<Arc<str>> = self.hdts.keys().map(|k| Arc::from(k.as_str())).collect();
         keys.into_iter().map(Ok)
     }
 
-    fn contains_internal_graph_name(&self, graph_name: &String) -> Result<bool, Self::Error> {
-        Ok(self.hdts.contains_key(graph_name))
+    fn contains_internal_graph_name(&self, graph_name: &Arc<str>) -> Result<bool, Self::Error> {
+        Ok(self.hdts.contains_key(graph_name.as_ref()))
     }
 }
 
@@ -376,7 +382,7 @@ mod tests {
             .expect("msg");
 
         // Test 1: Graph should be found with file:/// URI scheme matching the filename
-        let graph_name = "file:///test.hdt".to_string();
+        let graph_name: Arc<str> = Arc::from("file:///test.hdt");
         let result = store.contains_internal_graph_name(&graph_name);
         assert!(
             result.is_ok(),
@@ -398,7 +404,7 @@ mod tests {
             .expect("msg");
 
         // Test 1: Graph with different filename should not be found
-        let missing_graph = "file:///nonexistent.hdt".to_string();
+        let missing_graph: Arc<str> = Arc::from("file:///nonexistent.hdt");
         let result = store.contains_internal_graph_name(&missing_graph);
         assert!(
             result.is_ok(),
@@ -410,7 +416,7 @@ mod tests {
         );
 
         // Test 2: Graph with non-file URI scheme should not be found
-        let http_graph = "http://example.org/test.hdt".to_string();
+        let http_graph: Arc<str> = Arc::from("http://example.org/test.hdt");
         let result_http = store.contains_internal_graph_name(&http_graph);
         assert!(
             result_http.is_ok(),
@@ -422,7 +428,7 @@ mod tests {
         );
 
         // Test 3: Graph with different stem should not be found
-        let wrong_stem = "file:///different".to_string();
+        let wrong_stem: Arc<str> = Arc::from("file:///different");
         let result_wrong = store.contains_internal_graph_name(&wrong_stem);
         assert!(
             result_wrong.is_ok(),
@@ -445,21 +451,21 @@ mod tests {
             .expect("msg");
 
         // Test 1: First graph should be found
-        let graph1 = "file:///test.hdt".to_string();
+        let graph1: Arc<str> = Arc::from("file:///test.hdt");
         assert!(
             store.contains_internal_graph_name(&graph1).unwrap(),
             "First graph 'test' should be found"
         );
 
         // Test 2: Second graph should be found
-        let graph2 = "file:///literal.hdt".to_string();
+        let graph2: Arc<str> = Arc::from("file:///literal.hdt");
         assert!(
             store.contains_internal_graph_name(&graph2).unwrap(),
             "Second graph 'literal' should be found"
         );
 
         // Test 3: Non-existent graph should not be found
-        let missing = "file:///missing.hdt".to_string();
+        let missing: Arc<str> = Arc::from("file:///missing.hdt");
         assert!(
             !store.contains_internal_graph_name(&missing).unwrap(),
             "Non-existent graph should not be found"
@@ -476,7 +482,7 @@ mod tests {
         let snapshot = &store.get_snapshot().expect("msg");
 
         // Graph should exist initially
-        let existing_graph = "file:///test.hdt".to_string();
+        let existing_graph: Arc<str> = Arc::from("file:///test.hdt");
         assert!(
             snapshot
                 .contains_internal_graph_name(&existing_graph)
@@ -486,10 +492,13 @@ mod tests {
 
         // Insert a new graph
         let new_graph = "http://example.org/newgraph".to_string();
+        let new_graph_arc: Arc<str> = Arc::from(new_graph.as_str());
 
         // Before insertion, should not exist
         assert!(
-            !snapshot.contains_internal_graph_name(&new_graph).unwrap(),
+            !snapshot
+                .contains_internal_graph_name(&new_graph_arc)
+                .unwrap(),
             "New graph should not exist before insertion"
         );
 
@@ -499,9 +508,12 @@ mod tests {
             .insert_named_graph(&NamedNode::new(&new_graph).unwrap(), hdt_path)
             .expect("Failed to insert named graph");
 
-        // After insertion, should exist
+        // After insertion, should exist (need a new snapshot!)
+        let snapshot2 = &store.get_snapshot().expect("msg");
         assert!(
-            !snapshot.contains_internal_graph_name(&new_graph).unwrap(),
+            snapshot2
+                .contains_internal_graph_name(&new_graph_arc)
+                .unwrap(),
             "New graph should exist after insertion"
         );
     }

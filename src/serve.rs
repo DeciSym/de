@@ -26,6 +26,7 @@ use std::{
     net::ToSocketAddrs,
     path::Path,
     rc::Rc,
+    sync::Arc,
     thread::available_parallelism,
     time::Duration,
 };
@@ -273,13 +274,9 @@ fn handle_request(
                     .get_snapshot()
                     .map_err(|_| internal_server_error("message"))?;
                 // TODO: Implement proper graph retrieval
+                let graph_arc: Arc<str> = Arc::from(GraphName::from(target).to_string());
                 let triples: Vec<_> = s
-                    .internal_quads_for_pattern(
-                        None,
-                        None,
-                        None,
-                        Some(Some(&GraphName::from(target).to_string())),
-                    )
+                    .internal_quads_for_pattern(None, None, None, Some(Some(&graph_arc)))
                     .collect();
                 ReadForWrite::build_response(
                     move |w| {
