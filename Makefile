@@ -46,3 +46,6 @@ docker.test: docker
 release: init
 	cargo build --release --features=server
 	cargo deb --deb-version ${VERSION} --features=server
+
+serve: docker
+	docker run -it --rm -v ${PWD}/tests/resources:/data -p 7878:7878 ${HUB}/de:${TAG} serve -l /data --bind 0.0.0.0:7878 -vvv

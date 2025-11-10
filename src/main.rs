@@ -39,6 +39,9 @@ enum Commands {
         #[clap(short, long, default_value_t, value_enum)]
         output: query::DeOutput,
     },
+    /// Start a server to listen for /sparql, /update and /store API's. HDT's are read-only
+    /// per spec, so new graphs (i.e. files) can be uploaded, but existing HDT triples can NOT
+    /// be modified using the SPARQL UPDATE API
     #[cfg(feature = "server")]
     Serve {
         /// Directory in which the data should be persisted
