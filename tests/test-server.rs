@@ -114,7 +114,12 @@ mod server_tests {
         let response = handle_response(de::serve::handle_request(&mut request, &store, true))?;
 
         assert_eq!(response.status(), StatusCode::OK);
-        let content_type = response.headers().get("Content-Type").unwrap().to_str().unwrap();
+        let content_type = response
+            .headers()
+            .get("Content-Type")
+            .unwrap()
+            .to_str()
+            .unwrap();
         assert!(content_type.contains("text/turtle") || content_type.contains("turtle"));
 
         Ok(())
@@ -215,7 +220,12 @@ mod server_tests {
         let response = handle_response(de::serve::handle_request(&mut request, &store, true))?;
 
         assert_eq!(response.status(), StatusCode::OK);
-        let content_type = response.headers().get("Content-Type").unwrap().to_str().unwrap();
+        let content_type = response
+            .headers()
+            .get("Content-Type")
+            .unwrap()
+            .to_str()
+            .unwrap();
         assert!(content_type.contains("application/n-quads"));
 
         let body_text = read_body(response);
@@ -370,7 +380,10 @@ ex:Orange ex:hasColor "orange" .
         assert!(result.is_err());
         let (status, _msg) = result.unwrap_err();
         // May return UNSUPPORTED_MEDIA_TYPE or INTERNAL_SERVER_ERROR depending on when validation occurs
-        assert!(status == StatusCode::UNSUPPORTED_MEDIA_TYPE || status == StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(
+            status == StatusCode::UNSUPPORTED_MEDIA_TYPE
+                || status == StatusCode::INTERNAL_SERVER_ERROR
+        );
 
         Ok(())
     }
