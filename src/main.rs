@@ -1,7 +1,7 @@
 // Copyright (c) 2025, Decisym, LLC
 // Licensed under the BSD 3-Clause License (see LICENSE file in the project root).
 
-use clap::{Parser, Subcommand, ValueHint};
+use clap::{Parser, Subcommand};
 use de::*;
 use log::error;
 use std::io::{stdout, BufWriter, Write};
@@ -39,14 +39,15 @@ enum Commands {
         #[clap(short, long, default_value_t, value_enum)]
         output: query::DeOutput,
     },
+    #[cfg(feature = "server")]
     Serve {
         /// Directory in which the data should be persisted
         ///
         /// If not present, an in-memory storage will be used.
-        #[arg(short, long, value_hint = ValueHint::DirPath)]
+        #[arg(short, long, value_hint = clap::ValueHint::DirPath)]
         location: String,
         /// Host and port to listen to
-        #[arg(short, long, default_value = "localhost:7878", value_hint = ValueHint::Hostname)]
+        #[arg(short, long, default_value = "localhost:7878", value_hint = clap::ValueHint::Hostname)]
         bind: String,
     },
     /// Use to view info about an HDT file
@@ -77,6 +78,7 @@ async fn main() {
             Err(e) => Err(e),
         },
         Commands::View { data } => view::view_hdt(data, &mut stdout_writer),
+        #[cfg(feature = "server")]
         Commands::Serve { location, bind } => de::serve::serve(location, bind),
     };
     stdout_writer.flush().unwrap();

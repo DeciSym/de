@@ -11,6 +11,7 @@ lint:
 	cargo fmt --check
 	cargo machete
 	cargo clippy --benches --tests --bins
+	cargo clippy --benches --tests --bins --all-features
 
 test: init
 	cargo test
@@ -21,7 +22,7 @@ bench: init
 	cargo bench
 
 build:
-	cargo build
+	cargo build --features=server
 
 clean:
 	cargo clean
@@ -43,5 +44,5 @@ docker.test: docker
 	de query --data /data/superhero.ttl --sparql /data/hero-height.rq
 
 release: init
-	cargo build --release
-	cargo deb --deb-version ${VERSION}
+	cargo build --release --features=server
+	cargo deb --deb-version ${VERSION} --features=server

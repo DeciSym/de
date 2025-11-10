@@ -1,8 +1,7 @@
-use oxrdf::NamedOrBlankNodeRef;
 use spareval::{InternalQuad, QueryEvaluationError, QueryEvaluator, QueryableDataset};
 use spargebra::term::{BlankNode, NamedNode, Term};
 use spargebra::SparqlParser;
-use std::io::Write;
+use std::io::BufReader;
 use std::{
     collections::HashMap,
     io::{Error, ErrorKind},
@@ -20,7 +19,7 @@ pub struct AggregateHdt {
 
 pub struct AggregateHdtSnapshot {
     // Map graph names (URIs) to HDT instances
-    pub hdts: HashMap<String, hdt::hdt::HdtHybrid>,
+    pub hdts: HashMap<String, hdt::Hdt>,
     /// Available named graphs. If None, all graphs in hdts are available.
     /// The default graph is always the union of all available named graphs.
     pub named_graph_names: Option<Vec<String>>,
@@ -80,16 +79,14 @@ impl AggregateHdt {
         drop(file_paths_guard);
 
         // Load all HDTs in parallel
-        let hdts: HashMap<String, hdt::hdt::HdtHybrid> = paths_vec
+        let hdts: HashMap<String, hdt::Hdt> = paths_vec
             .par_iter()
-            .map(
-                |(graph_name, path)| -> anyhow::Result<(String, hdt::hdt::HdtHybrid)> {
-                    let hdt = hdt::hdt::Hdt::new_hybrid_cache(path, true).map_err(|e| {
-                        anyhow::anyhow!("Failed to load HDT from {:?}: {}", path, e)
-                    })?;
-                    Ok((graph_name.clone(), hdt))
-                },
-            )
+            .map(|(graph_name, path)| -> anyhow::Result<(String, hdt::Hdt)> {
+                let mut reader = BufReader::new(std::fs::File::open(path)?);
+                let hdt = hdt::Hdt::read(&mut reader)
+                    .map_err(|e| anyhow::anyhow!("Failed to load HDT from {:?}: {}", path, e))?;
+                Ok((graph_name.clone(), hdt))
+            })
             .collect::<anyhow::Result<Vec<_>>>()?
             .into_iter()
             .collect();
@@ -100,15 +97,19 @@ impl AggregateHdt {
         })
     }
 
+    #[cfg(feature = "server")]
     pub fn contains_graph_name(&self, graph_name: &String) -> Result<bool, anyhow::Error> {
         Ok(self.file_paths.read().unwrap().contains_key(graph_name))
     }
 
+    #[cfg(feature = "server")]
     pub fn insert_named_graph(
         &self,
         graph_name: &NamedNode,
         file_path: &Path,
     ) -> Result<(), anyhow::Error> {
+        use std::io::Write;
+
         let extension = file_path
             .extension()
             .and_then(|s| s.to_str())
@@ -149,6 +150,7 @@ impl AggregateHdt {
         Ok(())
     }
 
+    #[cfg(feature = "server")]
     pub fn remove_named_graph(&self, graph_name: &NamedNode) -> Result<bool, anyhow::Error> {
         let mut file_paths = self.file_paths.write().unwrap();
         if let Some(path) = file_paths.remove(graph_name.as_str()) {
@@ -195,6 +197,7 @@ impl AggregateHdt {
         }
     }
 
+    #[cfg(feature = "server")]
     pub fn clear(&self) -> Result<(), anyhow::Error> {
         let mut file_paths = self.file_paths.write().unwrap();
         file_paths.clear();
@@ -204,6 +207,7 @@ impl AggregateHdt {
     /// Collect all triples from all HDTs and return them as a Vec with their graph names.
     /// This is useful for scenarios where you need a consumable iterator.
     /// NOTE: This creates HDT instances for all graphs, so it may be memory-intensive.
+    #[cfg(feature = "server")]
     pub fn collect_all_triples(&self) -> Vec<(String, [Arc<str>; 3])> {
         let file_paths = self.file_paths.read().unwrap();
         let mut result = Vec::new();
@@ -219,8 +223,9 @@ impl AggregateHdt {
     }
 }
 
-pub fn graph_to_file(name: NamedOrBlankNodeRef) -> Option<String> {
-    if let NamedOrBlankNodeRef::NamedNode(n) = name {
+#[cfg(feature = "server")]
+pub fn graph_to_file(name: oxrdf::NamedOrBlankNodeRef) -> Option<String> {
+    if let oxrdf::NamedOrBlankNodeRef::NamedNode(n) = name {
         let res = n.to_string().parse::<http::Uri>();
         let Ok(uri) = res else {
             return None;
@@ -399,17 +404,21 @@ pub fn query<'a>(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "server")]
     use super::*;
-    use std::path::PathBuf;
 
     /// Helper function to get the path to a test HDT file
+    #[cfg(feature = "server")]
     fn get_test_hdt_path(filename: &str) -> String {
+        use std::path::PathBuf;
+
         let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         path.push(filename);
         path.to_string_lossy().into_owned()
     }
 
     #[test]
+    #[cfg(feature = "server")]
     fn test_contains_named_graph_found() {
         // Create an AggregateHDT with test.hdt
         let test_hdt_path = get_test_hdt_path("test.hdt");
@@ -432,6 +441,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "server")]
     fn test_contains_named_graph_not_found() {
         // Create an AggregateHDT with test.hdt
         let test_hdt_path = get_test_hdt_path("test.hdt");
@@ -478,6 +488,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "server")]
     fn test_contains_named_graph_multiple_graphs() {
         // Create an AggregateHDT with multiple HDT files
         let test_hdt = get_test_hdt_path("test.hdt");
@@ -510,6 +521,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "server")]
     fn test_contains_named_graph_after_insert() {
         // Create an AggregateHDT with one HDT file
         let test_hdt_path = get_test_hdt_path("test.hdt");
