@@ -302,16 +302,12 @@ impl<'a> QueryableDataset<'a> for &'a AggregateHdtSnapshot {
         object: Option<&Arc<str>>,
         graph_name: Option<Option<&Arc<str>>>,
     ) -> impl Iterator<Item = Result<InternalQuad<Self::InternalTerm>, Error>> + use<'a> {
-        // Clone Arc<str> pattern parameters (cheap - just increments ref count)
         let subject_pattern = subject.cloned();
         let predicate_pattern = predicate.cloned();
         let object_pattern = object.cloned();
 
-        // Clone graph_name to avoid capturing anonymous lifetime
-        // graph_name is Option<Option<&Arc<str>>>, we need Option<Option<Arc<str>>>
         let graph_name_owned = graph_name.map(|inner| inner.cloned());
 
-        // Clone dataset configuration for use in closures
         let named_graph_names = self.named_graph_names.clone();
 
         // Create a chaining iterator that collects from each HDT sequentially
@@ -356,15 +352,14 @@ impl<'a> QueryableDataset<'a> for &'a AggregateHdtSnapshot {
                 // which has lifetime constraints that prevent returning it directly
                 let triples: Vec<[Arc<str>; 3]> = hdt.triples_with_pattern(ps, pp, po).collect();
 
-                // No .to_string() conversions needed! Just use the Arc<str> directly
                 triples
                     .into_iter()
                     .map(move |[subject, predicate, object]| {
                         Ok(InternalQuad {
-                            subject,                             // Arc<str> - no conversion!
-                            predicate,                           // Arc<str> - no conversion!
-                            object,                              // Arc<str> - no conversion!
-                            graph_name: Some(graph_arc.clone()), // Cheap clone
+                            subject,
+                            predicate,
+                            object,
+                            graph_name: Some(graph_arc.clone()),
                         })
                     })
             })

@@ -137,7 +137,7 @@ fn cors_middleware(
     }
 }
 
-fn handle_request(
+pub fn handle_request(
     request: &mut Request<Body>,
     store: &AggregateHdt,
     // read_only: bool,
@@ -272,7 +272,7 @@ fn handle_request(
                 let format = rdf_content_negotiation(request)?;
                 let s = &store
                     .get_snapshot()
-                    .map_err(|_| internal_server_error("message"))?;
+                    .map_err(|_| internal_server_error("data temporarily unavailable"))?;
                 // TODO: Implement proper graph retrieval
                 let graph_arc: Arc<str> = Arc::from(GraphName::from(target).to_string());
                 let triples: Vec<_> = s
@@ -644,7 +644,7 @@ fn evaluate_sparql_query(
     // Note: union_default_graph is always true - default graph is union of all available named graphs
     let s = store
         .get_snapshot()
-        .map_err(|_| internal_server_error("message"))?;
+        .map_err(|_| internal_server_error("data temporarily unavailable"))?;
 
     // Configure available named graphs if specified
     let s = if !named_graph_uris.is_empty() {
@@ -794,7 +794,10 @@ fn evaluate_sparql_update(
                     .map_err(internal_server_error)?;
 
                 if exists && !silent {
-                    return Err(bad_request(format!("Graph {} already exists.", graph)));
+                    return Err(content_is_read_only(format!(
+                        "Graph {} already exists.",
+                        graph
+                    )));
                 }
             }
 
@@ -811,7 +814,7 @@ fn evaluate_sparql_update(
                             graphs_used.insert(graph);
                         }
                         SparqlGraphName::DefaultGraph => {
-                            return Err(bad_request(
+                            return Err(content_is_read_only(
                                 "INSERT DATA to default graph is not allowed. Only named graphs are supported."
                             ));
                         }
@@ -824,7 +827,7 @@ fn evaluate_sparql_update(
                         .contains_graph_name(&graph.clone().into_string())
                         .map_err(internal_server_error)?
                     {
-                        return Err(bad_request(format!(
+                        return Err(content_is_read_only(format!(
                             "Graph {} already exists. INSERT DATA is only allowed to new graphs.",
                             graph
                         )));
@@ -846,7 +849,7 @@ fn evaluate_sparql_update(
                         .map_err(internal_server_error)?;
 
                     if exists && !silent {
-                        return Err(bad_request(format!(
+                        return Err(content_is_read_only(format!(
                             "Graph {} already exists. LOAD is only allowed to new graphs.",
                             graph
                         )));
@@ -854,7 +857,7 @@ fn evaluate_sparql_update(
                 }
                 // Note: LOAD to default graph is also rejected for safety
                 else {
-                    return Err(bad_request(
+                    return Err(content_is_read_only(
                         "LOAD to default graph is not allowed. Only named graphs can be created.",
                     ));
                 }
@@ -862,13 +865,13 @@ fn evaluate_sparql_update(
 
             // Reject all operations that modify existing data
             GraphUpdateOperation::DeleteData { .. } => {
-                return Err(bad_request(
+                return Err(content_is_read_only(
                     "DELETE DATA is not allowed. Only INSERT DATA to new graphs is permitted.",
                 ));
             }
 
             GraphUpdateOperation::DeleteInsert { .. } => {
-                return Err(bad_request(
+                return Err(content_is_read_only(
                     "DELETE/INSERT operations are not allowed. Only INSERT DATA to new graphs is permitted."
                 ));
             }
@@ -959,7 +962,10 @@ fn evaluate_sparql_update(
                     // Success - graph doesn't exist, ready for future INSERT
                     eprintln!("CREATE GRAPH {} - will be created on first INSERT", graph);
                 } else if !silent {
-                    return Err(bad_request(format!("Graph {} already exists", graph)));
+                    return Err(content_is_read_only(format!(
+                        "Graph {} already exists",
+                        graph
+                    )));
                 }
             }
 
@@ -1299,7 +1305,7 @@ fn web_load_graph(
     let tmp_file = tempfile::Builder::new()
         .suffix(".nt")
         .tempfile()
-        .map_err(|_| internal_server_error("message"))?;
+        .map_err(|_| internal_server_error("error during RDF to HDT conversion"))?;
     let (f, p) = tmp_file.keep().map_err(|_| internal_server_error(""))?;
     let mut dest_writer = BufWriter::new(&f);
 
@@ -1313,7 +1319,7 @@ fn web_load_graph(
                 q.predicate.as_ref(),
                 q.object.as_ref(),
             ))
-            .map_err(|_| internal_server_error("message"))?
+            .map_err(|_| internal_server_error("error during RDF serialization"))?
     }
 
     store
@@ -1322,10 +1328,13 @@ fn web_load_graph(
                 "file:///{}",
                 p.as_path().file_name().unwrap().to_str().unwrap()
             )))
-            .map_err(|_| internal_server_error("message"))?,
+            .unwrap_or(
+                NamedNode::from_str(&format!("file:///{:x}", random::<u128>()))
+                    .map_err(|_| internal_server_error("error with propsed graph name"))?,
+            ),
             p.as_path(),
         )
-        .map_err(|_| internal_server_error("message"))?;
+        .map_err(|_| internal_server_error("error persisting graph to store"))?;
 
     Ok(p.as_path().to_str().unwrap().to_string())
 }
@@ -1372,10 +1381,12 @@ fn bad_request(message: impl fmt::Display) -> HttpError {
     (StatusCode::BAD_REQUEST, message.to_string())
 }
 
-#[allow(dead_code)]
-fn the_server_is_read_only() -> HttpError {
-    eprintln!("FORBIDDEN: readonly");
-    (StatusCode::FORBIDDEN, "The server is read-only".into())
+fn content_is_read_only(message: impl fmt::Display) -> HttpError {
+    eprintln!("FORBIDDEN: readonly {message}");
+    (
+        StatusCode::FORBIDDEN,
+        format!("Requested data is read-only: {message}"),
+    )
 }
 
 fn unsupported_media_type(content_type: &str) -> HttpError {
