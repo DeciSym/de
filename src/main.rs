@@ -39,6 +39,20 @@ enum Commands {
         #[clap(short, long, default_value_t, value_enum)]
         output: query::DeOutput,
     },
+    /// Start a server to listen for /sparql, /update and /store API's. HDT's are read-only
+    /// per spec, so new graphs (i.e. files) can be uploaded, but existing HDT triples can NOT
+    /// be modified using the SPARQL UPDATE API
+    #[cfg(feature = "server")]
+    Serve {
+        /// Directory in which the data should be persisted
+        ///
+        /// If not present, an in-memory storage will be used.
+        #[arg(short, long, value_hint = clap::ValueHint::DirPath)]
+        location: String,
+        /// Host and port to listen to
+        #[arg(short, long, default_value = "localhost:7878", value_hint = clap::ValueHint::Hostname)]
+        bind: String,
+    },
     /// Use to view info about an HDT file
     View {
         #[clap(short, long, num_args = 1.., required = true)]
@@ -67,6 +81,8 @@ async fn main() {
             Err(e) => Err(e),
         },
         Commands::View { data } => view::view_hdt(data, &mut stdout_writer),
+        #[cfg(feature = "server")]
+        Commands::Serve { location, bind } => de::serve::serve(location, bind),
     };
     stdout_writer.flush().unwrap();
     match result {

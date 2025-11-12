@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>DeciSym Engine</title>
+    <link href="./yasgui.min.css" rel="stylesheet" type="text/css" />
+    <script src="./yasgui.min.js"></script>
+    <link rel="icon" type="image/svg+xml" href="https://decisym.ai/wp-content/uploads/2025/06/cropped-DeciSym-Icon-192x192.png">
+</head>
+<body>
+<div id="yasgui"></div>
+<script>
+    const url = window.location.href.endsWith('/') ? window.location.href.slice(0, -1) : window.location.href;
+    new Yasgui(document.getElementById("yasgui"), {
+        requestConfig: { endpoint: url + "/query" },
+        endpointCatalogueOptions: {
+            getData: function () {
+                return [
+                    { endpoint: url + "/query" },
+                ];
+            },
+            keys: [],
+        }
+    });
+</script>
+</body>

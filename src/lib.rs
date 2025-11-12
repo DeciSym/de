@@ -4,5 +4,9 @@
 pub mod create;
 pub mod query;
 pub mod rdf2nt;
+#[cfg(feature = "server")]
+pub mod serve;
+#[cfg(feature = "server")]
+pub mod service_description;
 pub mod sparql;
 pub mod view;

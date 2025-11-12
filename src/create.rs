@@ -58,7 +58,6 @@ pub fn do_create(hdt_name: &str, data: &[String]) -> anyhow::Result<hdt::Hdt, an
     }
     // Prints location of HDT assuming HDT is generated
     debug!("HDT file created at {hdt_name}");
-
     Ok(new_hdt)
 }
 
