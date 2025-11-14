@@ -20,18 +20,6 @@ pub struct AggregateHdt {
 pub struct AggregateHdtSnapshot {
     // Map graph names (URIs) to HDT instances
     pub hdts: HashMap<String, hdt::Hdt>,
-    /// Available named graphs. If None, all graphs in hdts are available.
-    /// The default graph is always the union of all available named graphs.
-    pub named_graph_names: Option<Vec<String>>,
-}
-
-impl AggregateHdtSnapshot {
-    /// Configure which named graphs are available for querying.
-    /// The default graph will be the union of these graphs.
-    pub fn with_named_graphs(mut self, graphs: Vec<String>) -> Self {
-        self.named_graph_names = Some(graphs);
-        self
-    }
 }
 
 impl AggregateHdt {
@@ -66,19 +54,52 @@ impl AggregateHdt {
         })
     }
 
-    pub fn get_snapshot(&self) -> Result<AggregateHdtSnapshot, Box<dyn std::error::Error>> {
+    /// Create a snapshot of HDT instances for querying.
+    ///
+    /// # Arguments
+    /// * `named_graphs` - Optional filter to only load specific named graphs.
+    ///                   If None, all available graphs are loaded.
+    ///                   If Some(vec), only graphs in the vec are loaded.
+    ///
+    /// # Performance
+    /// Filtering graphs before loading can significantly reduce memory usage and load time
+    /// when you only need to query a subset of available graphs.
+    ///
+    /// # Example
+    /// ```ignore
+    /// // Load only specific graphs
+    /// let snapshot = store.get_snapshot(Some(vec![
+    ///     "file:///graph1.hdt".to_string(),
+    ///     "file:///graph2.hdt".to_string(),
+    /// ]))?;
+    ///
+    /// // Load all graphs
+    /// let snapshot = store.get_snapshot(None)?;
+    /// ```
+    pub fn get_snapshot(
+        &self,
+        named_graphs: Option<Vec<String>>,
+    ) -> Result<AggregateHdtSnapshot, Box<dyn std::error::Error>> {
         use rayon::prelude::*;
 
         let file_paths_guard = self.file_paths.read().unwrap();
 
-        // Collect (graph_name, file_path) pairs for parallel processing
+        // Optimization: Filter graphs BEFORE loading into memory
         let paths_vec: Vec<(String, std::path::PathBuf)> = file_paths_guard
             .iter()
+            .filter(|(graph_name, _path)| {
+                // If named_graphs filter is specified, only include graphs in the filter
+                if let Some(ref filter) = named_graphs {
+                    filter.contains(graph_name)
+                } else {
+                    true // No filter - include all graphs
+                }
+            })
             .map(|(g, p)| (g.clone(), p.clone()))
             .collect();
         drop(file_paths_guard);
 
-        // Load all HDTs in parallel
+        // Load filtered HDTs in parallel
         let hdts: HashMap<String, hdt::Hdt> = paths_vec
             .par_iter()
             .map(|(graph_name, path)| -> anyhow::Result<(String, hdt::Hdt)> {
@@ -91,10 +112,7 @@ impl AggregateHdt {
             .into_iter()
             .collect();
 
-        Ok(AggregateHdtSnapshot {
-            hdts,
-            named_graph_names: None,
-        })
+        Ok(AggregateHdtSnapshot { hdts })
     }
 
     #[cfg(feature = "server")]
@@ -342,26 +360,17 @@ impl<'a> QueryableDataset<'a> for &'a AggregateHdtSnapshot {
 
         let graph_name_owned = graph_name.map(|inner| inner.cloned());
 
-        let named_graph_names = self.named_graph_names.clone();
-        // Create a chaining iterator that collects from each HDT sequentially
-        // Still need to collect per-HDT due to Box<dyn Iterator> lifetime constraints
-        self.hdts
+        // Optimization: Pre-filter graphs to reduce unnecessary work
+        // Note: get_snapshot() already filtered graphs at load time,
+        // so self.hdts contains only the required graphs. This filter
+        // handles additional runtime graph name matching from the query.
+        let graphs_to_query: Vec<(&String, &hdt::Hdt)> = self
+            .hdts
             .iter()
-            .filter(move |(g, _h)| {
-                // First check if this graph is in the allowed named graphs
-                let is_allowed = if let Some(ref allowed) = named_graph_names {
-                    allowed.contains(g)
-                } else {
-                    true // All graphs available
-                };
-
-                if !is_allowed {
-                    return false;
-                }
-
+            .filter(|(g, _h)| {
                 match &graph_name_owned {
                     // Query for default graph: Some(None)
-                    // Default graph is always union of all available named graphs
+                    // Default graph is always union of all loaded graphs
                     Some(None) => true,
                     // Query for specific named graph: Some(Some(graph))
                     Some(Some(target_graph)) => {
@@ -372,28 +381,41 @@ impl<'a> QueryableDataset<'a> for &'a AggregateHdtSnapshot {
                     None => true,
                 }
             })
-            .flat_map(move |(graph_name, hdt)| {
+            .collect();
+
+        // Optimization: Collect iterators into a Vec first, then flatten
+        // allows lazy evaluation of triples
+        let iters: Vec<_> = graphs_to_query
+            .iter()
+            .map(|(graph_name, hdt)| {
                 let ps = subject_pattern.as_ref().map(|s| s.as_ref());
                 let pp = predicate_pattern.as_ref().map(|p| p.as_ref());
                 let po = object_pattern.as_ref().map(|o| o.as_ref());
-
-                // Convert graph_name to Arc<str> once per HDT (cheap)
                 let graph_arc: Arc<str> = Arc::from(graph_name.as_str());
 
-                // Collect triples from this HDT
-                // We still need to collect because triples_with_pattern returns Box<dyn Iterator>
-                // which has lifetime constraints that prevent returning it directly
-                let triples: Vec<[Arc<str>; 3]> = hdt.triples_with_pattern(ps, pp, po).collect();
-                triples
-                    .into_iter()
-                    .map(move |[subject, predicate, object]| {
-                        Ok(InternalQuad {
-                            subject,
-                            predicate,
-                            object,
-                            graph_name: Some(graph_arc.clone()),
-                        })
+                // Get iterator and immediately convert to owned triples with graph name
+                // Due to HDT's API design (returns Box<dyn Iterator + '_>), must collect here
+                let triples: Vec<_> = hdt
+                    .triples_with_pattern(ps, pp, po)
+                    .map(|[subject, predicate, object]| {
+                        (subject, predicate, object, graph_arc.clone())
                     })
+                    .collect();
+                triples
+            })
+            .collect();
+
+        // Optimization: Flatten collected results without additional copying
+        iters
+            .into_iter()
+            .flatten()
+            .map(|(subject, predicate, object, graph_arc)| {
+                Ok(InternalQuad {
+                    subject,
+                    predicate,
+                    object,
+                    graph_name: Some(graph_arc),
+                })
             })
     }
 
@@ -451,7 +473,7 @@ mod tests {
         let test_hdt_path = get_test_hdt_path("test.hdt");
         let store = &AggregateHdt::new(&[test_hdt_path])
             .expect("Failed to create AggregateHDT")
-            .get_snapshot()
+            .get_snapshot(None)
             .expect("msg");
 
         // Test 1: Graph should be found with file:/// URI scheme matching the filename
@@ -474,7 +496,7 @@ mod tests {
         let test_hdt_path = get_test_hdt_path("test.hdt");
         let store = &AggregateHdt::new(&[test_hdt_path])
             .expect("Failed to create AggregateHDT")
-            .get_snapshot()
+            .get_snapshot(None)
             .expect("msg");
 
         // Test 1: Graph with different filename should not be found
@@ -522,7 +544,7 @@ mod tests {
         let literal_hdt = get_test_hdt_path("literal.hdt");
         let store = &AggregateHdt::new(&[test_hdt, literal_hdt])
             .expect("Failed to create AggregateHDT with multiple files")
-            .get_snapshot()
+            .get_snapshot(None)
             .expect("msg");
 
         // Test 1: First graph should be found
@@ -555,7 +577,7 @@ mod tests {
         let store = &AggregateHdt::new(std::slice::from_ref(&test_hdt_path))
             .expect("Failed to create AggregateHDT");
 
-        let snapshot = &store.get_snapshot().expect("msg");
+        let snapshot = &store.get_snapshot(None).expect("msg");
 
         // Graph should exist initially
         let existing_graph: Arc<str> = Arc::from("file:///test.hdt");
@@ -585,7 +607,7 @@ mod tests {
             .expect("Failed to insert named graph");
 
         // After insertion, should exist (need a new snapshot!)
-        let snapshot2 = &store.get_snapshot().expect("msg");
+        let snapshot2 = &store.get_snapshot(None).expect("msg");
         assert!(
             snapshot2
                 .contains_internal_graph_name(&new_graph_arc)

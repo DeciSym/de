@@ -271,7 +271,7 @@ pub fn handle_request(
                 assert_that_graph_exists(store, &target)?;
                 let format = rdf_content_negotiation(request)?;
                 let s = &store
-                    .get_snapshot()
+                    .get_snapshot(None)
                     .map_err(|_| internal_server_error("data temporarily unavailable"))?;
                 // TODO: Implement proper graph retrieval
                 let graph_arc: Arc<str> = Arc::from(GraphName::from(target).to_string());
@@ -638,18 +638,19 @@ fn evaluate_sparql_query(
         .parse_query(query)
         .map_err(bad_request)?;
 
-    // Get snapshot and configure dataset
-    // Note: union_default_graph is always true - default graph is union of all available named graphs
-    let s = store
-        .get_snapshot()
-        .map_err(|_| internal_server_error("data temporarily unavailable"))?;
-
-    // Configure available named graphs if specified
-    let s = if !named_graph_uris.is_empty() {
-        s.with_named_graphs(named_graph_uris)
+    // Get snapshot with optional graph filtering
+    // Optimization: Filter graphs BEFORE loading into memory by passing named_graph_uris
+    // to get_snapshot(). This significantly reduces memory usage and load time when
+    // only a subset of graphs are needed for the query.
+    // Note: union_default_graph is always true - default graph is union of all loaded graphs
+    let graph_filter = if !named_graph_uris.is_empty() {
+        Some(named_graph_uris)
     } else {
-        s
+        None
     };
+    let s = store
+        .get_snapshot(graph_filter)
+        .map_err(|_| internal_server_error("data temporarily unavailable"))?;
 
     let results = QueryEvaluator::new()
         .prepare(&stuff)
