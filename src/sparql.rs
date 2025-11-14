@@ -125,17 +125,20 @@ impl AggregateHdt {
             }
             "nt" => {
                 // Convert NT to HDT
-                // First, create a temporary HDT file
-                let tmp_hdt = tempfile::Builder::new().suffix(".hdt").tempfile()?;
-                let (hdt_file, hdt_path) = tmp_hdt.keep()?;
+                // create new HDT file in same dir as original file, with same name
+                let hdt_path = format!(
+                    "{}/{}.hdt",
+                    file_path.to_path_buf().parent().unwrap().to_str().unwrap(),
+                    file_path.file_stem().unwrap().to_str().unwrap()
+                );
 
                 // Read the NT file and convert to HDT
                 let h = hdt::Hdt::read_nt(file_path)?;
-                let mut hdt_writer = std::io::BufWriter::new(&hdt_file);
+                let mut hdt_writer = std::io::BufWriter::new(std::fs::File::create(&hdt_path)?);
 
                 h.write(&mut hdt_writer)?;
                 hdt_writer.flush()?;
-                hdt_path
+                std::path::PathBuf::from(&hdt_path)
             }
             _ => {
                 return Err(anyhow::anyhow!(
@@ -202,6 +205,37 @@ impl AggregateHdt {
         let mut file_paths = self.file_paths.write().unwrap();
         file_paths.clear();
         Ok(())
+    }
+
+    /// Get all graph names and their associated HDT header information.
+    /// Returns a Vec of tuples containing (graph_name, file_path, hdt::header::Header).
+    #[cfg(feature = "server")]
+    pub fn get_all_graphs(
+        &self,
+    ) -> Result<Vec<(String, std::path::PathBuf, hdt::header::Header)>, anyhow::Error> {
+        let file_paths = self.file_paths.read().unwrap();
+        let mut result = Vec::new();
+
+        for (graph_name, path) in file_paths.iter() {
+            // Read HDT header to get metadata
+            let mut reader =
+                BufReader::new(std::fs::File::open(path).map_err(|e| anyhow::anyhow!("{e}"))?);
+
+            // Read control info first, then header
+            let header = hdt::containers::ControlInfo::read(&mut reader)
+                .map_err(|e| format!("ControlInfo error: {}", e))
+                .and_then(|_| {
+                    hdt::header::Header::read(&mut reader)
+                        .map_err(|e| format!("Header error: {}", e))
+                })
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+            result.push((graph_name.clone(), path.clone(), header));
+        }
+
+        // Sort by graph name
+        result.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(result)
     }
 
     /// Collect all triples from all HDTs and return them as a Vec with their graph names.
@@ -309,7 +343,6 @@ impl<'a> QueryableDataset<'a> for &'a AggregateHdtSnapshot {
         let graph_name_owned = graph_name.map(|inner| inner.cloned());
 
         let named_graph_names = self.named_graph_names.clone();
-
         // Create a chaining iterator that collects from each HDT sequentially
         // Still need to collect per-HDT due to Box<dyn Iterator> lifetime constraints
         self.hdts
@@ -351,7 +384,6 @@ impl<'a> QueryableDataset<'a> for &'a AggregateHdtSnapshot {
                 // We still need to collect because triples_with_pattern returns Box<dyn Iterator>
                 // which has lifetime constraints that prevent returning it directly
                 let triples: Vec<[Arc<str>; 3]> = hdt.triples_with_pattern(ps, pp, po).collect();
-
                 triples
                     .into_iter()
                     .map(move |[subject, predicate, object]| {

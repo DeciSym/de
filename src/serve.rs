@@ -34,7 +34,7 @@ use url::form_urlencoded;
 
 use crate::{
     service_description::{generate_service_description, EndpointKind},
-    sparql::AggregateHdt,
+    sparql::{hdt_bgp_str_to_term, AggregateHdt},
 };
 
 type HttpError = (StatusCode, String);
@@ -290,22 +290,21 @@ pub fn handle_request(
                             let triple = triple?;
                             // Parse the triple parts into an RDF triple
                             let subject = NamedOrBlankNode::try_from(
-                                oxrdf::Term::from_str(&triple.subject)
+                                hdt_bgp_str_to_term(&triple.subject)
                                     .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?,
                             )
                             .map_err(|e| {
                                 io::Error::new(io::ErrorKind::InvalidData, format!("{:?}", e))
                             })?;
                             let predicate = NamedNode::try_from(
-                                oxrdf::Term::from_str(&triple.predicate)
+                                hdt_bgp_str_to_term(&triple.predicate)
                                     .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?,
                             )
                             .map_err(|e| {
                                 io::Error::new(io::ErrorKind::InvalidData, format!("{:?}", e))
                             })?;
-                            let object = oxrdf::Term::from_str(&triple.object)
+                            let object = hdt_bgp_str_to_term(&triple.object)
                                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-
                             let triple = oxrdf::Triple {
                                 subject,
                                 predicate,
@@ -340,7 +339,7 @@ pub fn handle_request(
                             if let Some((_graph_name, triple_parts)) = triples_iter.next() {
                                 // Parse the triple parts into an RDF triple
                                 let subject = NamedOrBlankNode::try_from(
-                                    oxrdf::Term::from_str(&triple_parts[0]).map_err(|e| {
+                                    hdt_bgp_str_to_term(&triple_parts[0]).map_err(|e| {
                                         io::Error::new(io::ErrorKind::InvalidData, e)
                                     })?,
                                 )
@@ -348,16 +347,15 @@ pub fn handle_request(
                                     io::Error::new(io::ErrorKind::InvalidData, format!("{:?}", e))
                                 })?;
                                 let predicate = NamedNode::try_from(
-                                    oxrdf::Term::from_str(&triple_parts[1]).map_err(|e| {
+                                    hdt_bgp_str_to_term(&triple_parts[1]).map_err(|e| {
                                         io::Error::new(io::ErrorKind::InvalidData, e)
                                     })?,
                                 )
                                 .map_err(|e| {
                                     io::Error::new(io::ErrorKind::InvalidData, format!("{:?}", e))
                                 })?;
-                                let object = oxrdf::Term::from_str(&triple_parts[2])
+                                let object = hdt_bgp_str_to_term(&triple_parts[2])
                                     .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-
                                 let triple = oxrdf::Triple {
                                     subject,
                                     predicate,
