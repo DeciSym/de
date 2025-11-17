@@ -58,8 +58,8 @@ impl AggregateHdt {
     ///
     /// # Arguments
     /// * `named_graphs` - Optional filter to only load specific named graphs.
-    ///                   If None, all available graphs are loaded.
-    ///                   If Some(vec), only graphs in the vec are loaded.
+    ///   If None, all available graphs are loaded.
+    ///   If Some(vec), only graphs in the vec are loaded.
     ///
     /// # Performance
     /// Filtering graphs before loading can significantly reduce memory usage and load time
