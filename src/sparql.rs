@@ -1,7 +1,6 @@
 use spareval::{InternalQuad, QueryEvaluationError, QueryEvaluator, QueryableDataset};
 use spargebra::term::{BlankNode, NamedNode, Term};
 use spargebra::SparqlParser;
-use std::io::BufReader;
 use std::{
     collections::HashMap,
     io::{Error, ErrorKind},
@@ -19,7 +18,7 @@ pub struct AggregateHdt {
 
 pub struct AggregateHdtSnapshot {
     // Map graph names (URIs) to HDT instances
-    pub hdts: HashMap<String, hdt::Hdt>,
+    pub hdts: HashMap<String, hdt::hdt::HdtHybrid>,
 }
 
 impl AggregateHdt {
@@ -100,14 +99,17 @@ impl AggregateHdt {
         drop(file_paths_guard);
 
         // Load filtered HDTs in parallel
-        let hdts: HashMap<String, hdt::Hdt> = paths_vec
+        let hdts: HashMap<String, hdt::hdt::HdtHybrid> = paths_vec
             .par_iter()
-            .map(|(graph_name, path)| -> anyhow::Result<(String, hdt::Hdt)> {
-                let mut reader = BufReader::new(std::fs::File::open(path)?);
-                let hdt = hdt::Hdt::read(&mut reader)
-                    .map_err(|e| anyhow::anyhow!("Failed to load HDT from {:?}: {}", path, e))?;
-                Ok((graph_name.clone(), hdt))
-            })
+            .map(
+                |(graph_name, path)| -> anyhow::Result<(String, hdt::hdt::HdtHybrid)> {
+                    // let mut reader = BufReader::new(std::fs::File::open(path)?);
+                    let hdt = hdt::Hdt::new_hybrid_cache(path, true).map_err(|e| {
+                        anyhow::anyhow!("Failed to load HDT from {:?}: {}", path, e)
+                    })?;
+                    Ok((graph_name.clone(), hdt))
+                },
+            )
             .collect::<anyhow::Result<Vec<_>>>()?
             .into_iter()
             .collect();
@@ -236,8 +238,9 @@ impl AggregateHdt {
 
         for (graph_name, path) in file_paths.iter() {
             // Read HDT header to get metadata
-            let mut reader =
-                BufReader::new(std::fs::File::open(path).map_err(|e| anyhow::anyhow!("{e}"))?);
+            let mut reader = std::io::BufReader::new(
+                std::fs::File::open(path).map_err(|e| anyhow::anyhow!("{e}"))?,
+            );
 
             // Read control info first, then header
             let header = hdt::containers::ControlInfo::read(&mut reader)
@@ -364,7 +367,7 @@ impl<'a> QueryableDataset<'a> for &'a AggregateHdtSnapshot {
         // Note: get_snapshot() already filtered graphs at load time,
         // so self.hdts contains only the required graphs. This filter
         // handles additional runtime graph name matching from the query.
-        let graphs_to_query: Vec<(&String, &hdt::Hdt)> = self
+        let graphs_to_query: Vec<(&String, &hdt::hdt::HdtHybrid)> = self
             .hdts
             .iter()
             .filter(|(g, _h)| {

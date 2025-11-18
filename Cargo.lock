@@ -698,7 +698,7 @@ checksum = "5419bdc4f6a9207fbeba6d11b604d481addf78ecd10c11ad51e76c2f6482748d"
 [[package]]
 name = "hdt"
 version = "0.5.0"
-source = "git+https://github.com/DeciSym/hdt.git?branch=perf-improv#648eb7a859b0542d41ef46ed1b4fdf9523166578"
+source = "git+https://github.com/DeciSym/hdt.git?branch=perf-improv#b9a0c353d01b6b940f4d217d94135a30e59e3c9f"
 dependencies = [
  "bitset-core",
  "bytesize",
