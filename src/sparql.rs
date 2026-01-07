@@ -13,7 +13,7 @@ use std::{
 /// Stores file paths only; HDT instances are created per-request for better concurrency.
 pub struct AggregateHdt {
     // Map graph names (URIs) to file paths on disk
-    file_paths: Arc<RwLock<HashMap<String, std::path::PathBuf>>>,
+    pub file_paths: Arc<RwLock<HashMap<String, std::path::PathBuf>>>,
 }
 
 pub struct AggregateHdtSnapshot {
@@ -225,6 +225,72 @@ impl AggregateHdt {
         let mut file_paths = self.file_paths.write().unwrap();
         file_paths.clear();
         Ok(())
+    }
+
+    /// Sync the AggregateHdt with the current HDT files in the specified location.
+    /// This method detects additions and deletions of HDT files, not modifications.
+    ///
+    /// Returns a tuple of (added_count, removed_count).
+    #[cfg(feature = "server")]
+    pub fn sync(&self, location: std::path::PathBuf) -> Result<(usize, usize), anyhow::Error> {
+        use std::collections::HashSet;
+
+        // Scan the location for .hdt files
+        let mut current_files: HashSet<std::path::PathBuf> = HashSet::new();
+        if location.is_dir() {
+            for entry in std::fs::read_dir(&location)? {
+                let entry = entry?;
+                let path = entry.path();
+                if path.is_file() {
+                    if let Some(ext) = path.extension() {
+                        if ext == "hdt" {
+                            current_files.insert(path);
+                        }
+                    }
+                }
+            }
+        } else {
+            return Err(anyhow::anyhow!(
+                "Sync location is not a directory: {:?}",
+                location
+            ));
+        }
+
+        let mut file_paths = self.file_paths.write().unwrap();
+
+        // Build set of existing paths for comparison
+        let existing_paths: HashSet<std::path::PathBuf> = file_paths.values().cloned().collect();
+
+        // Find additions (files on disk not in our map)
+        let mut added = 0;
+        for path in &current_files {
+            if !existing_paths.contains(path) {
+                let graph_name = format!(
+                    "file:///{}",
+                    path.file_name()
+                        .ok_or_else(|| anyhow::anyhow!("Invalid file path: {:?}", path))?
+                        .to_str()
+                        .ok_or_else(|| anyhow::anyhow!("Invalid filename encoding: {:?}", path))?
+                );
+                file_paths.insert(graph_name, path.clone());
+                added += 1;
+            }
+        }
+
+        // Find deletions (files in our map not on disk)
+        let mut to_remove: Vec<String> = Vec::new();
+        for (graph_name, path) in file_paths.iter() {
+            if !current_files.contains(path) {
+                to_remove.push(graph_name.clone());
+            }
+        }
+
+        let removed = to_remove.len();
+        for graph_name in to_remove {
+            file_paths.remove(&graph_name);
+        }
+
+        Ok((added, removed))
     }
 
     /// Get all graph names and their associated HDT header information.
