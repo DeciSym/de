@@ -82,7 +82,7 @@ async fn main() {
         },
         Commands::View { data } => view::view_hdt(data, &mut stdout_writer),
         #[cfg(feature = "server")]
-        Commands::Serve { location, bind } => de::serve::serve(location, bind),
+        Commands::Serve { location, bind } => de::serve::serve(location.to_owned(), bind),
     };
     stdout_writer.flush().unwrap();
     match result {

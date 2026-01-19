@@ -7,7 +7,7 @@ use http::{
     uri::PathAndQuery,
     HeaderValue, Method, Request, Response, StatusCode,
 };
-use log::debug;
+use log::{debug, warn};
 use oxhttp::{model::Body, Server};
 use oxiri::Iri;
 use oxrdf::{GraphName, NamedNode, NamedOrBlankNode, TripleRef};
@@ -16,7 +16,6 @@ use rand::random;
 use sparesults::{QueryResultsFormat, QueryResultsSerializer};
 use spareval::{QueryEvaluator, QueryResults, QueryableDataset};
 use spargebra::SparqlParser;
-use std::str::FromStr;
 use std::{
     borrow::Cow,
     cell::RefCell,
@@ -30,6 +29,7 @@ use std::{
     thread::available_parallelism,
     time::Duration,
 };
+use std::{collections::HashMap, str::FromStr, sync::RwLock};
 use url::form_urlencoded;
 
 use crate::{
@@ -48,7 +48,7 @@ const YASGUI_CSS: &str = include_str!("../templates/yasgui/yasgui.min.css");
 const LOGO: &str = include_str!("../templates/logo.svg");
 
 pub fn serve(
-    locations: &str,
+    locations: String,
     bind: &str,
     // read_only: bool,
     // cors: bool,
@@ -59,7 +59,7 @@ pub fn serve(
     let cors = false;
 
     // Find all *.hdt files in the locations directory
-    let hdt_paths: Vec<String> = std::fs::read_dir(locations)?
+    let hdt_paths: Vec<String> = std::fs::read_dir(&locations)?
         .filter_map(|entry| {
             let entry = entry.ok()?;
             let path = entry.path();
@@ -77,17 +77,27 @@ pub fn serve(
     }
 
     // Create the AggregateHdt store from the found HDT files
-    let store = AggregateHdt::new(&hdt_paths)?;
+    let store = if hdt_paths.is_empty() {
+        warn!(
+            "Warning: No HDT files found in the specified locations: {}",
+            locations
+        );
+        AggregateHdt {
+            file_paths: Arc::new(RwLock::new(HashMap::new())),
+        }
+    } else {
+        AggregateHdt::new(&hdt_paths)?
+    };
 
     // let timeout = timeout_s.map(Duration::from_secs);
     let mut server = if cors {
         Server::new(cors_middleware(move |request| {
-            handle_request(request, &store, union_default_graph)
+            handle_request(request, &store, union_default_graph, locations.to_owned())
                 .unwrap_or_else(|(status, message)| error(status, message))
         }))
     } else {
         Server::new(move |request| {
-            handle_request(request, &store, union_default_graph)
+            handle_request(request, &store, union_default_graph, locations.to_owned())
                 .unwrap_or_else(|(status, message)| error(status, message))
         })
     }
@@ -143,8 +153,12 @@ pub fn handle_request(
     // read_only: bool,
     union_default_graph: bool,
     // timeout: Option<Duration>,
+    locations: String,
 ) -> Result<Response<Body>, HttpError> {
     println!("{}  {}", request.uri().path(), request.method().as_ref());
+    let _ = store
+        .sync(Path::new(&locations).to_path_buf())
+        .map_err(|e| internal_server_error(format!("error loading data files: {}", e)))?;
     match (request.uri().path(), request.method().as_ref()) {
         ("/", "HEAD") => Ok(Response::builder()
             .header(CONTENT_TYPE, "text/html")

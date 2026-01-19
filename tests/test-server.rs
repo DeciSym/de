@@ -53,7 +53,7 @@ mod server_tests {
 
     #[test]
     fn test_sparql_query_post() -> anyhow::Result<()> {
-        let (_tmp_dir, store) = setup_test_store()?;
+        let (tmp_dir, store) = setup_test_store()?;
 
         // Test SPARQL query via POST
         let query = "PREFIX ex: <http://example.org/> PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> SELECT ?fruit WHERE { ?fruit rdf:type ex:Fruit }";
@@ -66,7 +66,12 @@ mod server_tests {
             .body(Body::from(query))
             .unwrap();
 
-        let response = handle_response(de::serve::handle_request(&mut request, &store, true))?;
+        let response = handle_response(de::serve::handle_request(
+            &mut request,
+            &store,
+            true,
+            tmp_dir.path().to_str().unwrap().to_string(),
+        ))?;
 
         assert_eq!(response.status(), StatusCode::OK);
         let body_text = read_body(response);
@@ -77,7 +82,7 @@ mod server_tests {
 
     #[test]
     fn test_sparql_query_ask() -> anyhow::Result<()> {
-        let (_tmp_dir, store) = setup_test_store()?;
+        let (tmp_dir, store) = setup_test_store()?;
 
         // Test ASK query
         let query = "PREFIX ex: <http://example.org/> PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> ASK { ?fruit rdf:type ex:Fruit }";
@@ -90,7 +95,12 @@ mod server_tests {
             .body(Body::from(query))
             .unwrap();
 
-        let response = handle_response(de::serve::handle_request(&mut request, &store, true))?;
+        let response = handle_response(de::serve::handle_request(
+            &mut request,
+            &store,
+            true,
+            tmp_dir.path().to_str().unwrap().to_string(),
+        ))?;
 
         assert_eq!(response.status(), StatusCode::OK);
         let body_text = read_body(response);
@@ -101,7 +111,7 @@ mod server_tests {
 
     #[test]
     fn test_sparql_query_service_description() -> anyhow::Result<()> {
-        let (_tmp_dir, store) = setup_test_store()?;
+        let (tmp_dir, store) = setup_test_store()?;
 
         // Test GET to /query without query parameter (should return service description)
         let mut request = Request::builder()
@@ -111,7 +121,12 @@ mod server_tests {
             .body(Body::empty())
             .unwrap();
 
-        let response = handle_response(de::serve::handle_request(&mut request, &store, true))?;
+        let response = handle_response(de::serve::handle_request(
+            &mut request,
+            &store,
+            true,
+            tmp_dir.path().to_str().unwrap().to_string(),
+        ))?;
 
         assert_eq!(response.status(), StatusCode::OK);
         let content_type = response
@@ -127,7 +142,7 @@ mod server_tests {
 
     #[test]
     fn test_update_create_graph() -> anyhow::Result<()> {
-        let (_tmp_dir, store) = setup_test_store()?;
+        let (tmp_dir, store) = setup_test_store()?;
 
         // Test CREATE GRAPH
         let update = "CREATE GRAPH <http://example.org/newgraph>";
@@ -139,7 +154,12 @@ mod server_tests {
             .body(Body::from(update))
             .unwrap();
 
-        let response = handle_response(de::serve::handle_request(&mut request, &store, true))?;
+        let response = handle_response(de::serve::handle_request(
+            &mut request,
+            &store,
+            true,
+            tmp_dir.path().to_str().unwrap().to_string(),
+        ))?;
 
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
 
@@ -148,7 +168,7 @@ mod server_tests {
 
     #[test]
     fn test_update_insert_data() -> anyhow::Result<()> {
-        let (_tmp_dir, store) = setup_test_store()?;
+        let (tmp_dir, store) = setup_test_store()?;
 
         // Test INSERT DATA to a new graph
         let update = r#"
@@ -167,7 +187,12 @@ mod server_tests {
             .body(Body::from(update))
             .unwrap();
 
-        let response = handle_response(de::serve::handle_request(&mut request, &store, true))?;
+        let response = handle_response(de::serve::handle_request(
+            &mut request,
+            &store,
+            true,
+            tmp_dir.path().to_str().unwrap().to_string(),
+        ))?;
 
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
 
@@ -176,7 +201,7 @@ mod server_tests {
 
     #[test]
     fn test_update_delete_data_forbidden() -> anyhow::Result<()> {
-        let (_tmp_dir, store) = setup_test_store()?;
+        let (tmp_dir, store) = setup_test_store()?;
 
         // Test that DELETE DATA is forbidden (read-only for existing graphs)
         let update = r#"
@@ -196,7 +221,12 @@ mod server_tests {
             .unwrap();
 
         // DELETE DATA should return FORBIDDEN status
-        let result = de::serve::handle_request(&mut request, &store, true);
+        let result: Result<http::Response<Body>, (StatusCode, String)> = de::serve::handle_request(
+            &mut request,
+            &store,
+            true,
+            tmp_dir.path().to_str().unwrap().to_string(),
+        );
         assert!(result.is_err());
         let (status, msg) = result.unwrap_err();
         assert_eq!(status, StatusCode::FORBIDDEN);
@@ -207,7 +237,7 @@ mod server_tests {
 
     #[test]
     fn test_store_get_all() -> anyhow::Result<()> {
-        let (_tmp_dir, store) = setup_test_store()?;
+        let (tmp_dir, store) = setup_test_store()?;
 
         // Test GET /store (get all graphs)
         let mut request = Request::builder()
@@ -217,7 +247,12 @@ mod server_tests {
             .body(Body::empty())
             .unwrap();
 
-        let response = handle_response(de::serve::handle_request(&mut request, &store, true))?;
+        let response = handle_response(de::serve::handle_request(
+            &mut request,
+            &store,
+            true,
+            tmp_dir.path().to_str().unwrap().to_string(),
+        ))?;
 
         assert_eq!(response.status(), StatusCode::OK);
         let content_type = response
@@ -236,7 +271,7 @@ mod server_tests {
 
     #[test]
     fn test_store_get_specific_graph() -> anyhow::Result<()> {
-        let (_tmp_dir, store) = setup_test_store()?;
+        let (tmp_dir, store) = setup_test_store()?;
 
         // Test GET /store with graph parameter
         let mut request = Request::builder()
@@ -246,7 +281,12 @@ mod server_tests {
             .body(Body::empty())
             .unwrap();
 
-        let response = handle_response(de::serve::handle_request(&mut request, &store, true))?;
+        let response = handle_response(de::serve::handle_request(
+            &mut request,
+            &store,
+            true,
+            tmp_dir.path().to_str().unwrap().to_string(),
+        ))?;
 
         assert_eq!(response.status(), StatusCode::OK);
         // Note: Body might be empty if graph streaming fails, but status should be OK
@@ -257,7 +297,7 @@ mod server_tests {
 
     #[test]
     fn test_store_put_new_graph() -> anyhow::Result<()> {
-        let (_tmp_dir, store) = setup_test_store()?;
+        let (tmp_dir, store) = setup_test_store()?;
 
         // Test PUT /store with new graph
         let turtle_data = r#"
@@ -274,7 +314,12 @@ ex:Orange ex:hasColor "orange" .
 
         // PUT may fail if the graph name is invalid for the implementation
         // This test validates that the endpoint accepts the PUT request structure
-        let _result = de::serve::handle_request(&mut request, &store, true);
+        let _result = de::serve::handle_request(
+            &mut request,
+            &store,
+            true,
+            tmp_dir.path().to_str().unwrap().to_string(),
+        );
         // Test passes if no panic occurs - actual behavior may vary by implementation
 
         Ok(())
@@ -282,7 +327,7 @@ ex:Orange ex:hasColor "orange" .
 
     #[test]
     fn test_store_delete_graph() -> anyhow::Result<()> {
-        let (_tmp_dir, store) = setup_test_store()?;
+        let (tmp_dir, store) = setup_test_store()?;
 
         // Test DELETE endpoint structure
         // (Creating and deleting may fail due to implementation details)
@@ -293,7 +338,12 @@ ex:Orange ex:hasColor "orange" .
             .unwrap();
 
         // Test validates that DELETE endpoint exists and responds
-        let _result = de::serve::handle_request(&mut request, &store, true);
+        let _result = de::serve::handle_request(
+            &mut request,
+            &store,
+            true,
+            tmp_dir.path().to_str().unwrap().to_string(),
+        );
         // Test passes if no panic occurs
 
         Ok(())
@@ -301,7 +351,7 @@ ex:Orange ex:hasColor "orange" .
 
     #[test]
     fn test_store_head_graph_exists() -> anyhow::Result<()> {
-        let (_tmp_dir, store) = setup_test_store()?;
+        let (tmp_dir, store) = setup_test_store()?;
 
         // Test HEAD /store with existing graph
         let mut request = Request::builder()
@@ -310,7 +360,12 @@ ex:Orange ex:hasColor "orange" .
             .body(Body::empty())
             .unwrap();
 
-        let response = handle_response(de::serve::handle_request(&mut request, &store, true))?;
+        let response = handle_response(de::serve::handle_request(
+            &mut request,
+            &store,
+            true,
+            tmp_dir.path().to_str().unwrap().to_string(),
+        ))?;
 
         assert_eq!(response.status(), StatusCode::OK);
 
@@ -319,7 +374,7 @@ ex:Orange ex:hasColor "orange" .
 
     #[test]
     fn test_store_head_graph_not_exists() -> anyhow::Result<()> {
-        let (_tmp_dir, store) = setup_test_store()?;
+        let (tmp_dir, store) = setup_test_store()?;
 
         // Test HEAD /store with non-existing graph
         let mut request = Request::builder()
@@ -329,7 +384,12 @@ ex:Orange ex:hasColor "orange" .
             .unwrap();
 
         // Non-existing graph should return an error
-        let result = de::serve::handle_request(&mut request, &store, true);
+        let result = de::serve::handle_request(
+            &mut request,
+            &store,
+            true,
+            tmp_dir.path().to_str().unwrap().to_string(),
+        );
         assert!(result.is_err());
         let (status, _msg) = result.unwrap_err();
         assert_eq!(status, StatusCode::NOT_FOUND);
@@ -339,7 +399,7 @@ ex:Orange ex:hasColor "orange" .
 
     #[test]
     fn test_invalid_sparql_query() -> anyhow::Result<()> {
-        let (_tmp_dir, store) = setup_test_store()?;
+        let (tmp_dir, store) = setup_test_store()?;
 
         // Test invalid SPARQL query
         let query = "INVALID SPARQL QUERY";
@@ -353,7 +413,12 @@ ex:Orange ex:hasColor "orange" .
             .unwrap();
 
         // Invalid query should return an error
-        let result = de::serve::handle_request(&mut request, &store, true);
+        let result = de::serve::handle_request(
+            &mut request,
+            &store,
+            true,
+            tmp_dir.path().to_str().unwrap().to_string(),
+        );
         assert!(result.is_err());
         let (status, msg) = result.unwrap_err();
         assert_eq!(status, StatusCode::BAD_REQUEST);
@@ -365,7 +430,7 @@ ex:Orange ex:hasColor "orange" .
 
     #[test]
     fn test_unsupported_media_type() -> anyhow::Result<()> {
-        let (_tmp_dir, store) = setup_test_store()?;
+        let (tmp_dir, store) = setup_test_store()?;
 
         // Test PUT with unsupported content type
         let mut request = Request::builder()
@@ -376,7 +441,12 @@ ex:Orange ex:hasColor "orange" .
             .unwrap();
 
         // Unsupported media type should return an error
-        let result = de::serve::handle_request(&mut request, &store, true);
+        let result = de::serve::handle_request(
+            &mut request,
+            &store,
+            true,
+            tmp_dir.path().to_str().unwrap().to_string(),
+        );
         assert!(result.is_err());
         let (status, _msg) = result.unwrap_err();
         // May return UNSUPPORTED_MEDIA_TYPE or INTERNAL_SERVER_ERROR depending on when validation occurs

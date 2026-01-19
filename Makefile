@@ -14,7 +14,7 @@ lint:
 	cargo clippy --benches --tests --bins --all-features
 
 test: init
-	cargo test
+	cargo test --all-features
 
 presubmit: lint test
 
