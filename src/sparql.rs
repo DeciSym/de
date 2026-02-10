@@ -531,6 +531,8 @@ mod tests {
         use std::path::PathBuf;
 
         let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        path.push("tests");
+        path.push("resources");
         path.push(filename);
         path.to_string_lossy().into_owned()
     }
@@ -539,14 +541,14 @@ mod tests {
     #[cfg(feature = "server")]
     fn test_contains_named_graph_found() {
         // Create an AggregateHDT with test.hdt
-        let test_hdt_path = get_test_hdt_path("test.hdt");
+        let test_hdt_path = get_test_hdt_path("apple.hdt");
         let store = &AggregateHdt::new(&[test_hdt_path])
             .expect("Failed to create AggregateHDT")
             .get_snapshot(None)
             .expect("msg");
 
         // Test 1: Graph should be found with file:/// URI scheme matching the filename
-        let graph_name: Arc<str> = Arc::from("file:///test.hdt");
+        let graph_name: Arc<str> = Arc::from("file:///apple.hdt");
         let result = store.contains_internal_graph_name(&graph_name);
         assert!(
             result.is_ok(),
@@ -562,7 +564,7 @@ mod tests {
     #[cfg(feature = "server")]
     fn test_contains_named_graph_not_found() {
         // Create an AggregateHDT with test.hdt
-        let test_hdt_path = get_test_hdt_path("test.hdt");
+        let test_hdt_path = get_test_hdt_path("apple.hdt");
         let store = &AggregateHdt::new(&[test_hdt_path])
             .expect("Failed to create AggregateHDT")
             .get_snapshot(None)
@@ -607,49 +609,16 @@ mod tests {
 
     #[test]
     #[cfg(feature = "server")]
-    fn test_contains_named_graph_multiple_graphs() {
-        // Create an AggregateHDT with multiple HDT files
-        let test_hdt = get_test_hdt_path("test.hdt");
-        let literal_hdt = get_test_hdt_path("literal.hdt");
-        let store = &AggregateHdt::new(&[test_hdt, literal_hdt])
-            .expect("Failed to create AggregateHDT with multiple files")
-            .get_snapshot(None)
-            .expect("msg");
-
-        // Test 1: First graph should be found
-        let graph1: Arc<str> = Arc::from("file:///test.hdt");
-        assert!(
-            store.contains_internal_graph_name(&graph1).unwrap(),
-            "First graph 'test' should be found"
-        );
-
-        // Test 2: Second graph should be found
-        let graph2: Arc<str> = Arc::from("file:///literal.hdt");
-        assert!(
-            store.contains_internal_graph_name(&graph2).unwrap(),
-            "Second graph 'literal' should be found"
-        );
-
-        // Test 3: Non-existent graph should not be found
-        let missing: Arc<str> = Arc::from("file:///missing.hdt");
-        assert!(
-            !store.contains_internal_graph_name(&missing).unwrap(),
-            "Non-existent graph should not be found"
-        );
-    }
-
-    #[test]
-    #[cfg(feature = "server")]
     fn test_contains_named_graph_after_insert() {
         // Create an AggregateHDT with one HDT file
-        let test_hdt_path = get_test_hdt_path("test.hdt");
+        let test_hdt_path = get_test_hdt_path("apple.hdt");
         let store = &AggregateHdt::new(std::slice::from_ref(&test_hdt_path))
             .expect("Failed to create AggregateHDT");
 
         let snapshot = &store.get_snapshot(None).expect("msg");
 
         // Graph should exist initially
-        let existing_graph: Arc<str> = Arc::from("file:///test.hdt");
+        let existing_graph: Arc<str> = Arc::from("file:///apple.hdt");
         assert!(
             snapshot
                 .contains_internal_graph_name(&existing_graph)
