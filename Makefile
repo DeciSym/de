@@ -10,8 +10,8 @@ lint:
 	cargo install cargo-deb cargo-machete
 	cargo fmt --check
 	cargo machete
-	cargo clippy --benches --tests --bins
-	cargo clippy --benches --tests --bins --all-features
+	cargo clippy --benches --tests --bins --no-deps
+	cargo clippy --benches --tests --bins --all-features --no-deps
 
 test: init
 	cargo test --all-features
