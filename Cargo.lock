@@ -692,7 +692,6 @@ checksum = "5419bdc4f6a9207fbeba6d11b604d481addf78ecd10c11ad51e76c2f6482748d"
 [[package]]
 name = "hdt"
 version = "0.5.0"
-source = "git+https://github.com/DeciSym/hdt.git?branch=perf-improv#b9a0c353d01b6b940f4d217d94135a30e59e3c9f"
 dependencies = [
  "bitset-core",
  "bytesize",
@@ -1804,9 +1803,9 @@ dependencies = [
 
 [[package]]
 name = "tempfile"
-version = "3.24.0"
+version = "3.25.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "655da9c7eb6305c55742045d5a8d2037996d61d8de95806335c7c86ce0f82e9c"
+checksum = "0136791f7c95b1f6dd99f9cc786b91bb81c3800b639b3478e561ddb7be95e5f1"
 dependencies = [
  "fastrand",
  "getrandom",
