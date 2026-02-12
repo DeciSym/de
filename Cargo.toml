@@ -25,7 +25,7 @@ clap = { version = "4.5" }
 clap-verbosity-flag = { version = "3.0", default-features = false, features = ["log"] }
 env_logger = { version = "0.11", default-features = false }
 exitcode = "1.1"
-hdt = { path = "./hdt", default-features = false, features = ["nt", "sparql"] }
+hdt = { git = "https://github.com/DeciSym/hdt", default-features = false, features = ["nt", "sparql"], branch = "perf-improv" }
 http = { version = "1.4", optional = true }
 log = "0.4"
 oxhttp = { version = "0.3", optional=true }
