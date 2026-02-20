@@ -35,10 +35,7 @@ cd de
 cargo build --release
 ```
 
-4. **COMING SOON** Install the CLI with `cargo install`
-```bash
-cargo install de
-```
+On OpenBSD, install via `pkg_add` once a port/package exists, or build from source.
 
 ## Usage Overview
 
@@ -156,7 +153,3 @@ de view --data data.hdt
 - `-h, --help`: Show help
 
 ---
-
-## License
-
-This project is licensed under the BSD 3-Clause License - see the [LICENSE](LICENSE) file for details.
