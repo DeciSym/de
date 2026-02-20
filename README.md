@@ -17,26 +17,22 @@
 
 ## Installation
 
-1. Download the latest [release](https://github.com/DeciSym/de/releases) version and install the .deb
-```bash
-apt install de_${VERSION}_amd64.deb -y
-```
-
-2. Run with Docker:
-```bash
-docker run --rm decisym/de:latest --help
-```
-
-3. Build from source (requires Rust and Cargo):
+### Build from source (requires Rust and Cargo):
 
 ```bash
 git clone https://github.com/DeciSym/de.git
-cd de
-cargo build --release
+cargo install --path ./de/
+# OR
+cargo install --git https://github.com/DeciSym/de
 ```
-
-On OpenBSD, install via `pkg_add` once a port/package exists, or build from source.
-
+### Run with Docker:
+```bash
+docker run --rm decisym/de:latest --help
+```
+### Download the latest [release](https://github.com/DeciSym/de/releases) version and install the .deb
+```bash
+apt install de_${VERSION}_amd64.deb -y
+```
 ## Usage Overview
 
 Available commands:
@@ -153,3 +149,7 @@ de view --data data.hdt
 - `-h, --help`: Show help
 
 ---
+
+## License
+
+This project is licensed under the BSD 3-Clause License - see the [LICENSE](LICENSE) file for details.
