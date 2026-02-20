@@ -17,29 +17,22 @@
 
 ## Installation
 
-1. Download the latest [release](https://github.com/DeciSym/de/releases) version and install the .deb
-```bash
-apt install de_${VERSION}_amd64.deb -y
-```
-
-2. Run with Docker:
-```bash
-docker run --rm decisym/de:latest --help
-```
-
-3. Build from source (requires Rust and Cargo):
+### Build from source (requires Rust and Cargo):
 
 ```bash
 git clone https://github.com/DeciSym/de.git
-cd de
-cargo build --release
+cargo install --path ./de/
+# OR
+cargo install --git https://github.com/DeciSym/de
 ```
-
-4. **COMING SOON** Install the CLI with `cargo install`
+### Run with Docker:
 ```bash
-cargo install de
+docker run --rm decisym/de:latest --help
 ```
-
+### Download the latest [release](https://github.com/DeciSym/de/releases) version and install the .deb
+```bash
+apt install de_${VERSION}_amd64.deb -y
+```
 ## Usage Overview
 
 Available commands:
