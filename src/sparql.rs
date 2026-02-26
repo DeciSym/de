@@ -9,6 +9,24 @@ use std::{
     sync::{Arc, RwLock},
 };
 
+fn lock_read_file_paths<'a>(
+    file_paths: &'a Arc<RwLock<HashMap<String, std::path::PathBuf>>>,
+    context: &str,
+) -> anyhow::Result<std::sync::RwLockReadGuard<'a, HashMap<String, std::path::PathBuf>>> {
+    file_paths
+        .read()
+        .map_err(|e| anyhow::anyhow!("{context}: poisoned lock: {e}"))
+}
+
+fn lock_write_file_paths<'a>(
+    file_paths: &'a Arc<RwLock<HashMap<String, std::path::PathBuf>>>,
+    context: &str,
+) -> anyhow::Result<std::sync::RwLockWriteGuard<'a, HashMap<String, std::path::PathBuf>>> {
+    file_paths
+        .write()
+        .map_err(|e| anyhow::anyhow!("{context}: poisoned lock: {e}"))
+}
+
 /// Boundry over a Header-Dictionary-Triplies (HDT) storage layer.
 /// Stores file paths only; HDT instances are created per-request for better concurrency.
 pub struct AggregateHdt {
@@ -81,7 +99,7 @@ impl AggregateHdt {
     ) -> Result<AggregateHdtSnapshot, Box<dyn std::error::Error>> {
         use rayon::prelude::*;
 
-        let file_paths_guard = self.file_paths.read().unwrap();
+        let file_paths_guard = lock_read_file_paths(&self.file_paths, "reading HDT path map")?;
 
         // Optimization: Filter graphs BEFORE loading into memory
         let paths_vec: Vec<(String, std::path::PathBuf)> = file_paths_guard
@@ -119,7 +137,8 @@ impl AggregateHdt {
 
     #[cfg(feature = "server")]
     pub fn contains_graph_name(&self, graph_name: &String) -> Result<bool, anyhow::Error> {
-        Ok(self.file_paths.read().unwrap().contains_key(graph_name))
+        let file_paths = lock_read_file_paths(&self.file_paths, "checking named graph")?;
+        Ok(file_paths.contains_key(graph_name))
     }
 
     #[cfg(feature = "server")]
@@ -170,14 +189,14 @@ impl AggregateHdt {
             }
         };
 
-        let mut file_paths = self.file_paths.write().unwrap();
+        let mut file_paths = lock_write_file_paths(&self.file_paths, "modifying HDT paths")?;
         file_paths.insert(graph_name.clone().into_string(), final_path);
         Ok(())
     }
 
     #[cfg(feature = "server")]
     pub fn remove_named_graph(&self, graph_name: &NamedNode) -> Result<bool, anyhow::Error> {
-        let mut file_paths = self.file_paths.write().unwrap();
+        let mut file_paths = lock_write_file_paths(&self.file_paths, "modifying HDT paths")?;
         if let Some(path) = file_paths.remove(graph_name.as_str()) {
             // Delete the HDT file from disk
             if path.exists() {
@@ -224,7 +243,7 @@ impl AggregateHdt {
 
     #[cfg(feature = "server")]
     pub fn clear(&self) -> Result<(), anyhow::Error> {
-        let mut file_paths = self.file_paths.write().unwrap();
+        let mut file_paths = lock_write_file_paths(&self.file_paths, "modifying HDT paths")?;
         file_paths.clear();
         Ok(())
     }
@@ -258,7 +277,7 @@ impl AggregateHdt {
             ));
         }
 
-        let mut file_paths = self.file_paths.write().unwrap();
+        let mut file_paths = lock_write_file_paths(&self.file_paths, "modifying HDT paths")?;
 
         // Build set of existing paths for comparison
         let existing_paths: HashSet<std::path::PathBuf> = file_paths.values().cloned().collect();
@@ -301,7 +320,7 @@ impl AggregateHdt {
     pub fn get_all_graphs(
         &self,
     ) -> Result<Vec<(String, std::path::PathBuf, hdt::header::Header)>, anyhow::Error> {
-        let file_paths = self.file_paths.read().unwrap();
+        let file_paths = lock_read_file_paths(&self.file_paths, "reading graph map")?;
         let mut result = Vec::new();
 
         for (graph_name, path) in file_paths.iter() {
@@ -332,7 +351,10 @@ impl AggregateHdt {
     /// NOTE: This creates HDT instances for all graphs, so it may be memory-intensive.
     #[cfg(feature = "server")]
     pub fn collect_all_triples(&self) -> Vec<(String, [Arc<str>; 3])> {
-        let file_paths = self.file_paths.read().unwrap();
+        let file_paths = match lock_read_file_paths(&self.file_paths, "reading graph map") {
+            Ok(file_paths) => file_paths,
+            Err(_) => return Vec::new(),
+        };
         let mut result = Vec::new();
         for (graph_name, path) in file_paths.iter() {
             // Create HDT instance for this file
@@ -685,6 +707,31 @@ mod tests {
         assert!(
             insert_result.is_err(),
             "Expected insert_named_graph to fail for NT files without a stem"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "server")]
+    fn test_get_snapshot_fails_when_lock_is_poisoned() {
+        let test_hdt_path = get_test_hdt_path("apple.hdt");
+        let store = &AggregateHdt::new(std::slice::from_ref(&test_hdt_path))
+            .expect("Failed to create AggregateHDT");
+
+        let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = store.file_paths.write().unwrap();
+            panic!("poison lock");
+        }));
+        assert!(panic_result.is_err(), "expected lock poisoning setup to panic");
+
+        let snapshot_result = store.get_snapshot(None);
+        assert!(snapshot_result.is_err(), "snapshot should fail on poisoned lock");
+        assert!(
+            snapshot_result
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("poisoned lock"),
+            "expected poisoned lock error"
         );
     }
 }
