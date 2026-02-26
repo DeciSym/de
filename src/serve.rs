@@ -1335,21 +1335,34 @@ fn web_load_graph(
             .map_err(|_| internal_server_error("error during RDF serialization"))?
     }
 
+    let graph_name = graph_name_for_upload(base_iri, p.as_path())?;
+
     store
-        .insert_named_graph(
-            &NamedNode::from_str(base_iri.unwrap_or(&format!(
-                "file:///{}",
-                p.as_path().file_name().unwrap().to_str().unwrap()
-            )))
-            .unwrap_or(
-                NamedNode::from_str(&format!("file:///{:x}", random::<u128>()))
-                    .map_err(|_| internal_server_error("error with propsed graph name"))?,
-            ),
-            p.as_path(),
-        )
+        .insert_named_graph(&graph_name, p.as_path())
         .map_err(|_| internal_server_error("error persisting graph to store"))?;
 
-    Ok(p.as_path().to_str().unwrap().to_string())
+    Ok(p.as_path().to_string_lossy().to_string())
+}
+
+fn graph_name_for_upload(
+    base_iri: Option<&str>,
+    file_path: &Path,
+) -> Result<NamedNode, HttpError> {
+    if let Some(base_iri) = base_iri {
+        NamedNode::from_str(base_iri).map_err(|_| {
+            bad_request(format!("Invalid base IRI: {base_iri}"))
+        })
+    } else {
+        let fallback = file_path
+            .file_name()
+            .map(|name| format!("file:///{}", name.to_string_lossy()));
+        let mut graph_name = fallback.unwrap_or_else(|| format!("file:///{:x}", random::<u128>()));
+        if graph_name == "file:///" {
+            graph_name = format!("file:///{:x}", random::<u128>());
+        }
+        NamedNode::from_str(&graph_name)
+            .map_err(|_| internal_server_error("error with propsed graph name"))
+    }
 }
 
 fn web_load_dataset(
@@ -1511,4 +1524,27 @@ fn systemd_notify_ready() -> io::Result<()> {
         UnixDatagram::unbound()?.send_to(b"READY=1", path)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::panic::AssertUnwindSafe;
+    use std::path::Path;
+
+    #[test]
+    fn graph_name_for_upload_root_path_does_not_panic() {
+        let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            graph_name_for_upload(None, Path::new("/"))
+        }));
+
+        assert!(result.is_ok(), "graph_name_for_upload should not panic for root paths");
+
+        let graph_name = result
+            .expect("function should not panic")
+            .expect("function should succeed");
+
+        assert_ne!(graph_name.as_str(), "file:///");
+        assert!(graph_name.as_str().starts_with("file:///"));
+    }
 }
