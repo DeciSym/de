@@ -146,11 +146,13 @@ impl AggregateHdt {
             "nt" => {
                 // Convert NT to HDT
                 // create new HDT file in same dir as original file, with same name
-                let hdt_path = format!(
-                    "{}/{}.hdt",
-                    file_path.to_path_buf().parent().unwrap().to_str().unwrap(),
-                    file_path.file_stem().unwrap().to_str().unwrap()
-                );
+                let parent = file_path.parent().ok_or_else(|| {
+                    anyhow::anyhow!("NT file has no parent directory: {:?}", file_path)
+                })?;
+                let file_stem = file_path.file_stem().and_then(|s| s.to_str()).ok_or_else(|| {
+                    anyhow::anyhow!("NT file has invalid or empty stem: {:?}", file_path)
+                })?;
+                let hdt_path = parent.join(format!("{}.hdt", file_stem));
 
                 // Read the NT file and convert to HDT
                 let h = hdt::Hdt::read_nt(file_path)?;
@@ -651,6 +653,38 @@ mod tests {
                 .contains_internal_graph_name(&new_graph_arc)
                 .unwrap(),
             "New graph should exist after insertion"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "server")]
+    fn test_insert_named_graph_rejects_nt_file_without_stem() {
+        // Create an AggregateHDT with one HDT file
+        let test_hdt_path = get_test_hdt_path("apple.hdt");
+        let store = &AggregateHdt::new(std::slice::from_ref(&test_hdt_path))
+            .expect("Failed to create AggregateHDT");
+
+        let work_dir = tempfile::tempdir().expect("Failed to create temporary directory");
+        let dot_nt = work_dir.path().join(".nt");
+        std::fs::write(
+            &dot_nt,
+            "<http://example.org/s> <http://example.org/p> <http://example.org/o> .\n",
+        )
+        .expect("Failed to write test NT file");
+
+        let insert_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            store.insert_named_graph(
+                &NamedNode::new("http://example.org/invalid-nt-graph")
+                    .expect("Invalid graph IRI"),
+                &dot_nt,
+            )
+        }));
+
+        assert!(insert_result.is_ok(), "insert_named_graph must not panic");
+        let insert_result = insert_result.expect("catch_unwind failed");
+        assert!(
+            insert_result.is_err(),
+            "Expected insert_named_graph to fail for NT files without a stem"
         );
     }
 }
