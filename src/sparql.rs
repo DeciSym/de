@@ -543,8 +543,8 @@ mod tests {
     #[cfg(feature = "server")]
     use super::*;
     #[cfg(not(feature = "server"))]
-    use super::{AggregateHdtSnapshot, QueryEvaluationError, query, graph_to_file};
-
+    use super::{AggregateHdtSnapshot, QueryEvaluationError, query};
+    #[cfg(feature = "server")]
     #[test]
     fn test_graph_to_file_returns_none_for_root_file_uri() {
         let graph_name = oxrdf::NamedNode::new("file:///").expect("valid test URI");
