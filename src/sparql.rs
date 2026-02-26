@@ -749,17 +749,19 @@ mod tests {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             query("SELECT ?s ?p ?o WHERE { ?s ?p ?o }", &snapshot, Some("://bad-base".to_string()))
         }));
-
         assert!(result.is_ok(), "query must not panic with invalid base IRI");
         let result = result.expect("query panicked");
-        let err = result.expect_err("query should return error for invalid base IRI");
+        let err = match result {
+            Ok(_) => panic!("query should return error for invalid base IRI"),
+            Err(err) => err,
+        };
         if let QueryEvaluationError::Unexpected(err) = err {
             assert!(
                 err.to_string().contains("IRI") || err.to_string().contains("base"),
                 "unexpected parser error: {err}"
             );
         } else {
-            panic!("expected unexpected parser error, got {err:?}");
+            panic!("expected unexpected parser error");
         }
     }
 }

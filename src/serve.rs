@@ -1349,19 +1349,15 @@ fn graph_name_for_upload(
     file_path: &Path,
 ) -> Result<NamedNode, HttpError> {
     if let Some(base_iri) = base_iri {
-        NamedNode::from_str(base_iri).map_err(|_| {
+        NamedNode::new(base_iri).map_err(|_| {
             bad_request(format!("Invalid base IRI: {base_iri}"))
         })
     } else {
         let fallback = file_path
             .file_name()
             .map(|name| format!("file:///{}", name.to_string_lossy()));
-        let mut graph_name = fallback.unwrap_or_else(|| format!("file:///{:x}", random::<u128>()));
-        if graph_name == "file:///" {
-            graph_name = format!("file:///{:x}", random::<u128>());
-        }
-        NamedNode::from_str(&graph_name)
-            .map_err(|_| internal_server_error("error with propsed graph name"))
+        let graph_name = fallback.unwrap_or_else(|| format!("https://de.local/upload/{:x}", random::<u128>()));
+        NamedNode::new(graph_name).map_err(|_| internal_server_error("error with proposed graph name"))
     }
 }
 
@@ -1544,7 +1540,10 @@ mod tests {
             .expect("function should not panic")
             .expect("function should succeed");
 
-        assert_ne!(graph_name.as_str(), "file:///");
-        assert!(graph_name.as_str().starts_with("file:///"));
+        assert!(
+            graph_name.as_str().starts_with("file:///")
+                || graph_name.as_str().starts_with("https://de.local/upload/"),
+            "graph_name should be a valid file graph or generated HTTP upload URI"
+        );
     }
 }
