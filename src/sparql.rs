@@ -539,7 +539,7 @@ pub fn query<'a>(
 ) -> Result<spareval::QueryResults<'a>, QueryEvaluationError> {
     let query = SparqlParser::new()
         .with_base_iri(base_iri.unwrap_or("http://example.com/".to_string()))
-        .unwrap()
+            .map_err(|e| QueryEvaluationError::Unexpected(Box::new(e)))?
         .parse_query(q)?;
     QueryEvaluator::new().prepare(&query).execute(hdt)
 }
@@ -548,6 +548,8 @@ pub fn query<'a>(
 mod tests {
     #[cfg(feature = "server")]
     use super::*;
+    #[cfg(not(feature = "server"))]
+    use super::{AggregateHdtSnapshot, QueryEvaluationError, query};
 
     /// Helper function to get the path to a test HDT file
     #[cfg(feature = "server")]
@@ -733,5 +735,27 @@ mod tests {
                 .contains("poisoned lock"),
             "expected poisoned lock error"
         );
+    }
+
+    #[test]
+    fn test_query_rejects_invalid_base_iri_without_panic() {
+        let snapshot = AggregateHdtSnapshot {
+            hdts: std::collections::HashMap::new(),
+        };
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            query("SELECT ?s ?p ?o WHERE { ?s ?p ?o }", &snapshot, Some("://bad-base".to_string()))
+        }));
+
+        assert!(result.is_ok(), "query must not panic with invalid base IRI");
+        let result = result.expect("query panicked");
+        let err = result.expect_err("query should return error for invalid base IRI");
+        if let QueryEvaluationError::Unexpected(err) = err {
+            assert!(
+                err.to_string().contains("IRI") || err.to_string().contains("base"),
+                "unexpected parser error: {err}"
+            );
+        } else {
+            panic!("expected unexpected parser error, got {err:?}");
+        }
     }
 }
