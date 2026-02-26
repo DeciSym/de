@@ -375,17 +375,11 @@ pub fn graph_to_file(name: oxrdf::NamedOrBlankNodeRef) -> Option<String> {
         let Ok(uri) = res else {
             return None;
         };
-        let paths = uri.path().split("/").collect::<Vec<_>>();
-        if let Some(p) = paths.last() {
-            return Some(
-                Path::new(p)
-                    .file_stem()
-                    .unwrap()
-                    .to_str()
-                    .unwrap()
-                    .to_string(),
-            );
-        }
+        let paths = uri.path().split('/').collect::<Vec<_>>();
+        let p = paths.last()?;
+        let file_stem = Path::new(p).file_stem()?;
+        let file_name = file_stem.to_str()?;
+        return Some(file_name.to_string());
     }
     None
 }
@@ -549,8 +543,18 @@ mod tests {
     #[cfg(feature = "server")]
     use super::*;
     #[cfg(not(feature = "server"))]
-    use super::{AggregateHdtSnapshot, QueryEvaluationError, query};
+    use super::{AggregateHdtSnapshot, QueryEvaluationError, query, graph_to_file};
 
+    #[test]
+    fn test_graph_to_file_returns_none_for_root_file_uri() {
+        let graph_name = oxrdf::NamedNode::new("file:///").expect("valid test URI");
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            graph_to_file(oxrdf::NamedOrBlankNodeRef::NamedNode(graph_name.as_ref()))
+        }));
+
+        assert!(result.is_ok(), "graph_to_file should not panic for file:/// URI");
+        assert!(result.expect("panic").is_none(), "graph_to_file should return None when no file stem exists");
+    }
     /// Helper function to get the path to a test HDT file
     #[cfg(feature = "server")]
     fn get_test_hdt_path(filename: &str) -> String {
