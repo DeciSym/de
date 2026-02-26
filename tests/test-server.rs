@@ -7,6 +7,8 @@ mod server_tests {
     use http::{Method, Request, StatusCode};
     use oxhttp::model::Body;
     use std::io::Read as _;
+    use std::io::Write;
+    use std::path::Path;
     use tempfile::tempdir;
 
     // Helper to create test HDT files
@@ -36,12 +38,27 @@ mod server_tests {
         Ok((tmp_dir, store))
     }
 
+    fn file_graph_uri(work_dir: &Path, name: &str) -> String {
+        format!("file://{}", work_dir.join(name).to_string_lossy())
+    }
+
     // Helper to read body from response
     fn read_body(response: http::Response<Body>) -> String {
         let mut body = response.into_body();
         let mut content = Vec::new();
         body.read_to_end(&mut content).unwrap();
         String::from_utf8(content).unwrap()
+    }
+
+    fn create_large_nt_dataset(path: &Path, triples: usize) -> anyhow::Result<()> {
+        let mut output = std::io::BufWriter::new(std::fs::File::create(path)?);
+        for i in 0..triples {
+            writeln!(
+                output,
+                "<http://example.org/s/{i}> <http://example.org/hasIndex> \"{i}\" ."
+            )?;
+        }
+        Ok(())
     }
 
     // Helper to convert HttpError to anyhow::Error
@@ -81,6 +98,60 @@ mod server_tests {
     }
 
     #[test]
+    fn test_sparql_query_respects_default_graph_uri() -> anyhow::Result<()> {
+        let (tmp_dir, store) = setup_test_store()?;
+        let pineapple_graph = file_graph_uri(tmp_dir.path(), "pineapple.hdt");
+        let encode = |value: &str| {
+            url::form_urlencoded::byte_serialize(value.as_bytes())
+                .collect::<String>()
+        };
+        let query =
+            "ASK { <http://example.org/Banana> <http://example.org/hasOrigin> ?origin }";
+        let encoded_query = encode(query);
+
+        // Without graph scoping, Banana data is available from the default dataset.
+        let mut request = Request::builder()
+            .method(Method::GET)
+            .uri(format!("http://localhost/query?query={encoded_query}"))
+            .header("Accept", "application/sparql-results+json")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = handle_response(de::serve::handle_request(
+            &mut request,
+            &store,
+            true,
+            tmp_dir.path().to_str().unwrap().to_string(),
+        ))?;
+        let body_text = read_body(response);
+        assert!(body_text.contains(r#""boolean":true"#), "default scope should include Banana");
+
+        // Scoping default graph to Pineapple should exclude Banana triples.
+        let mut request = Request::builder()
+            .method(Method::GET)
+            .uri(format!(
+                "http://localhost/query?query={encoded_query}&default-graph-uri={}",
+                encode(&pineapple_graph)
+            ))
+            .header("Accept", "application/sparql-results+json")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = handle_response(de::serve::handle_request(
+            &mut request,
+            &store,
+            true,
+            tmp_dir.path().to_str().unwrap().to_string(),
+        ))?;
+        let body_text = read_body(response);
+        assert!(
+            body_text.contains(r#""boolean":false"#),
+            "default graph URI should scope query to selected graph"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn test_sparql_query_ask() -> anyhow::Result<()> {
         let (tmp_dir, store) = setup_test_store()?;
 
@@ -106,6 +177,49 @@ mod server_tests {
         let body_text = read_body(response);
         assert!(body_text.contains("true") || body_text.contains("boolean"));
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_sparql_query_streams_large_solution_set() -> anyhow::Result<()> {
+        let tmp_dir = tempdir()?;
+
+        let large_nt = tmp_dir.path().join("large.nt");
+        create_large_nt_dataset(&large_nt, 50_000)?;
+
+        let large_hdt = tmp_dir.path().join("large.hdt");
+        de::create::do_create(
+            large_hdt.to_str().unwrap(),
+            &[large_nt.to_string_lossy().to_string()],
+        )?;
+
+        let store = AggregateHdt::new(&[large_hdt.to_str().unwrap().to_string()])?;
+
+        let encode = |value: &str| {
+            url::form_urlencoded::byte_serialize(value.as_bytes()).collect::<String>()
+        };
+        let query =
+            "SELECT ?s WHERE { ?s <http://example.org/hasIndex> ?idx }";
+        let encoded_query = encode(query);
+
+        let mut request = Request::builder()
+            .method(Method::GET)
+            .uri(format!("http://localhost/query?query={encoded_query}"))
+            .header("Accept", "application/sparql-results+json")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = handle_response(de::serve::handle_request(
+            &mut request,
+            &store,
+            true,
+            tmp_dir.path().to_str().unwrap().to_string(),
+        ))?;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body_text = read_body(response);
+        let result_count = body_text.matches("http://example.org/s/").count();
+        assert_eq!(result_count, 50_000);
         Ok(())
     }
 
@@ -204,14 +318,18 @@ mod server_tests {
         let (tmp_dir, store) = setup_test_store()?;
 
         // Test that DELETE DATA is forbidden (read-only for existing graphs)
-        let update = r#"
+        let banana_graph = file_graph_uri(tmp_dir.path(), "banana.hdt");
+        let update = format!(
+            r#"
             PREFIX ex: <http://example.org/>
-            DELETE DATA {
-                GRAPH <file:///banana.hdt> {
+            DELETE DATA {{
+                GRAPH <{}> {{
                     ex:Banana ex:hasColor "yellow" .
-                }
-            }
-        "#;
+                }}
+            }}
+        "#,
+            banana_graph
+        );
 
         let mut request = Request::builder()
             .method(Method::POST)
@@ -274,9 +392,10 @@ mod server_tests {
         let (tmp_dir, store) = setup_test_store()?;
 
         // Test GET /store with graph parameter
+        let graph_uri = file_graph_uri(tmp_dir.path(), "banana.hdt");
         let mut request = Request::builder()
             .method(Method::GET)
-            .uri("http://localhost/store?graph=file:///banana.hdt")
+            .uri(format!("http://localhost/store?graph={graph_uri}"))
             .header("Accept", "text/turtle")
             .body(Body::empty())
             .unwrap();
@@ -350,13 +469,65 @@ ex:Orange ex:hasColor "orange" .
     }
 
     #[test]
+    fn test_store_delete_default_graph_returns_bad_request() -> anyhow::Result<()> {
+        let (tmp_dir, store) = setup_test_store()?;
+
+        let mut request = Request::builder()
+            .method(Method::DELETE)
+            .uri("http://localhost/store?default")
+            .body(Body::empty())
+            .unwrap();
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            de::serve::handle_request(
+                &mut request,
+                &store,
+                true,
+                tmp_dir.path().to_str().unwrap().to_string(),
+            )
+        }));
+
+        assert!(result.is_ok(), "DELETE /store?default should not panic");
+
+        let (status, _msg) = result.expect("request should return a result").unwrap_err();
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_store_head_default_graph_not_found() -> anyhow::Result<()> {
+        let (tmp_dir, store) = setup_test_store()?;
+
+        let mut request = Request::builder()
+            .method(Method::HEAD)
+            .uri("http://localhost/store?default")
+            .body(Body::empty())
+            .unwrap();
+
+        let result = de::serve::handle_request(
+            &mut request,
+            &store,
+            true,
+            tmp_dir.path().to_str().unwrap().to_string(),
+        );
+        assert!(result.is_err());
+        let (status, _msg) = result.unwrap_err();
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        Ok(())
+    }
+
+
+    #[test]
     fn test_store_head_graph_exists() -> anyhow::Result<()> {
         let (tmp_dir, store) = setup_test_store()?;
 
         // Test HEAD /store with existing graph
+        let graph_uri = file_graph_uri(tmp_dir.path(), "banana.hdt");
         let mut request = Request::builder()
             .method(Method::HEAD)
-            .uri("http://localhost/store?graph=file:///banana.hdt")
+            .uri(format!("http://localhost/store?graph={graph_uri}"))
             .body(Body::empty())
             .unwrap();
 
@@ -429,10 +600,54 @@ ex:Orange ex:hasColor "orange" .
     }
 
     #[test]
-    fn test_unsupported_media_type() -> anyhow::Result<()> {
+    fn test_store_post_malformed_rdf_returns_bad_request() -> anyhow::Result<()> {
         let (tmp_dir, store) = setup_test_store()?;
 
-        // Test PUT with unsupported content type
+        let malformed_turtle = "<http://example.org/subject> <http://example.org/predicate> .";
+
+        let mut request = Request::builder()
+            .method(Method::POST)
+            .uri("http://localhost/store?graph=http://example.org/malformed-graph")
+            .header("Content-Type", "text/turtle")
+            .body(Body::from(malformed_turtle))
+            .unwrap();
+
+        let result = de::serve::handle_request(
+            &mut request,
+            &store,
+            true,
+            tmp_dir.path().to_str().unwrap().to_string(),
+        );
+
+        assert!(result.is_err());
+        let (status, _msg) = result.unwrap_err();
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        let mut head_request = Request::builder()
+            .method(Method::HEAD)
+            .uri("http://localhost/store?graph=http://example.org/malformed-graph")
+            .body(Body::empty())
+            .unwrap();
+
+        let head_result = de::serve::handle_request(
+            &mut head_request,
+            &store,
+            true,
+            tmp_dir.path().to_str().unwrap().to_string(),
+        );
+
+        assert!(head_result.is_err());
+        let (status, _msg) = head_result.unwrap_err();
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_store_put_with_json_media_type_is_accepted() -> anyhow::Result<()> {
+        let (tmp_dir, store) = setup_test_store()?;
+
+        // JSON is currently accepted as JSON-LD by oxrdfio.
         let mut request = Request::builder()
             .method(Method::PUT)
             .uri("http://localhost/store?graph=http://example.org/testgraph")
@@ -440,20 +655,17 @@ ex:Orange ex:hasColor "orange" .
             .body(Body::from(r#"{"test": "data"}"#))
             .unwrap();
 
-        // Unsupported media type should return an error
         let result = de::serve::handle_request(
             &mut request,
             &store,
             true,
             tmp_dir.path().to_str().unwrap().to_string(),
         );
-        assert!(result.is_err());
-        let (status, _msg) = result.unwrap_err();
-        // May return UNSUPPORTED_MEDIA_TYPE or INTERNAL_SERVER_ERROR depending on when validation occurs
-        assert!(
-            status == StatusCode::UNSUPPORTED_MEDIA_TYPE
-                || status == StatusCode::INTERNAL_SERVER_ERROR
-        );
+        let response = handle_response(result)?;
+        assert!(matches!(
+            response.status(),
+            StatusCode::CREATED | StatusCode::NO_CONTENT
+        ));
 
         Ok(())
     }

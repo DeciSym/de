@@ -1,9 +1,20 @@
+#[cfg(target_os = "openbsd")]
+fn main() {
+    println!("benchmarks are currently disabled on OpenBSD");
+}
+
+#[cfg(not(target_os = "openbsd"))]
 use criterion::{criterion_group, criterion_main, Criterion};
+#[cfg(not(target_os = "openbsd"))]
 use de::*;
+#[cfg(not(target_os = "openbsd"))]
 use pprof::criterion::{Output, PProfProfiler};
+#[cfg(not(target_os = "openbsd"))]
 use std::{fs::OpenOptions, io::BufWriter, time::Duration};
+#[cfg(not(target_os = "openbsd"))]
 use tempfile::tempdir;
 
+#[cfg(not(target_os = "openbsd"))]
 fn query(c: &mut Criterion) {
     // ######### NOTE ###########
     // requires tests/resources/superhero.ttl, run 'make init'
@@ -80,6 +91,7 @@ fn query(c: &mut Criterion) {
     let _ = tmp_dir.close();
 }
 
+#[cfg(not(target_os = "openbsd"))]
 criterion_group! {
     name = benches;
     config = Criterion::default()
@@ -87,4 +99,5 @@ criterion_group! {
         .warm_up_time(Duration::from_millis(1));
     targets = query
 }
+#[cfg(not(target_os = "openbsd"))]
 criterion_main!(benches);

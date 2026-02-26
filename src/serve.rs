@@ -29,7 +29,7 @@ use std::{
     thread::available_parallelism,
     time::Duration,
 };
-use std::{collections::HashMap, str::FromStr, sync::RwLock};
+use std::{collections::HashMap, str::FromStr, sync::mpsc, sync::RwLock};
 use url::form_urlencoded;
 
 use crate::{
@@ -442,7 +442,9 @@ pub fn handle_request(
             // }
             if let Some(target) = store_target(request)? {
                 match target {
-                    NamedGraphName::DefaultGraph => todo!(),
+                    NamedGraphName::DefaultGraph => {
+                        return Err(bad_request("DELETE on default graph is not supported. Please specify an explicit graph.",));
+                    },
                     NamedGraphName::NamedNode(target) => {
                         if store
                             .contains_graph_name(&target.clone().into_string())
@@ -594,6 +596,168 @@ fn limited_body(request: &mut Request<Body>) -> Result<Vec<u8>, HttpError> {
     }
 }
 
+const QUERY_STREAM_CHUNK_SIZE: usize = 32 * 1024;
+
+enum QueryStreamItem {
+    Data(Vec<u8>),
+    Error(String),
+}
+
+struct QueryStreamReader {
+    receiver: mpsc::Receiver<QueryStreamItem>,
+    buffer: Vec<u8>,
+    position: usize,
+}
+
+impl QueryStreamReader {
+    fn new(receiver: mpsc::Receiver<QueryStreamItem>) -> Self {
+        Self {
+            receiver,
+            buffer: Vec::new(),
+            position: 0,
+        }
+    }
+
+    fn fill_buffer(&mut self) -> io::Result<bool> {
+        loop {
+            match self.receiver.recv() {
+                Ok(QueryStreamItem::Data(data)) => {
+                    if data.is_empty() {
+                        continue;
+                    }
+                    self.buffer = data;
+                    self.position = 0;
+                    return Ok(true);
+                }
+                Ok(QueryStreamItem::Error(err)) => {
+                    return Err(io::Error::new(io::ErrorKind::InvalidData, err));
+                }
+                Err(_) => return Ok(false),
+            }
+        }
+    }
+}
+
+impl Read for QueryStreamReader {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if self.position >= self.buffer.len() && !self.fill_buffer()? {
+            return Ok(0);
+        }
+        let available = std::cmp::min(buf.len(), self.buffer.len() - self.position);
+        buf[..available].copy_from_slice(&self.buffer[self.position..self.position + available]);
+        self.position += available;
+        if self.position >= self.buffer.len() {
+            self.buffer.clear();
+            self.position = 0;
+        }
+        Ok(available)
+    }
+}
+
+fn send_query_stream_buffer(
+    tx: &mpsc::SyncSender<QueryStreamItem>,
+    buffer: &mut Vec<u8>,
+) -> io::Result<()> {
+    if buffer.is_empty() {
+        return Ok(());
+    }
+    tx.send(QueryStreamItem::Data(std::mem::take(buffer)))
+        .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "client disconnected"))?;
+    Ok(())
+}
+
+struct QueryStreamChunkWriter {
+    tx: mpsc::SyncSender<QueryStreamItem>,
+    buffer: Vec<u8>,
+}
+
+impl QueryStreamChunkWriter {
+    fn new(tx: mpsc::SyncSender<QueryStreamItem>) -> Self {
+        Self {
+            tx,
+            buffer: Vec::new(),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        if !self.buffer.is_empty() {
+            send_query_stream_buffer(&self.tx, &mut self.buffer)?;
+        }
+        Ok(())
+    }
+}
+
+impl Write for QueryStreamChunkWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.buffer.extend_from_slice(buf);
+        if self.buffer.len() >= QUERY_STREAM_CHUNK_SIZE {
+            self.flush()?;
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        QueryStreamChunkWriter::flush(self)
+    }
+}
+
+fn stream_query_solution_results(
+    format: QueryResultsFormat,
+    tx: &mpsc::SyncSender<QueryStreamItem>,
+    solutions: spareval::QuerySolutionIter,
+    variables: Vec<oxrdf::Variable>,
+) -> io::Result<()> {
+    let mut writer = QueryStreamChunkWriter::new(tx.clone());
+    {
+        let mut serializer = QueryResultsSerializer::from_format(format)
+            .serialize_solutions_to_writer(&mut writer, variables)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+
+        for solution in solutions {
+            let solution = solution
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+            serializer.serialize(&solution).map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("serializing query solution: {e}"),
+                )
+            })?;
+        }
+
+        serializer
+            .finish()
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("finalizing results: {e}")))?;
+    }
+    writer.flush()
+}
+
+fn stream_query_graph_results(
+    format: RdfFormat,
+    tx: &mpsc::SyncSender<QueryStreamItem>,
+    triples: spareval::QueryTripleIter,
+) -> io::Result<()> {
+    let mut writer = QueryStreamChunkWriter::new(tx.clone());
+    {
+        let mut serializer = RdfSerializer::from_format(format).for_writer(&mut writer);
+        for triple in triples {
+            let triple = triple
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+            serializer.serialize_triple(&triple).map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("serializing RDF triple: {e}"),
+                )
+            })?;
+        }
+        serializer
+            .finish()
+            .map_err(|e| {
+                io::Error::new(io::ErrorKind::InvalidData, format!("finalizing RDF: {e}"))
+            })?;
+    }
+    writer.flush()
+}
+
 fn configure_and_evaluate_sparql_query(
     store: &AggregateHdt,
     encoded: &[&[u8]],
@@ -639,102 +803,189 @@ fn configure_and_evaluate_sparql_query(
 fn evaluate_sparql_query(
     store: &AggregateHdt,
     query: &str,
-    _use_default_graph_as_union: bool,
-    _default_graph_uris: Vec<String>,
+    use_default_graph_as_union: bool,
+    default_graph_uris: Vec<String>,
     named_graph_uris: Vec<String>,
     request: &Request<Body>,
     // timeout: Option<Duration>,
 ) -> Result<Response<Body>, HttpError> {
     debug!("query: {query}");
-    let stuff = SparqlParser::new()
-        .with_base_iri(base_url(request))
+    let base = base_url(request);
+    let parsed_query = SparqlParser::new()
+        .with_base_iri(&base)
         .map_err(bad_request)?
         .parse_query(query)
         .map_err(bad_request)?;
 
-    // Get snapshot with optional graph filtering
-    // Optimization: Filter graphs BEFORE loading into memory by passing named_graph_uris
-    // to get_snapshot(). This significantly reduces memory usage and load time when
-    // only a subset of graphs are needed for the query.
-    // Note: union_default_graph is always true - default graph is union of all loaded graphs
-    let graph_filter = if !named_graph_uris.is_empty() {
-        Some(named_graph_uris)
+    let is_rdf_result = matches!(
+        &parsed_query,
+        spargebra::Query::Construct { .. } | spargebra::Query::Describe { .. }
+    );
+    let (output_media_type, graph_format, solutions_format) = if is_rdf_result {
+        let format = rdf_content_negotiation(request)?;
+        (format.media_type(), Some(format), None)
     } else {
-        None
+        let format = query_results_content_negotiation(request)?;
+        (format.media_type(), None, Some(format))
     };
-    let s = store
-        .get_snapshot(graph_filter)
-        .map_err(|_| internal_server_error("data temporarily unavailable"))?;
 
-    let results = QueryEvaluator::new()
-        .prepare(&stuff)
-        .execute(&s)
-        .map_err(internal_server_error)?;
-    match results {
-        QueryResults::Solutions(solutions) => {
-            let format = query_results_content_negotiation(request)?;
-            // Collect variable names and solutions to avoid lifetime issues
-            let variables = solutions.variables().to_vec();
-            let solutions_vec: Vec<_> = solutions
-                .collect::<Result<_, _>>()
-                .map_err(internal_server_error)?;
-            ReadForWrite::build_response(
-                move |w| {
-                    Ok((
-                        QueryResultsSerializer::from_format(format)
-                            .serialize_solutions_to_writer(w, variables)?,
-                        solutions_vec.into_iter(),
-                    ))
-                },
-                |(mut serializer, mut solutions_iter)| {
-                    Ok(if let Some(solution) = solutions_iter.next() {
-                        serializer.serialize(&solution)?;
-                        Some((serializer, solutions_iter))
-                    } else {
-                        serializer.finish()?;
-                        None
-                    })
-                },
-                format.media_type(),
-            )
+    // Get snapshot with optional graph filtering
+    // Optimization: Filter graphs BEFORE loading into memory by passing an explicit list.
+    // This significantly reduces memory usage and load time when only a subset of graphs are
+    // needed for the query.
+    let graph_filter = {
+        let mut selected_graphs: Vec<String> = if use_default_graph_as_union {
+            let mut selected = default_graph_uris.clone();
+            selected.extend(named_graph_uris.clone());
+            selected
+        } else if default_graph_uris.is_empty() {
+            named_graph_uris.clone()
+        } else {
+            default_graph_uris.clone()
+        };
+
+        selected_graphs.sort_unstable();
+        selected_graphs.dedup();
+
+        if selected_graphs.is_empty() {
+            None
+        } else {
+            Some(selected_graphs)
         }
-        QueryResults::Boolean(result) => {
-            let format = query_results_content_negotiation(request)?;
-            let mut body = Vec::new();
-            QueryResultsSerializer::from_format(format)
-                .serialize_boolean_to_writer(&mut body, result)
-                .map_err(internal_server_error)?;
-            Ok(Response::builder()
-                .header(CONTENT_TYPE, format.media_type())
-                .body(body.into())
-                .unwrap())
+    };
+    if let Some(graph_filter_ref) = graph_filter.as_ref() {
+        debug!("using graph filter for query: {:?}", graph_filter_ref);
+    } else {
+        debug!("using default graph filter for query: all graphs");
+    }
+
+    let (tx, rx) = mpsc::sync_channel::<QueryStreamItem>(4);
+    let query = query.to_string();
+    let base = base.to_string();
+    let store = AggregateHdt {
+        file_paths: Arc::clone(&store.file_paths),
+    };
+
+    match (graph_format, solutions_format) {
+        (Some(graph_format), None) => {
+            let _ = std::thread::spawn(move || {
+                let tx = tx;
+                let tx_result = (|| -> io::Result<()> {
+                    let parsed_query = SparqlParser::new()
+                        .with_base_iri(&base)
+                        .map_err(|e| {
+                            io::Error::new(io::ErrorKind::InvalidData, format!("parse query: {e}"))
+                        })?
+                        .parse_query(&query)
+                        .map_err(|e| {
+                            io::Error::new(io::ErrorKind::InvalidData, format!("parse query: {e}"))
+                        })?;
+                    let snapshot = store
+                        .get_snapshot(graph_filter)
+                        .map_err(|_| {
+                            io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                "data temporarily unavailable",
+                            )
+                        })?;
+                    let results = QueryEvaluator::new()
+                        .prepare(&parsed_query)
+                        .execute(&snapshot)
+                        .map_err(|e| {
+                            io::Error::new(io::ErrorKind::InvalidData, format!("query execution: {e}"))
+                        })?;
+                    match results {
+                        QueryResults::Graph(triples) => {
+                            stream_query_graph_results(graph_format, &tx, triples)?
+                        }
+                        QueryResults::Solutions(_) => {
+                            Err(io::Error::new(io::ErrorKind::InvalidData, "construct/describe expected"))?
+                        }
+                        QueryResults::Boolean(_) => {
+                            Err(io::Error::new(io::ErrorKind::InvalidData, "construct/describe expected"))?
+                        }
+                    }
+                    Ok(())
+                })();
+                if let Err(err) = tx_result {
+                    let _ = tx.send(QueryStreamItem::Error(err.to_string()));
+                }
+            });
         }
-        QueryResults::Graph(triples) => {
-            let format = rdf_content_negotiation(request)?;
-            // Collect triples to avoid lifetime issues
-            let triples: Vec<_> = triples
-                .collect::<Result<_, _>>()
-                .map_err(internal_server_error)?;
-            ReadForWrite::build_response(
-                move |w| {
-                    Ok((
-                        RdfSerializer::from_format(format).for_writer(w),
-                        triples.into_iter(),
-                    ))
-                },
-                |(mut serializer, mut triples_iter)| {
-                    Ok(if let Some(t) = triples_iter.next() {
-                        serializer.serialize_triple(&t)?;
-                        Some((serializer, triples_iter))
-                    } else {
-                        serializer.finish()?;
-                        None
-                    })
-                },
-                format.media_type(),
-            )
+        (None, Some(solutions_format)) => {
+            let _ = std::thread::spawn(move || {
+                let tx = tx;
+                let tx_result = (|| -> io::Result<()> {
+                    let parsed_query = SparqlParser::new()
+                        .with_base_iri(&base)
+                        .map_err(|e| {
+                            io::Error::new(io::ErrorKind::InvalidData, format!("parse query: {e}"))
+                        })?
+                        .parse_query(&query)
+                        .map_err(|e| {
+                            io::Error::new(io::ErrorKind::InvalidData, format!("parse query: {e}"))
+                        })?;
+                    let snapshot = store
+                        .get_snapshot(graph_filter)
+                        .map_err(|_| {
+                            io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                "data temporarily unavailable",
+                            )
+                        })?;
+                    let results = QueryEvaluator::new()
+                        .prepare(&parsed_query)
+                        .execute(&snapshot)
+                        .map_err(|e| {
+                            io::Error::new(io::ErrorKind::InvalidData, format!("query execution: {e}"))
+                        })?;
+                    match results {
+                        QueryResults::Solutions(solutions) => {
+                            let variables = solutions.variables().to_vec();
+                            stream_query_solution_results(
+                                solutions_format,
+                                &tx,
+                                solutions,
+                                variables,
+                            )?
+                        }
+                        QueryResults::Boolean(result) => {
+                            let mut body = Vec::new();
+                            QueryResultsSerializer::from_format(solutions_format)
+                                .serialize_boolean_to_writer(&mut body, result)
+                                .map_err(|e| {
+                                    io::Error::new(
+                                        io::ErrorKind::InvalidData,
+                                        format!("serializing boolean result: {e}"),
+                                    )
+                                })?;
+                            tx.send(QueryStreamItem::Data(body)).map_err(|_| {
+                                io::Error::new(io::ErrorKind::BrokenPipe, "client disconnected")
+                            })?;
+                        }
+                        QueryResults::Graph(_) => {
+                            Err(io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                "select/ask expected",
+                            ))?
+                        }
+                    }
+                    Ok(())
+                })();
+                if let Err(err) = tx_result {
+                    let _ = tx.send(QueryStreamItem::Error(err.to_string()));
+                }
+            });
+        }
+        (Some(_), Some(_)) | (None, None) => {
+            return Err(internal_server_error("invalid query result format"));
         }
     }
+
+    Response::builder()
+        .header(CONTENT_TYPE, output_media_type)
+        .body(Body::from_read(QueryStreamReader::new(rx)))
+        .map_err(internal_server_error)
 }
 
 // spargebra re-exports oxrdf types, so Quad already contains oxrdf types
@@ -1148,12 +1399,17 @@ fn assert_that_graph_exists(
     store: &AggregateHdt,
     target: &NamedGraphName,
 ) -> Result<(), HttpError> {
-    if match target {
-        NamedGraphName::DefaultGraph => true,
+    let exists = match target {
+        NamedGraphName::DefaultGraph => {
+            store
+                .contains_graph_name(&GraphName::DefaultGraph.to_string())
+                .map_err(internal_server_error)?
+        }
         NamedGraphName::NamedNode(target) => store
             .contains_graph_name(&target.clone().into_string())
             .map_err(internal_server_error)?,
-    } {
+    };
+    if exists {
         Ok(())
     } else {
         Err((
@@ -1325,7 +1581,8 @@ fn web_load_graph(
     let mut serializer =
         RdfSerializer::from_format(RdfFormat::NTriples).for_writer(dest_writer.by_ref());
 
-    for q in quads.flatten() {
+    for q in quads {
+        let q = q.map_err(bad_request)?;
         serializer
             .serialize_triple(TripleRef::new(
                 q.subject.as_ref(),

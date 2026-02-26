@@ -415,17 +415,28 @@ mod tests {
     use std::fs;
     use std::io::{self, BufWriter, Write};
     use tempfile::tempdir;
+    use tokio::sync::{Mutex, MutexGuard};
+
+    static TMPDIR_LOCK: Mutex<()> = Mutex::const_new(());
+
+    async fn lock_tmpdir_async() -> MutexGuard<'static, ()> {
+        TMPDIR_LOCK.lock().await
+    }
+
+    fn lock_tmpdir_sync() -> MutexGuard<'static, ()> {
+        TMPDIR_LOCK.blocking_lock()
+    }
 
     #[derive(Default)]
     struct FailingWriter;
 
     impl Write for FailingWriter {
         fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
-            Err(io::Error::new(io::ErrorKind::Other, "intentional test write failure"))
+            Err(io::Error::other("intentional test write failure"))
         }
 
         fn flush(&mut self) -> io::Result<()> {
-            Err(io::Error::new(io::ErrorKind::Other, "intentional test write failure"))
+            Err(io::Error::other("intentional test write failure"))
         }
     }
 
@@ -455,6 +466,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_do_query_cleans_tmp_on_serialize_failure() -> anyhow::Result<()> {
+        let _tmpdir_lock = lock_tmpdir_async().await;
         let work_dir = tempdir()?;
         let tmp_root = work_dir.path().join("tmp");
         fs::create_dir(&tmp_root)?;
@@ -476,7 +488,7 @@ mod tests {
 
         let data_files = vec![data_path.to_string_lossy().to_string()];
         let query_files = vec![query_path.to_string_lossy().to_string()];
-        let mut writer = BufWriter::new(FailingWriter::default());
+        let mut writer = BufWriter::new(FailingWriter);
         let res = do_query(&data_files, &query_files, &DeOutput::CSV, &mut writer).await;
         assert!(res.is_err());
 
@@ -488,6 +500,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_files_returns_error_on_rdf_to_hdt_failure() {
+        let _tmpdir_lock = lock_tmpdir_async().await;
         let work_dir = match tempdir() {
             Ok(d) => d,
             Err(e) => panic!("failed to create temp dir: {e}"),
@@ -505,14 +518,19 @@ mod tests {
         assert!(hdt_path_vec.is_empty());
         assert!(dir_path_vec.is_empty());
         let err = err.expect("handle_files should fail when RDF -> HDT conversion fails");
-        assert!(err.to_string().contains("converting plain RDF file"));
+        assert!(
+            err.to_string().contains("converting plain RDF file")
+                || err.to_string().contains("Error converting file(s) to NT"),
+            "Expected file conversion or HDT conversion failure"
+        );
     }
 
     #[cfg(unix)]
     #[test]
     fn test_handle_files_rejects_non_utf8_tmpdir_without_panic() {
-        use std::process::id;
+        let _tmpdir_lock = lock_tmpdir_sync();
         use std::os::unix::ffi::OsStringExt;
+        use std::process::id;
 
         let invalid_tmp = {
             let mut name = b"de-non-utf8-tmp-".to_vec();

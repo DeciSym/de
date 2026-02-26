@@ -28,6 +28,16 @@ fn lock_write_file_paths<'a>(
         .map_err(|e| anyhow::anyhow!("{context}: poisoned lock: {e}"))
 }
 
+fn graph_uri_for_path(path: &Path) -> anyhow::Result<String> {
+    let canonical = path
+        .canonicalize()
+        .map_err(|e| anyhow::anyhow!("Failed to canonicalize file path {:?}: {e}", path))?;
+    let path = canonical
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("Invalid path encoding: {:?}", canonical))?;
+    Ok(format!("file://{path}"))
+}
+
 /// Boundry over a Header-Dictionary-Triplies (HDT) storage layer.
 /// Stores file paths only; HDT instances are created per-request for better concurrency.
 pub struct AggregateHdt {
@@ -55,14 +65,7 @@ impl AggregateHdt {
                 return Err(anyhow::anyhow!("HDT file does not exist: {}", p));
             }
 
-            // Create graph name from filename
-            let graph_name = format!(
-                "file:///{}",
-                path.file_name()
-                    .ok_or_else(|| anyhow::anyhow!("Invalid file path: {}", p))?
-                    .to_str()
-                    .ok_or_else(|| anyhow::anyhow!("Invalid filename encoding: {}", p))?
-            );
+            let graph_name = graph_uri_for_path(path)?;
 
             file_paths.insert(graph_name, path.to_path_buf());
         }
@@ -287,13 +290,7 @@ impl AggregateHdt {
         let mut added = 0;
         for path in &current_files {
             if !existing_paths.contains(path) {
-                let graph_name = format!(
-                    "file:///{}",
-                    path.file_name()
-                        .ok_or_else(|| anyhow::anyhow!("Invalid file path: {:?}", path))?
-                        .to_str()
-                        .ok_or_else(|| anyhow::anyhow!("Invalid filename encoding: {:?}", path))?
-                );
+                let graph_name = graph_uri_for_path(path)?;
                 file_paths.insert(graph_name, path.clone());
                 added += 1;
             }
@@ -431,6 +428,71 @@ pub fn term_to_hdt_bgp_str(term: Term) -> String {
     }
 }
 
+struct StreamingInternalQuadIter<'a> {
+    graphs: Vec<(&'a String, &'a hdt::hdt::HdtHybrid)>,
+    subject: Option<Arc<str>>,
+    predicate: Option<Arc<str>>,
+    object: Option<Arc<str>>,
+    current_graph: usize,
+    current_iter: Option<StreamingInternalQuadIterator<'a>>,
+}
+
+type StreamingInternalQuadIterator<'a> =
+    Box<dyn Iterator<Item = Result<InternalQuad<Arc<str>>, Error>> + 'a>;
+
+impl<'a> StreamingInternalQuadIter<'a> {
+    fn ensure_current_iter(&mut self) -> bool {
+        while self.current_iter.is_none() && self.current_graph < self.graphs.len() {
+            let (graph_name, hdt) = self.graphs[self.current_graph];
+            self.current_graph += 1;
+            let graph_name: Arc<str> = Arc::from(graph_name.as_str());
+            let subject_filter = self.subject.clone();
+            let predicate_filter = self.predicate.clone();
+            let object_filter = self.object.clone();
+
+            self.current_iter = Some(Box::new(
+                hdt.triples_all()
+                    .filter(move |[subject, predicate, object]| {
+                        subject_filter.as_ref().is_none_or(|s| s.as_ref() == subject.as_ref())
+                            && predicate_filter
+                                .as_ref()
+                                .is_none_or(|p| p.as_ref() == predicate.as_ref())
+                            && object_filter
+                                .as_ref()
+                                .is_none_or(|o| o.as_ref() == object.as_ref())
+                    })
+                    .map(move |[subject, predicate, object]| {
+                        Ok(InternalQuad {
+                            subject,
+                            predicate,
+                            object,
+                            graph_name: Some(graph_name.clone()),
+                        })
+                    }),
+            ));
+        }
+        self.current_iter.is_some()
+    }
+}
+
+impl<'a> Iterator for StreamingInternalQuadIter<'a> {
+    type Item = Result<InternalQuad<Arc<str>>, Error>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if !self.ensure_current_iter() {
+                return None;
+            }
+            if let Some(current_iter) = self.current_iter.as_mut() {
+                if let Some(item) = current_iter.next() {
+                    return Some(item);
+                }
+                self.current_iter = None;
+            }
+        }
+    }
+}
+
 impl<'a> QueryableDataset<'a> for &'a AggregateHdtSnapshot {
     type InternalTerm = Arc<str>;
     type Error = Error;
@@ -442,10 +504,6 @@ impl<'a> QueryableDataset<'a> for &'a AggregateHdtSnapshot {
         object: Option<&Arc<str>>,
         graph_name: Option<Option<&Arc<str>>>,
     ) -> impl Iterator<Item = Result<InternalQuad<Self::InternalTerm>, Error>> + use<'a> {
-        let subject_pattern = subject.cloned();
-        let predicate_pattern = predicate.cloned();
-        let object_pattern = object.cloned();
-
         let graph_name_owned = graph_name.map(|inner| inner.cloned());
 
         // Optimization: Pre-filter graphs to reduce unnecessary work
@@ -461,50 +519,25 @@ impl<'a> QueryableDataset<'a> for &'a AggregateHdtSnapshot {
                     // Default graph is always union of all loaded graphs
                     Some(None) => true,
                     // Query for specific named graph: Some(Some(graph))
-                    Some(Some(target_graph)) => {
-                        let g_arc: Arc<str> = Arc::from(g.as_str());
-                        &g_arc == target_graph
-                    }
+                    Some(Some(target_graph)) => g.as_str() == target_graph.as_ref(),
                     // Query across all graphs: None
                     None => true,
                 }
             })
             .collect();
 
-        // Optimization: Collect iterators into a Vec first, then flatten
-        // allows lazy evaluation of triples
-        let iters: Vec<_> = graphs_to_query
-            .iter()
-            .map(|(graph_name, hdt)| {
-                let ps = subject_pattern.as_ref().map(|s| s.as_ref());
-                let pp = predicate_pattern.as_ref().map(|p| p.as_ref());
-                let po = object_pattern.as_ref().map(|o| o.as_ref());
-                let graph_arc: Arc<str> = Arc::from(graph_name.as_str());
+        let subject = subject.cloned();
+        let predicate = predicate.cloned();
+        let object = object.cloned();
 
-                // Get iterator and immediately convert to owned triples with graph name
-                // Due to HDT's API design (returns Box<dyn Iterator + '_>), must collect here
-                let triples: Vec<_> = hdt
-                    .triples_with_pattern(ps, pp, po)
-                    .map(|[subject, predicate, object]| {
-                        (subject, predicate, object, graph_arc.clone())
-                    })
-                    .collect();
-                triples
-            })
-            .collect();
-
-        // Optimization: Flatten collected results without additional copying
-        iters
-            .into_iter()
-            .flatten()
-            .map(|(subject, predicate, object, graph_arc)| {
-                Ok(InternalQuad {
-                    subject,
-                    predicate,
-                    object,
-                    graph_name: Some(graph_arc),
-                })
-            })
+        StreamingInternalQuadIter::<'a> {
+            graphs: graphs_to_query,
+            subject,
+            predicate,
+            object,
+            current_graph: 0,
+            current_iter: None,
+        }
     }
 
     fn internalize_term(&self, term: Term) -> Result<Arc<str>, Error> {
@@ -543,6 +576,8 @@ pub fn query<'a>(
 mod tests {
     #[cfg(feature = "server")]
     use super::*;
+    #[cfg(feature = "server")]
+    use spareval::QueryableDataset;
     #[cfg(not(feature = "server"))]
     use super::{AggregateHdtSnapshot, QueryEvaluationError, query};
     #[cfg(feature = "server")]
@@ -568,18 +603,28 @@ mod tests {
         path.to_string_lossy().into_owned()
     }
 
+    #[cfg(feature = "server")]
+    fn utf8_tempdir() -> anyhow::Result<tempfile::TempDir> {
+        tempfile::Builder::new()
+            .prefix("de-tests-")
+            .tempdir_in(std::env::current_dir()?)
+            .map_err(anyhow::Error::from)
+    }
+
     #[test]
     #[cfg(feature = "server")]
     fn test_contains_named_graph_found() {
         // Create an AggregateHDT with test.hdt
         let test_hdt_path = get_test_hdt_path("apple.hdt");
-        let store = &AggregateHdt::new(&[test_hdt_path])
+        let store = &AggregateHdt::new(std::slice::from_ref(&test_hdt_path))
             .expect("Failed to create AggregateHDT")
             .get_snapshot(None)
             .expect("msg");
 
         // Test 1: Graph should be found with file:/// URI scheme matching the filename
-        let graph_name: Arc<str> = Arc::from("file:///apple.hdt");
+        let graph_name = graph_uri_for_path(std::path::Path::new(&test_hdt_path))
+            .expect("Failed to build graph URI");
+        let graph_name: Arc<str> = Arc::from(graph_name);
         let result = store.contains_internal_graph_name(&graph_name);
         assert!(
             result.is_ok(),
@@ -649,7 +694,9 @@ mod tests {
         let snapshot = &store.get_snapshot(None).expect("msg");
 
         // Graph should exist initially
-        let existing_graph: Arc<str> = Arc::from("file:///apple.hdt");
+        let existing_graph = graph_uri_for_path(std::path::Path::new(&test_hdt_path))
+            .expect("Failed to build graph URI");
+        let existing_graph: Arc<str> = Arc::from(existing_graph);
         assert!(
             snapshot
                 .contains_internal_graph_name(&existing_graph)
@@ -683,6 +730,84 @@ mod tests {
                 .unwrap(),
             "New graph should exist after insertion"
         );
+    }
+
+    #[test]
+    #[cfg(feature = "server")]
+    fn test_new_with_duplicate_filenames_keeps_graphs_distinct() -> anyhow::Result<()> {
+        let fixture_hdt_path = get_test_hdt_path("apple.hdt");
+        let work_dir = utf8_tempdir()?;
+
+        let first_dir = work_dir.path().join("first");
+        let second_dir = work_dir.path().join("second");
+        std::fs::create_dir(&first_dir)?;
+        std::fs::create_dir(&second_dir)?;
+
+        let first_hdt = first_dir.join("duplicate.hdt");
+        let second_hdt = second_dir.join("duplicate.hdt");
+        std::fs::copy(&fixture_hdt_path, &first_hdt)?;
+        std::fs::copy(&fixture_hdt_path, &second_hdt)?;
+
+        let store = AggregateHdt::new(&[
+            first_hdt.to_string_lossy().into_owned(),
+            second_hdt.to_string_lossy().into_owned(),
+        ])?;
+        let snapshot = store
+            .get_snapshot(None)
+            .map_err(|err| anyhow::anyhow!("{}", err))?;
+
+        let graph_names: Vec<String> = (&snapshot)
+            .internal_named_graphs()
+            .map(|graph| graph.map(|name| name.to_string()))
+            .collect::<Result<_, _>>()?;
+
+        assert_eq!(graph_names.len(), 2, "duplicate basenames should create separate graphs");
+
+        let expected_first = graph_uri_for_path(&first_hdt)?;
+        let expected_second = graph_uri_for_path(&second_hdt)?;
+        assert_ne!(expected_first, expected_second, "graph URIs should be unique");
+        assert!(graph_names.contains(&expected_first));
+        assert!(graph_names.contains(&expected_second));
+
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(feature = "server")]
+    fn test_sync_uses_full_path_graph_uris() -> anyhow::Result<()> {
+        let fixture_hdt_path = get_test_hdt_path("apple.hdt");
+        let work_dir = utf8_tempdir()?;
+
+        let sync_dir = work_dir.path().join("sync");
+        std::fs::create_dir(&sync_dir)?;
+
+        let initial_hdt = sync_dir.join("initial.hdt");
+        let synced_hdt = sync_dir.join("synced.hdt");
+        std::fs::copy(&fixture_hdt_path, &initial_hdt)?;
+        std::fs::copy(&fixture_hdt_path, &synced_hdt)?;
+
+        let initial_hdt_str = initial_hdt.to_string_lossy().into_owned();
+        let store = AggregateHdt::new(std::slice::from_ref(&initial_hdt_str))
+            .expect("Failed to create AggregateHDT");
+        let (added, removed) = store.sync(sync_dir.clone())?;
+        assert_eq!(added, 1);
+        assert_eq!(removed, 0);
+
+        let snapshot = store
+            .get_snapshot(None)
+            .map_err(|err| anyhow::anyhow!("{}", err))?;
+        let graph_names: Vec<String> = (&snapshot)
+            .internal_named_graphs()
+            .map(|graph| graph.map(|name| name.to_string()))
+            .collect::<Result<_, _>>()?;
+
+        assert_eq!(graph_names.len(), 2, "sync should keep both synced HDT graphs");
+        let expected_initial = graph_uri_for_path(&initial_hdt)?;
+        let expected_synced = graph_uri_for_path(&synced_hdt)?;
+        assert!(graph_names.contains(&expected_initial));
+        assert!(graph_names.contains(&expected_synced));
+
+        Ok(())
     }
 
     #[test]

@@ -84,12 +84,49 @@ async fn main() {
         #[cfg(feature = "server")]
         Commands::Serve { location, bind } => de::serve::serve(location.to_owned(), bind),
     };
-    stdout_writer.flush().unwrap();
+    let flush_result = flush_stdout_writer(&mut stdout_writer);
     match result {
-        Ok(_) => std::process::exit(exitcode::OK),
+        Ok(_) => {
+            if let Err(error) = flush_result {
+                error!("Error flushing standard output: {error:?}");
+                std::process::exit(exitcode::UNAVAILABLE);
+            }
+            std::process::exit(exitcode::OK)
+        }
         Err(e) => {
             error!("Error during execution: {e:?}");
             std::process::exit(exitcode::UNAVAILABLE);
         }
+    }
+}
+
+fn flush_stdout_writer<W: Write>(writer: &mut W) -> std::io::Result<()> {
+    writer.flush()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::flush_stdout_writer;
+    use std::io::{self, Error, ErrorKind, Write};
+
+    #[derive(Debug)]
+    struct FailingFlushWriter;
+
+    impl Write for FailingFlushWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Err(Error::new(ErrorKind::BrokenPipe, "simulated broken pipe"))
+        }
+    }
+
+    #[test]
+    fn test_flush_stdout_writer_returns_error_on_broken_pipe() {
+        let mut writer = FailingFlushWriter;
+        let result = flush_stdout_writer(&mut writer);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().kind(), ErrorKind::BrokenPipe);
     }
 }
