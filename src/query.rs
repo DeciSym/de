@@ -220,11 +220,23 @@ async fn handle_files(files: Vec<String>) -> (Vec<String>, Vec<String>, Option<a
     let t_path = tmp_dir.path(); // Getting the tempdir path.
 
     // Creating TempFile to hold the hdt contents
-    let mut rdf_tempfile: NamedTempFile = Builder::new()
+    let mut rdf_tempfile: NamedTempFile = match Builder::new()
         .suffix(".nt")
         .append(true)
         .tempfile_in(t_path)
-        .unwrap();
+    {
+        Ok(tf) => tf,
+        Err(e) => {
+            return (
+                dir_path_vec,
+                hdt_path_vec,
+                Some(anyhow::anyhow!(
+                    "Failed to create temporary RDF file in {:?}: {e}",
+                    t_path
+                )),
+            );
+        }
+    };
 
     let mut files_to_convert = vec![];
     for f in &files {
@@ -271,7 +283,19 @@ async fn handle_files(files: Vec<String>) -> (Vec<String>, Vec<String>, Option<a
         }
     }
 
-    let meta = std::fs::metadata(rdf_tempfile.path()).unwrap();
+    let meta = match std::fs::metadata(rdf_tempfile.path()) {
+        Ok(m) => m,
+        Err(e) => {
+            return (
+                dir_path_vec,
+                hdt_path_vec,
+                Some(anyhow::anyhow!(
+                    "Error getting metadata for temporary RDF file {:?}: {e}",
+                    rdf_tempfile.path()
+                )),
+            );
+        }
+    };
 
     let converted_rdf = if meta.len() == 0 {
         Path::new(&combined_rdf_path)
@@ -281,16 +305,41 @@ async fn handle_files(files: Vec<String>) -> (Vec<String>, Vec<String>, Option<a
 
     if meta.len() != 0 || rdf_tempfile.path() != Path::new(&combined_rdf_path) {
         // Creating TempFile to hold the hdt contents
-        let named_tempfile: NamedTempFile = Builder::new()
+        let named_tempfile: NamedTempFile = match Builder::new()
             .suffix(".hdt")
             .append(true)
             .tempfile_in(t_path)
-            .unwrap();
+        {
+            Ok(tf) => tf,
+            Err(e) => {
+                return (
+                    dir_path_vec,
+                    hdt_path_vec,
+                    Some(anyhow::anyhow!(
+                        "Failed to create temporary HDT file in {:?}: {e}",
+                        t_path
+                    )),
+                );
+            }
+        };
 
         debug!("Running RDF2HDT");
 
+        let converted_rdf_path = match converted_rdf.to_str() {
+            Some(path) => path,
+            None => {
+                return (
+                    dir_path_vec,
+                    hdt_path_vec,
+                    Some(anyhow::anyhow!(
+                        "Temporary RDF path is not valid UTF-8: {:?}",
+                        converted_rdf
+                    )),
+                );
+            }
+        };
         let hdt_conversion = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            hdt::Hdt::read_nt(Path::new(converted_rdf.to_str().unwrap()))
+            hdt::Hdt::read_nt(Path::new(converted_rdf_path))
         }));
 
         match hdt_conversion {
@@ -336,9 +385,9 @@ async fn handle_files(files: Vec<String>) -> (Vec<String>, Vec<String>, Option<a
                 );
             }
         }
-        hdt_path_vec.push(named_tempfile.path().to_str().unwrap().to_string());
+        hdt_path_vec.push(named_tempfile.path().to_string_lossy().to_string());
         let _ = named_tempfile.keep();
-        dir_path_vec.push(t_path.to_str().unwrap().to_string());
+        dir_path_vec.push(t_path.to_string_lossy().to_string());
         let _ = tmp_dir.keep();
     }
 
@@ -457,5 +506,50 @@ mod tests {
         assert!(dir_path_vec.is_empty());
         let err = err.expect("handle_files should fail when RDF -> HDT conversion fails");
         assert!(err.to_string().contains("converting plain RDF file"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_handle_files_rejects_non_utf8_tmpdir_without_panic() {
+        use std::process::id;
+        use std::os::unix::ffi::OsStringExt;
+
+        let invalid_tmp = {
+            let mut name = b"de-non-utf8-tmp-".to_vec();
+            name.extend(id().to_string().as_bytes());
+            name.push(0xFF);
+            let mut path = std::env::temp_dir();
+            path.push(std::ffi::OsString::from_vec(name));
+            path
+        };
+
+        let data_dir = tempdir().expect("failed to create temp dir");
+        let _ = fs::remove_dir_all(&invalid_tmp);
+        fs::create_dir(&invalid_tmp).expect("failed to create non-utf8 tmp dir");
+
+        let prev_tmpdir = env::var_os("TMPDIR");
+        env::set_var("TMPDIR", &invalid_tmp);
+        let _tmpdir_guard = TmpDirEnvGuard::new(prev_tmpdir);
+
+        let dataset = data_dir.path().join("dataset.nt");
+        fs::write(
+            &dataset,
+            "<http://example.org/s> <http://example.org/p> <http://example.org/o> .\n",
+        )
+        .expect("failed to write dataset");
+
+        let files = vec![dataset.to_string_lossy().to_string()];
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
+            rt.block_on(handle_files(files))
+        }));
+
+        assert!(result.is_ok(), "handle_files should not panic");
+        let (_dir_paths, _hdt_paths, err) = result.expect("handle_files panicked");
+        let err = err.expect("non-utf8 temporary path should become an error");
+        assert!(
+            err.to_string().contains("UTF-8"),
+            "Expected UTF-8 related temporary path error"
+        );
     }
 }
