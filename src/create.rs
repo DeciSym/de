@@ -110,7 +110,10 @@ pub fn files_to_rdf(
                 .map_err(|e| anyhow::anyhow!("Error copying file {:?}: {:?}", &nt_file, e))?;
         }
     } else if nt_files.len() == 1 && conv_res.converted == 0 {
-        return Ok((nt_files[0].clone(), unrecognized_files));
+        let mut source = File::open(&nt_files[0])
+            .map_err(|e| anyhow::anyhow!("Error opening file {:?}: {:?}", nt_files[0], e))?;
+        copy(&mut source, out_file)
+            .map_err(|e| anyhow::anyhow!("Error copying file {:?}: {:?}", &nt_files[0], e))?;
     }
 
     Ok((
