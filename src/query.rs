@@ -289,8 +289,12 @@ async fn handle_files(files: Vec<String>) -> (Vec<String>, Vec<String>, Option<a
 
         debug!("Running RDF2HDT");
 
-        match hdt::Hdt::read_nt(Path::new(converted_rdf.to_str().unwrap())) {
-            Ok(hdt_conv) => {
+        let hdt_conversion = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            hdt::Hdt::read_nt(Path::new(converted_rdf.to_str().unwrap()))
+        }));
+
+        match hdt_conversion {
+            Ok(Ok(hdt_conv)) => {
                 let mut buf = BufWriter::new(&named_tempfile);
                 match hdt_conv.write(&mut buf) {
                     Ok(_) => {}
@@ -303,11 +307,35 @@ async fn handle_files(files: Vec<String>) -> (Vec<String>, Vec<String>, Option<a
                     }
                 }
             }
-            Err(e) => error!(
-                "error converting plain RDF file {:?} to HDT: {e}",
-                rdf_tempfile.path()
-            ),
-        };
+            Ok(Err(e)) => {
+                return (
+                    dir_path_vec,
+                    hdt_path_vec,
+                    Some(anyhow::anyhow!(
+                        "error converting plain RDF file {:?} to HDT: {e}",
+                        rdf_tempfile.path()
+                    )),
+                );
+            }
+            Err(panic_err) => {
+                let panic_msg = if let Some(msg) = panic_err.downcast_ref::<&str>() {
+                    *msg
+                } else if let Some(msg) = panic_err.downcast_ref::<String>() {
+                    msg.as_str()
+                } else {
+                    "unknown panic while reading RDF"
+                };
+                return (
+                    dir_path_vec,
+                    hdt_path_vec,
+                    Some(anyhow::anyhow!(
+                        "panic converting plain RDF file {:?} to HDT: {}",
+                        rdf_tempfile.path(),
+                        panic_msg
+                    )),
+                );
+            }
+        }
         hdt_path_vec.push(named_tempfile.path().to_str().unwrap().to_string());
         let _ = named_tempfile.keep();
         dir_path_vec.push(t_path.to_str().unwrap().to_string());
@@ -407,5 +435,27 @@ mod tests {
         assert_eq!(before, after);
 
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_handle_files_returns_error_on_rdf_to_hdt_failure() {
+        let work_dir = match tempdir() {
+            Ok(d) => d,
+            Err(e) => panic!("failed to create temp dir: {e}"),
+        };
+
+        let invalid_nt = work_dir.path().join("invalid.nt");
+        match fs::write(&invalid_nt, "invalid triple line") {
+            Ok(()) => {}
+            Err(e) => panic!("failed to write invalid dataset: {e}"),
+        };
+
+        let (dir_path_vec, hdt_path_vec, err) =
+            handle_files(vec![invalid_nt.to_string_lossy().to_string()]).await;
+        assert!(err.is_some());
+        assert!(hdt_path_vec.is_empty());
+        assert!(dir_path_vec.is_empty());
+        let err = err.expect("handle_files should fail when RDF -> HDT conversion fails");
+        assert!(err.to_string().contains("converting plain RDF file"));
     }
 }
