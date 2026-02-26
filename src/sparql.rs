@@ -18,6 +18,7 @@ fn lock_read_file_paths<'a>(
         .map_err(|e| anyhow::anyhow!("{context}: poisoned lock: {e}"))
 }
 
+#[cfg(feature = "server")]
 fn lock_write_file_paths<'a>(
     file_paths: &'a Arc<RwLock<HashMap<String, std::path::PathBuf>>>,
     context: &str,
