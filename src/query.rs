@@ -51,6 +51,28 @@ pub enum DeOutput {
     /// <https://www.w3.org/TR/turtle/>
     TURTLE,
 }
+
+struct QueryDirCleanup {
+    dirs: Option<Vec<String>>,
+}
+
+impl QueryDirCleanup {
+    fn new(dirs: Vec<String>) -> Self {
+        Self { dirs: Some(dirs) }
+    }
+}
+
+impl Drop for QueryDirCleanup {
+    fn drop(&mut self) {
+        if let Some(dirs) = self.dirs.take() {
+            for dir in dirs.iter() {
+                if let Err(e) = std::fs::remove_dir_all(dir) {
+                    error!("Failed to remove directory {dir:?}: {e:?}");
+                }
+            }
+        }
+    }
+}
 /// Execute a list of sparql queries over a list of RDF files. Non-HDT data files are converted to temporary HDT files before query execution
 pub async fn do_query<W: Write>(
     data_files: &[String],
@@ -73,9 +95,9 @@ pub async fn do_query<W: Write>(
     }
 
     let (dir_path_vec, hdt_path_vec, e) = handle_files(data_files.to_owned()).await;
+    let _cleanup_guard = QueryDirCleanup::new(dir_path_vec);
 
     if let Some(e) = e {
-        file_cleanup(dir_path_vec.clone()).await;
         return Err(anyhow::anyhow!("Error reading data files: {e}",));
     }
 
@@ -94,7 +116,6 @@ pub async fn do_query<W: Write>(
             Ok(r) => r,
             Err(e) => {
                 error!("problem executing the hdt query: {e}");
-                file_cleanup(dir_path_vec.clone()).await;
                 return Err(anyhow::anyhow!("{e}"));
             }
         };
@@ -176,9 +197,6 @@ pub async fn do_query<W: Write>(
         };
     }
     writer.flush()?;
-
-    // TODO this needs to be run on success and before any return Err()
-    file_cleanup(dir_path_vec.clone()).await;
 
     Ok(())
 }
@@ -313,4 +331,81 @@ pub async fn file_cleanup(dirs: Vec<String>) {
 }
 
 #[cfg(test)]
-mod tests {}
+mod tests {
+    use super::*;
+    use std::env;
+    use std::ffi::OsString;
+    use std::fs;
+    use std::io::{self, BufWriter, Write};
+    use tempfile::tempdir;
+
+    #[derive(Default)]
+    struct FailingWriter;
+
+    impl Write for FailingWriter {
+        fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+            Err(io::Error::new(io::ErrorKind::Other, "intentional test write failure"))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Err(io::Error::new(io::ErrorKind::Other, "intentional test write failure"))
+        }
+    }
+
+    struct TmpDirEnvGuard(Option<OsString>);
+
+    impl TmpDirEnvGuard {
+        fn new(prev_tmpdir: Option<OsString>) -> Self {
+            Self(prev_tmpdir)
+        }
+    }
+
+    impl Drop for TmpDirEnvGuard {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(v) => env::set_var("TMPDIR", v),
+                None => env::remove_var("TMPDIR"),
+            }
+        }
+    }
+
+    fn dir_count(path: &str) -> anyhow::Result<usize> {
+        Ok(fs::read_dir(path)?
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_type().is_ok_and(|f| f.is_dir()))
+            .count())
+    }
+
+    #[tokio::test]
+    async fn test_do_query_cleans_tmp_on_serialize_failure() -> anyhow::Result<()> {
+        let work_dir = tempdir()?;
+        let tmp_root = work_dir.path().join("tmp");
+        fs::create_dir(&tmp_root)?;
+
+        let prev_tmpdir = env::var_os("TMPDIR");
+        env::set_var("TMPDIR", &tmp_root);
+        let _tmpdir_guard = TmpDirEnvGuard::new(prev_tmpdir);
+
+        let data_path = work_dir.path().join("dataset.nt");
+        fs::write(
+            &data_path,
+            "<http://example.org/s> <http://example.org/p> <http://example.org/o> .\n",
+        )?;
+
+        let query_path = work_dir.path().join("query.rq");
+        fs::write(&query_path, "SELECT * WHERE { ?s ?p ?o }")?;
+
+        let before = dir_count(&tmp_root.to_string_lossy())?;
+
+        let data_files = vec![data_path.to_string_lossy().to_string()];
+        let query_files = vec![query_path.to_string_lossy().to_string()];
+        let mut writer = BufWriter::new(FailingWriter::default());
+        let res = do_query(&data_files, &query_files, &DeOutput::CSV, &mut writer).await;
+        assert!(res.is_err());
+
+        let after = dir_count(&tmp_root.to_string_lossy())?;
+        assert_eq!(before, after);
+
+        Ok(())
+    }
+}
