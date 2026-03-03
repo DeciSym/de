@@ -221,8 +221,10 @@ async fn handle_files(files: Vec<String>) -> (Vec<String>, Vec<String>, Option<a
         &files_to_convert,
         &mut rdf_tempfile,
         Arc::new(OxRdfConvert {}),
+        &[],
+        None,
     ) {
-        Ok((p, u)) => (p, u),
+        Ok(result) => (result.rdf_path, result.unhandled_files),
         Err(e) => {
             return (
                 dir_path_vec,

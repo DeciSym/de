@@ -1,15 +1,23 @@
 // Copyright (c) 2025, Decisym, LLC
 // Licensed under the BSD 3-Clause License (see LICENSE file in the project root).
 
+use crate::enrich::Enricher;
 use crate::rdf2nt::ConvertResult;
 use crate::rdf2nt::OxRdfConvert;
 use crate::rdf2nt::Rdf2Nt;
 use log::*;
+use oxrdf::NamedNode;
 use std::fs::{self, File, OpenOptions};
 use std::io::{copy, BufReader, BufWriter, Write};
 use std::path::Path;
 use std::sync::Arc;
 use tempfile::{Builder, NamedTempFile};
+
+pub struct FilesToRdfResult {
+    pub rdf_path: String,
+    pub unhandled_files: Vec<String>,
+    pub blob_files: Vec<String>,
+}
 
 /// Creates a HDT file from RDF source
 pub fn do_create(hdt_name: &str, data: &[String]) -> anyhow::Result<hdt::Hdt, anyhow::Error> {
@@ -21,23 +29,22 @@ pub fn do_create(hdt_name: &str, data: &[String]) -> anyhow::Result<hdt::Hdt, an
         .tempfile()
         .map_err(|e| anyhow::anyhow!("Error creating temporary file: {:?}", e))?;
 
-    let (combined_rdf_path, unknown_files) =
-        files_to_rdf(data, &mut tmp_file, Arc::new(OxRdfConvert {}))?;
-    if !unknown_files.is_empty() {
-        for f in &unknown_files {
+    let result = files_to_rdf(data, &mut tmp_file, Arc::new(OxRdfConvert {}), &[], None)?;
+    if !result.unhandled_files.is_empty() {
+        for f in &result.unhandled_files {
             if !Path::new(f).exists() {
                 error!("file {f:?} could not be found on local machine");
             }
         }
-        error!("unable to convert the following files: {unknown_files:?}");
+        error!("unable to convert the following files: {:?}", result.unhandled_files);
         error!("check 'de create --help' for list of supported file types");
         return Err(anyhow::anyhow!(
             "unsupported files detected: {:?}",
-            unknown_files
+            result.unhandled_files
         ));
     }
 
-    let new_hdt = hdt::Hdt::read_nt(Path::new(&combined_rdf_path))
+    let new_hdt = hdt::Hdt::read_nt(Path::new(&result.rdf_path))
         .map_err(|e| anyhow::anyhow!("Error converting combined RDF to HDT: {e}"))?;
 
     let out_file = OpenOptions::new()
@@ -62,15 +69,19 @@ pub fn do_create(hdt_name: &str, data: &[String]) -> anyhow::Result<hdt::Hdt, an
 }
 
 /// Converts a list of RDF files to NTriple RDF
-/// returns the name of the file containing combined NTriple RDF and the names of any unhandled files
+/// returns the name of the file containing combined NTriple RDF, the names of any unhandled files,
+/// and any files that should be preserved as blobs
 pub fn files_to_rdf(
     data: &[String],
     out_file: &mut NamedTempFile,
     converter: Arc<dyn Rdf2Nt>,
-) -> anyhow::Result<(String, Vec<String>), anyhow::Error> {
+    enrichers: &[Box<dyn Enricher>],
+    pkg_id: Option<&NamedNode>,
+) -> anyhow::Result<FilesToRdfResult> {
     let mut nt_files = vec![];
     let mut files_to_convert = vec![];
     let mut unrecognized_files = vec![];
+    let mut blob_files = vec![];
 
     for file in data.iter() {
         let path = Path::new(&file);
@@ -79,8 +90,32 @@ pub fn files_to_rdf(
             continue;
         }
 
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("");
+
+        // Check if any enricher handles this extension
+        let matched_enricher = enrichers.iter().find(|e| {
+            e.supported_extensions().iter().any(|supported| *supported == ext)
+        });
+
+        if let Some(enricher) = matched_enricher {
+            if let Some(id) = pkg_id {
+                debug!("Enriching file: {file}");
+                let enrich_result = enricher
+                    .enrich(file, id, out_file)
+                    .map_err(|e| anyhow::anyhow!("Error enriching file {file}: {e}"))?;
+                if enrich_result.preserve_source_as_blob {
+                    blob_files.push(file.clone());
+                }
+            } else {
+                warn!("Enricher matched for {file} but no pkg_id provided, skipping enrichment");
+                unrecognized_files.push(file.clone());
+            }
+        }
         // Check for triples, this is the preferred RDF format and no additional conversion is required
-        if file.ends_with(".nt") {
+        else if file.ends_with(".nt") {
             debug!("Adding RDF triples to graph");
             nt_files.push(file.clone());
         } else {
@@ -100,7 +135,7 @@ pub fn files_to_rdf(
 
     // optimization attempt. If only one NTriple file provided don't do an additional file copy otherwise
     // inefficient when creating an HDT file from one large file
-    if nt_files.len() > 1 || conv_res.converted != 0 {
+    if nt_files.len() > 1 || conv_res.converted != 0 || !blob_files.is_empty() {
         for nt_file in nt_files {
             let source = File::open(&nt_file)
                 .map_err(|e| anyhow::anyhow!("Error opening file {:?}: {:?}", nt_file, e))?;
@@ -110,18 +145,137 @@ pub fn files_to_rdf(
                 .map_err(|e| anyhow::anyhow!("Error copying file {:?}: {:?}", &nt_file, e))?;
         }
     } else if nt_files.len() == 1 && conv_res.converted == 0 {
-        return Ok((nt_files[0].clone(), unrecognized_files));
+        return Ok(FilesToRdfResult {
+            rdf_path: nt_files[0].clone(),
+            unhandled_files: unrecognized_files,
+            blob_files,
+        });
     }
 
-    Ok((
-        out_file
+    Ok(FilesToRdfResult {
+        rdf_path: out_file
             .path()
             .to_str()
             .ok_or_else(|| anyhow::anyhow!("Invalid UTF-8 in temp file path"))?
             .to_string(),
-        unrecognized_files,
-    ))
+        unhandled_files: unrecognized_files,
+        blob_files,
+    })
 }
 
 #[cfg(test)]
-mod tests {}
+mod tests {
+    use super::*;
+    use crate::enrich::{EnrichResult, Enricher};
+    use oxrdf::NamedNode;
+    use std::io::Write;
+    use tempfile::Builder;
+
+    struct MockEnricher;
+
+    impl Enricher for MockEnricher {
+        fn supported_extensions(&self) -> Vec<&str> {
+            vec!["mock"]
+        }
+
+        fn enrich(
+            &self,
+            file_path: &str,
+            _pkg_id: &NamedNode,
+            output: &mut dyn Write,
+        ) -> Result<EnrichResult, Box<dyn std::error::Error>> {
+            writeln!(
+                output,
+                "<http://example.org/{}> <http://example.org/type> <http://example.org/Mock> .",
+                file_path.replace(' ', "_")
+            )?;
+            Ok(EnrichResult {
+                preserve_source_as_blob: true,
+            })
+        }
+    }
+
+    #[test]
+    fn test_files_to_rdf_with_mock_enricher() {
+        let tmp = Builder::new().suffix(".mock").tempfile().unwrap();
+        let mock_path = tmp.path().to_str().unwrap().to_string();
+
+        let mut out_file = Builder::new().suffix(".nt").append(true).tempfile().unwrap();
+        let pkg_id = NamedNode::new("http://example.org/pkg1").unwrap();
+        let enrichers: Vec<Box<dyn Enricher>> = vec![Box::new(MockEnricher)];
+
+        let result = files_to_rdf(
+            &[mock_path.clone()],
+            &mut out_file,
+            Arc::new(OxRdfConvert {}),
+            &enrichers,
+            Some(&pkg_id),
+        )
+        .unwrap();
+
+        assert!(result.blob_files.contains(&mock_path));
+        let contents = std::fs::read_to_string(result.rdf_path).unwrap();
+        assert!(contents.contains("<http://example.org/Mock>"));
+    }
+
+    #[test]
+    fn test_files_to_rdf_empty_enrichers_backward_compat() {
+        let tmp = Builder::new().suffix(".nt").tempfile().unwrap();
+        std::fs::write(
+            tmp.path(),
+            "<http://example.org/s> <http://example.org/p> <http://example.org/o> .\n",
+        )
+        .unwrap();
+        let nt_path = tmp.path().to_str().unwrap().to_string();
+
+        let mut out_file = Builder::new().suffix(".nt").append(true).tempfile().unwrap();
+
+        let result = files_to_rdf(
+            &[nt_path.clone()],
+            &mut out_file,
+            Arc::new(OxRdfConvert {}),
+            &[],
+            None,
+        )
+        .unwrap();
+
+        assert!(result.unhandled_files.is_empty());
+        assert!(result.blob_files.is_empty());
+        // single NT file optimization: rdf_path should be the original file
+        assert_eq!(result.rdf_path, nt_path);
+    }
+
+    #[test]
+    fn test_files_to_rdf_mixed_enricher_and_rdf() {
+        // Create a .mock file
+        let mock_tmp = Builder::new().suffix(".mock").tempfile().unwrap();
+        let mock_path = mock_tmp.path().to_str().unwrap().to_string();
+
+        // Create an .nt file
+        let nt_tmp = Builder::new().suffix(".nt").tempfile().unwrap();
+        std::fs::write(
+            nt_tmp.path(),
+            "<http://example.org/s> <http://example.org/p> <http://example.org/o> .\n",
+        )
+        .unwrap();
+        let nt_path = nt_tmp.path().to_str().unwrap().to_string();
+
+        let mut out_file = Builder::new().suffix(".nt").append(true).tempfile().unwrap();
+        let pkg_id = NamedNode::new("http://example.org/pkg1").unwrap();
+        let enrichers: Vec<Box<dyn Enricher>> = vec![Box::new(MockEnricher)];
+
+        let result = files_to_rdf(
+            &[mock_path.clone(), nt_path],
+            &mut out_file,
+            Arc::new(OxRdfConvert {}),
+            &enrichers,
+            Some(&pkg_id),
+        )
+        .unwrap();
+
+        assert!(result.blob_files.contains(&mock_path));
+        let contents = std::fs::read_to_string(result.rdf_path).unwrap();
+        assert!(contents.contains("<http://example.org/Mock>"));
+        assert!(contents.contains("<http://example.org/o>"));
+    }
+}
