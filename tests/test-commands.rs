@@ -3,7 +3,7 @@
 
 mod integration {
     use de::*;
-    use std::{fs::OpenOptions, io::BufWriter, path::Path};
+    use std::{fs::OpenOptions, io::BufWriter, path::Path, process::Output};
     use tempfile::tempdir;
 
     fn devnull_writer() -> std::io::Result<BufWriter<std::fs::File>> {
@@ -24,6 +24,45 @@ mod integration {
         Ok(String::from_utf8_lossy(&buffer).to_string())
     }
 
+    fn run_de_command(cwd: &Path, args: &[&str]) -> anyhow::Result<Output> {
+        std::process::Command::new(env!("CARGO_BIN_EXE_de"))
+            .current_dir(cwd)
+            .args(args)
+            .output()
+            .map_err(|e| anyhow::anyhow!("failed to execute de {}: {e}", args.join(" ")))
+    }
+
+    fn run_de_ok(cwd: &Path, args: &[&str]) -> anyhow::Result<()> {
+        let output = run_de_command(cwd, args)?;
+        if output.status.success() {
+            return Ok(());
+        }
+        Err(anyhow::anyhow!(
+            "de {} failed with status {:?}\nstdout:\n{}\nstderr:\n{}",
+            args.join(" "),
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ))
+    }
+
+    fn run_de_ok_stdout(cwd: &Path, args: &[&str]) -> anyhow::Result<String> {
+        let output = run_de_command(cwd, args)?;
+        if !output.status.success() {
+            return Err(anyhow::anyhow!(
+                "de {} failed with status {:?}\nstdout:\n{}\nstderr:\n{}",
+                args.join(" "),
+                output.status,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+        Ok(String::from_utf8_lossy(&output.stdout)
+            .replace('\r', "")
+            .trim()
+            .to_string())
+    }
+
     #[test]
     fn test_do_create_rdf() -> anyhow::Result<()> {
         let tmp_dir: tempfile::TempDir = match tempdir() {
@@ -32,7 +71,7 @@ mod integration {
                 return Err(anyhow::anyhow!(
                     "Error creating temporary working dir: {:?}",
                     e
-                ))
+                ));
             }
         };
         let new_hdt = format!("{}/rdf.hdt", tmp_dir.as_ref().display());
@@ -54,7 +93,7 @@ mod integration {
                 return Err(anyhow::anyhow!(
                     "Error creating temporary working dir: {:?}",
                     e
-                ))
+                ));
             }
         };
         let new_hdt = format!("{}/rdf.hdt", tmp_dir.as_ref().display());
@@ -79,7 +118,7 @@ mod integration {
                 return Err(anyhow::anyhow!(
                     "Error creating temporary working dir: {:?}",
                     e
-                ))
+                ));
             }
         };
         let new_hdt = format!("{}/banana.hdt", tmp_dir.as_ref().display());
@@ -95,6 +134,7 @@ mod integration {
         let res = query::do_query(
             &data_files,
             &query_files,
+            query::EntailmentMode::Off,
             &query::DeOutput::CSV,
             &mut writer,
         )
@@ -119,16 +159,18 @@ http://example.org/Banana"#
                 return Err(anyhow::anyhow!(
                     "Error creating temporary working dir: {:?}",
                     e
-                ))
+                ));
             }
         };
         let new_hdt = format!("{}/banana.hdt", tmp_dir.as_ref().display());
 
-        assert!(create::do_create(
-            &new_hdt.clone(),
-            &["tests/resources/banana.ttl".to_string()],
-        )
-        .is_ok());
+        assert!(
+            create::do_create(
+                &new_hdt.clone(),
+                &["tests/resources/banana.ttl".to_string()],
+            )
+            .is_ok()
+        );
 
         let data_files = vec![new_hdt];
         let query_files = vec!["tests/resources/query-color.rq".to_string()];
@@ -136,6 +178,7 @@ http://example.org/Banana"#
         let res = query::do_query(
             &data_files,
             &query_files,
+            query::EntailmentMode::Off,
             &query::DeOutput::CSV,
             &mut writer,
         )
@@ -160,15 +203,17 @@ http://example.org/Banana"#
                 return Err(anyhow::anyhow!(
                     "Error creating temporary working dir: {:?}",
                     e
-                ))
+                ));
             }
         };
         let pineapple_hdt = format!("{}/pineapple.hdt", tmp_dir.as_ref().display());
-        assert!(create::do_create(
-            &pineapple_hdt.clone(),
-            &["tests/resources/pineapple.ttl".to_string()],
-        )
-        .is_ok());
+        assert!(
+            create::do_create(
+                &pineapple_hdt.clone(),
+                &["tests/resources/pineapple.ttl".to_string()],
+            )
+            .is_ok()
+        );
 
         let data_files = vec![pineapple_hdt];
         let query_files = vec!["tests/resources/query-fruit-color.rq".to_string()];
@@ -176,6 +221,7 @@ http://example.org/Banana"#
         let res = query::do_query(
             &data_files,
             &query_files,
+            query::EntailmentMode::Off,
             &query::DeOutput::CSV,
             &mut writer,
         )
@@ -193,6 +239,7 @@ http://example.org/Pineapple,yellow"#
         let res = query::do_query(
             &data_files,
             &query_files,
+            query::EntailmentMode::Off,
             &query::DeOutput::TSV,
             &mut writer2,
         )
@@ -209,6 +256,7 @@ http://example.org/Pineapple,yellow"#
         let res = query::do_query(
             &data_files,
             &query_files,
+            query::EntailmentMode::Off,
             &query::DeOutput::JSON,
             &mut writer3,
         )
@@ -225,6 +273,7 @@ http://example.org/Pineapple,yellow"#
         let res = query::do_query(
             &data_files,
             &query_files,
+            query::EntailmentMode::Off,
             &query::DeOutput::XML,
             &mut writer4,
         )
@@ -237,11 +286,12 @@ http://example.org/Pineapple,yellow"#
             r#"<?xml version="1.0"?><sparql xmlns="http://www.w3.org/2005/sparql-results#"><head><variable name="fruit"/><variable name="color"/></head><results><result><binding name="fruit"><uri>http://example.org/Pineapple</uri></binding><binding name="color"><literal>yellow</literal></binding></result></results></sparql>"#
         );
 
-        // ASK queries only support CSV, TSV, JSON, or XML
+        // SELECT results are only emitted as SPARQL results formats (CSV/TSV/JSON/XML).
         let mut writer5 = create_test_writer();
         let res = query::do_query(
             &data_files,
             &query_files,
+            query::EntailmentMode::Off,
             &query::DeOutput::NTRIPLE,
             &mut writer5,
         )
@@ -253,6 +303,75 @@ http://example.org/Pineapple,yellow"#
     }
 
     #[tokio::test]
+    async fn test_readme_w3c_section_2_1_select_example() -> anyhow::Result<()> {
+        let tmp_dir: tempfile::TempDir = match tempdir() {
+            Ok(d) => d,
+            Err(e) => {
+                return Err(anyhow::anyhow!(
+                    "Error creating temporary working dir: {:?}",
+                    e
+                ));
+            }
+        };
+
+        let simple_nt = tmp_dir.path().join("simple.nt");
+        let simple_rq = tmp_dir.path().join("simple.rq");
+        let simple_hdt = tmp_dir.path().join("simple.hdt");
+
+        std::fs::write(
+            &simple_nt,
+            "<http://example.org/book/book1> <http://purl.org/dc/elements/1.1/title> \"SPARQL Tutorial\" .\n",
+        )?;
+        std::fs::write(
+            &simple_rq,
+            "SELECT ?title\nWHERE\n{\n  <http://example.org/book/book1> <http://purl.org/dc/elements/1.1/title> ?title .\n}\n",
+        )?;
+
+        let rdf_output = run_de_ok_stdout(
+            tmp_dir.path(),
+            &[
+                "query",
+                "--data",
+                "simple.nt",
+                "--sparql",
+                "simple.rq",
+                "--output",
+                "csv",
+            ],
+        )?;
+        assert_eq!(rdf_output, "title\nSPARQL Tutorial");
+
+        run_de_ok(
+            tmp_dir.path(),
+            &[
+                "create",
+                "--output-name",
+                "simple.hdt",
+                "--data",
+                "simple.nt",
+            ],
+        )?;
+        assert!(simple_hdt.exists());
+
+        let hdt_output = run_de_ok_stdout(
+            tmp_dir.path(),
+            &[
+                "query",
+                "--data",
+                "simple.hdt",
+                "--sparql",
+                "simple.rq",
+                "--output",
+                "csv",
+            ],
+        )?;
+        assert_eq!(hdt_output, "title\nSPARQL Tutorial");
+
+        tmp_dir.close()?;
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn test_combine_and_query_two_rdfs() -> anyhow::Result<()> {
         let tmp_dir: tempfile::TempDir = match tempdir() {
             Ok(d) => d,
@@ -260,19 +379,21 @@ http://example.org/Pineapple,yellow"#
                 return Err(anyhow::anyhow!(
                     "Error creating temporary working dir: {:?}",
                     e
-                ))
+                ));
             }
         };
         let new_hdt = format!("{}/combined.hdt", tmp_dir.as_ref().display());
 
-        assert!(create::do_create(
-            &new_hdt.clone(),
-            &[
-                "tests/resources/pineapple.ttl".to_string(),
-                "tests/resources/banana.ttl".to_string()
-            ],
-        )
-        .is_ok());
+        assert!(
+            create::do_create(
+                &new_hdt.clone(),
+                &[
+                    "tests/resources/pineapple.ttl".to_string(),
+                    "tests/resources/banana.ttl".to_string()
+                ],
+            )
+            .is_ok()
+        );
 
         let data_files = vec![new_hdt];
         let query_files = vec!["tests/resources/query-color.rq".to_string()];
@@ -280,6 +401,7 @@ http://example.org/Pineapple,yellow"#
         let res = query::do_query(
             &data_files,
             &query_files,
+            query::EntailmentMode::Off,
             &query::DeOutput::CSV,
             &mut writer,
         )
@@ -309,6 +431,7 @@ http://example.org/Banana"#
         let res = query::do_query(
             &data_files,
             &query_files,
+            query::EntailmentMode::Off,
             &query::DeOutput::CSV,
             &mut writer,
         )
@@ -333,7 +456,7 @@ http://example.org/Banana"#
                 return Err(anyhow::anyhow!(
                     "Error creating temporary working dir: {:?}",
                     e
-                ))
+                ));
             }
         };
 
@@ -353,7 +476,14 @@ http://example.org/Banana"#
 
         let query_files = vec!["tests/resources/query-color.rq".to_string()];
         let mut writer = create_test_writer();
-        let res = query::do_query(&pkgs, &query_files, &query::DeOutput::CSV, &mut writer).await;
+        let res = query::do_query(
+            &pkgs,
+            &query_files,
+            query::EntailmentMode::Off,
+            &query::DeOutput::CSV,
+            &mut writer,
+        )
+        .await;
         assert!(res.is_ok());
 
         let output = get_output_from_writer(writer)?;

@@ -2,11 +2,9 @@
 HUB ?= decisym
 TAG ?= latest
 VERSION ?= 0.0.0-test
-MUSL_TARGET ?= x86_64-unknown-linux-musl
 
 init:
 	scripts/download-sample-bench.sh
-	rustup target add $(MUSL_TARGET)
 	cargo install cargo-deb cargo-machete
 	
 lint:
@@ -47,8 +45,8 @@ docker.test: docker
 	query --data /data/superhero.ttl --sparql /data/hero-height.rq -q | tr -d '\r'| diff - tests/goldens/superhero-query.csv
 
 release: init
-	cargo build --release --target $(MUSL_TARGET) --features=server
-	cargo deb --deb-version ${VERSION} --target $(MUSL_TARGET) --features=server
+	cargo build --release --features=server
+	cargo deb --deb-version ${VERSION} --features=server
 
 serve: docker
 	docker run -it --rm -v ${PWD}/tests/resources:/data -p 7878:7878 ${HUB}/de:${TAG} serve -l /data --bind 0.0.0.0:7878 -vvv

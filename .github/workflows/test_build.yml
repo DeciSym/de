@@ -81,9 +81,5 @@ jobs:
     - uses: Swatinem/rust-cache@v2
       with:
         shared-key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-    - name: Install MUSL tools
-      run: |
-        sudo apt-get update
-        sudo apt-get install musl-tools -y
     - name: Run Docker test
       run: make docker.test

@@ -7,8 +7,10 @@ use oxrdf::TripleRef;
 use oxrdfio::RdfFormat::{self, NTriples};
 use oxrdfio::RdfSerializer;
 use oxrdfio::{RdfParseError, RdfParser};
+use std::collections::BTreeSet;
 use std::io::{BufReader, BufWriter, Write};
 use std::path::Path;
+use url::Url;
 
 /// Trait for different RDF libraries to implement for converting a list of files into NTriple RDF
 /// returns stats on converted data via ConvertResult
@@ -23,8 +25,9 @@ pub trait Rdf2Nt {
 #[derive(Debug, Default)]
 /// Object for returning stats of converted RDF files
 pub struct ConvertResult {
-    pub converted: i32,
+    pub converted: usize,
     pub unhandled: Vec<String>,
+    pub named_graphs: BTreeSet<String>,
 }
 
 /// Rdf2Nt implementation using oxrdf and oxrdfio crates
@@ -63,8 +66,21 @@ impl Rdf2Nt for OxRdfConvert {
                     continue;
                 }
             };
+            let base_iri = Path::new(file)
+                .canonicalize()
+                .ok()
+                .and_then(|path| Url::from_file_path(path).ok())
+                .map(|url| url.to_string());
             // TODO oxrdfio does offer split_file_for_parallel_parsing() which greatly improves performance, but only available for NT or NQ formats
-            let quads = RdfParser::from_format(rdf_format).for_reader(source_reader);
+            let quads = if let Some(base_iri) = base_iri {
+                match RdfParser::from_format(rdf_format).with_base_iri(&base_iri) {
+                    Ok(parser) => parser.for_reader(source_reader),
+                    Err(_) => RdfParser::from_format(rdf_format).for_reader(source_reader),
+                }
+            } else {
+                RdfParser::from_format(rdf_format).for_reader(source_reader)
+            };
+            let mut warned_named_graph_merge = false;
             for q in quads {
                 let q = match q {
                     Ok(v) => v,
@@ -87,7 +103,11 @@ impl Rdf2Nt for OxRdfConvert {
                     }
                 };
                 if q.graph_name != DefaultGraph {
-                    warn!("HDT does not support named graphs, merging triples for {file}");
+                    if !warned_named_graph_merge {
+                        warn!("HDT does not support named graphs, merging triples for {file}");
+                        warned_named_graph_merge = true;
+                    }
+                    res.named_graphs.insert(q.graph_name.to_string());
                 }
                 serializer.serialize_triple(TripleRef::new(
                     q.subject.as_ref(),
@@ -102,5 +122,36 @@ impl Rdf2Nt for OxRdfConvert {
         }
         dest_writer.flush()?;
         Ok(res)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{OxRdfConvert, Rdf2Nt};
+    use std::fs;
+    use tempfile::Builder;
+
+    #[test]
+    fn convert_to_nt_handles_relative_iris_in_paths_with_spaces() -> anyhow::Result<()> {
+        let temp_dir = Builder::new().prefix("rdf2nt with spaces").tempdir()?;
+        let input_path = temp_dir.path().join("input.ttl");
+        fs::write(&input_path, "<s> <p> <o> .\n")?;
+
+        let output = Builder::new().suffix(".nt").tempfile()?;
+        let converter = OxRdfConvert {};
+        let result = converter.convert_to_nt(
+            vec![input_path.to_string_lossy().to_string()],
+            output.as_file(),
+        )?;
+
+        assert_eq!(result.converted, 1);
+        assert!(result.unhandled.is_empty());
+
+        let output_data = fs::read_to_string(output.path())?;
+        assert!(
+            output_data.contains("file:///"),
+            "expected output triples to resolve against a file:/// base IRI"
+        );
+        Ok(())
     }
 }

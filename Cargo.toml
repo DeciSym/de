@@ -1,8 +1,8 @@
 [package]
 name = "de"
 version = "0.2.0"
-authors = ["bharath181 <bharathselvaraj18@gmail.com>", "Greg Hanson <g.isaac.hanson@gmail.com>"]
-edition = "2021"
+authors = ["bharath181 <bharathselvaraj18@gmail.com>", "Greg Hanson <g.isaac.hanson@gmail.com>", "Donald Anthony Pellegrino Jr., Ph.D. <don@decisym.ai>"]
+edition = "2024"
 license = "BSD-3-Clause"
 readme = "README.md"
 repository = "https://github.com/DeciSym/de"
@@ -25,7 +25,7 @@ clap = { version = "4.5" }
 clap-verbosity-flag = { version = "3.0", default-features = false, features = ["log"] }
 env_logger = { version = "0.11", default-features = false }
 exitcode = "1.1"
-hdt = { git = "https://github.com/DeciSym/hdt", default-features = false, features = ["nt", "sparql"], rev = "86847db45131e05ccd1d3c0305eda373a3f708a2" }
+hdt = { git = "https://github.com/DeciSym/hdt", default-features = false, features = ["nt", "sparql"], rev = "1c31287ce99f4a38640f230b20072322d0fa9852" }
 http = { version = "1.4", optional = true }
 log = "0.4"
 oxhttp = { version = "0.3", optional=true }
@@ -35,17 +35,18 @@ oxrdfio = "0.2"
 rand = { version = "0.9", optional = true }
 rayon = "1.11.0"
 sparesults = "0.3"
-spareval = "0.2"
+spareval = { version = "0.2", features = ["sep-0002", "sep-0006"] }
 spargebra = "0.4"
+reasonable = "0.3.2"
 tempfile = {version = "3.25"}
 tokio = { version = "1.49", default-features = false, features = ["rt-multi-thread", "macros", "sync"] }
-url = { version = "2.5", optional = true }
+url = "2.5"
 
 [dev-dependencies]
 urlencoding = "2.1"
-
-[target.'cfg(not(target_os = "openbsd"))'.dev-dependencies]
 criterion = { version = "0.5", features = ["async_tokio"] }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
 pprof = { version = "0.15", features = ["protobuf", "protobuf-codec", "criterion"] }
 
 [package.metadata.deb]
@@ -63,7 +64,10 @@ default-features = false
 
 [features]
 default = []
-server = ["dep:oxhttp", "dep:http", "dep:url", "dep:rand", "dep:oxiri"]
+server = ["dep:oxhttp", "dep:http", "dep:rand", "dep:oxiri"]
 
-[package.metadata.cargo-machete]
-ignored = ["eyre"]
+[patch.crates-io]
+reasonable = { git = "https://github.com/DeciSym/reasonable.git", rev = "840b62fb9954cefb91f816886cd83727a1752629" }
+spareval = { git = "https://github.com/DeciSym/oxigraph.git", rev = "41f06ccc28650ebed22cc8354964972f3a817006" }
+sparopt = { git = "https://github.com/DeciSym/oxigraph.git", rev = "41f06ccc28650ebed22cc8354964972f3a817006" }
+spargebra = { git = "https://github.com/DeciSym/oxigraph.git", rev = "41f06ccc28650ebed22cc8354964972f3a817006" }

@@ -4,7 +4,7 @@
 use clap::{Parser, Subcommand};
 use de::*;
 use log::error;
-use std::io::{stdout, BufWriter, Write};
+use std::io::{BufWriter, Write, stdout};
 
 #[derive(Parser)]
 #[command(author, version, about="CLI tool for creating and querying HDT files", long_about = None)]
@@ -26,22 +26,37 @@ enum Commands {
         #[clap(short, long, num_args = 1..)]
         /// Path to data files to be added to Graph (Acceptable inputs are as follows: RDF)
         data: Vec<String>,
+        #[clap(long, default_value_t = false)]
+        /// Explicitly allow merging multiple named graphs into one output HDT graph
+        allow_merge_named_graphs: bool,
+        #[clap(long)]
+        /// Optional graph IRI metadata to store in the HDT header
+        graph_iri: Option<String>,
     },
     /// Query HDT and RDF files using SPARQL query format
     Query {
         #[clap(short, long, num_args = 1..)]
         /// local HDT and RDF files to be queried
         data: Vec<String>,
+        #[clap(long, num_args = 1..)]
+        /// Named graph bindings in IRI=PATH format (repeatable)
+        named_graph: Vec<String>,
         #[clap(short, long, num_args = 1.., required = true)]
         /// Path to SPARQL query file. (should end in .rq)
         sparql: Vec<String>,
+        #[clap(long, default_value_t, value_enum)]
+        /// Entailment mode used during query data preparation
+        entailment: query::EntailmentMode,
+        #[clap(long, default_value_t = false)]
+        /// Print query plan JSON to stderr for each query
+        debug_query_plan: bool,
         /// Output to return the query results as using https://docs.rs/oxigraph/0.4.3/oxigraph/sparql/results/enum.QueryResultsFormat.html and https://crates.io/crates/oxrdfio
         #[clap(short, long, default_value_t, value_enum)]
         output: query::DeOutput,
     },
     /// Start a server to listen for /sparql, /update and /store API's. HDT's are read-only
-    /// per spec, so new graphs (i.e. files) can be uploaded, but existing HDT triples can NOT
-    /// be modified using the SPARQL UPDATE API
+    /// per spec, so new graphs (i.e. files) can be uploaded, but existing graphs can NOT be
+    /// modified or deleted through /update or /store overwrite/delete requests.
     #[cfg(feature = "server")]
     Serve {
         /// Directory in which the data should be persisted
@@ -69,21 +84,7 @@ async fn main() {
         .filter_level(cli.verbose.log_level_filter())
         .init();
     let mut stdout_writer = BufWriter::new(stdout());
-    // Matching CLI input to commands
-    let result = match &cli.command {
-        Commands::Query {
-            data,
-            sparql,
-            output,
-        } => query::do_query(data, sparql, output, &mut stdout_writer).await,
-        Commands::Create { output_name, data } => match create::do_create(output_name, data) {
-            Ok(_) => Ok(()),
-            Err(e) => Err(e),
-        },
-        Commands::View { data } => view::view_hdt(data, &mut stdout_writer),
-        #[cfg(feature = "server")]
-        Commands::Serve { location, bind } => de::serve::serve(location.to_owned(), bind),
-    };
+    let result = run_command(&cli.command, &mut stdout_writer).await;
     let flush_result = flush_stdout_writer(&mut stdout_writer);
     match result {
         Ok(_) => {
@@ -97,6 +98,51 @@ async fn main() {
             error!("Error during execution: {e:?}");
             std::process::exit(exitcode::UNAVAILABLE);
         }
+    }
+}
+
+async fn run_command<W: Write>(
+    command: &Commands,
+    stdout_writer: &mut BufWriter<W>,
+) -> anyhow::Result<()> {
+    match command {
+        Commands::Query {
+            data,
+            named_graph,
+            sparql,
+            entailment,
+            debug_query_plan,
+            output,
+        } => {
+            let named_graph_bindings = query::parse_named_graph_bindings(named_graph)?;
+            query::do_query_with_dataset_with_options(
+                data,
+                &named_graph_bindings,
+                sparql,
+                *entailment,
+                query::QueryExecutionOptions {
+                    debug_query_plan: *debug_query_plan,
+                },
+                output,
+                stdout_writer,
+            )
+            .await
+        }
+        Commands::Create {
+            output_name,
+            data,
+            allow_merge_named_graphs,
+            graph_iri,
+        } => create::do_create_with_options(
+            output_name,
+            data,
+            *allow_merge_named_graphs,
+            graph_iri.as_deref(),
+        )
+        .map(|_| ()),
+        Commands::View { data } => view::view_hdt(data, stdout_writer),
+        #[cfg(feature = "server")]
+        Commands::Serve { location, bind } => de::serve::serve(location.to_owned(), bind),
     }
 }
 

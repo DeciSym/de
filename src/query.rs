@@ -6,17 +6,24 @@ use crate::rdf2nt::OxRdfConvert;
 use crate::sparql;
 use anyhow::Error;
 use log::*;
+use oxrdf::{NamedNode, NamedOrBlankNode, Term, Triple};
 use oxrdfio::RdfFormat;
+use oxrdfio::RdfParser;
 use oxrdfio::RdfSerializer;
+use reasonable::reasoner::Reasoner;
 use sparesults::QueryResultsFormat;
 use sparesults::QueryResultsSerializer;
 use spareval::QueryResults;
-use std::fs;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufWriter, Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tempfile::{tempdir, Builder, NamedTempFile};
+use tempfile::{Builder, NamedTempFile, tempdir};
+use url::Url;
+
+#[cfg(test)]
+static TEST_TEMP_ROOT_OVERRIDE: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
 
 #[derive(clap::ValueEnum, Clone, Default, Debug, PartialEq)]
 pub enum DeOutput {
@@ -56,6 +63,48 @@ struct QueryDirCleanup {
     dirs: Option<Vec<String>>,
 }
 
+#[derive(clap::ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum EntailmentMode {
+    #[default]
+    Off,
+    OwlRl,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct QueryExecutionOptions {
+    pub debug_query_plan: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct NamedGraphBinding {
+    pub graph_iri: String,
+    pub data_file: String,
+}
+
+#[derive(Default)]
+struct QueryDatasetLocalFiles {
+    default_data_files: Vec<String>,
+    named_graphs: Vec<NamedGraphBinding>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct DatasetExecutionKey {
+    default_data_files: Vec<String>,
+    named_graphs: Vec<NamedGraphBinding>,
+    default_source_graphs: Vec<NamedGraphBinding>,
+}
+
+struct PreparedDataset {
+    snapshot: sparql::AggregateHdtSnapshot,
+    _cleanup_guard: QueryDirCleanup,
+}
+
+#[derive(Debug)]
+struct PreparedQueryInputs {
+    cleanup_dirs: Vec<String>,
+    hdt_paths: Vec<String>,
+}
+
 impl QueryDirCleanup {
     fn new(dirs: Vec<String>) -> Self {
         Self { dirs: Some(dirs) }
@@ -77,6 +126,52 @@ impl Drop for QueryDirCleanup {
 pub async fn do_query<W: Write>(
     data_files: &[String],
     query_files: &[String],
+    entailment_mode: EntailmentMode,
+    out: &DeOutput,
+    writer: &mut BufWriter<W>,
+) -> anyhow::Result<()> {
+    do_query_with_dataset_with_options(
+        data_files,
+        &[],
+        query_files,
+        entailment_mode,
+        QueryExecutionOptions::default(),
+        out,
+        writer,
+    )
+    .await
+}
+
+/// Execute a list of sparql queries over a list of RDF files with optional named-graph bindings.
+/// Non-HDT data files are converted to temporary HDT files before query execution.
+pub async fn do_query_with_dataset<W: Write>(
+    data_files: &[String],
+    named_graph_bindings: &[NamedGraphBinding],
+    query_files: &[String],
+    entailment_mode: EntailmentMode,
+    out: &DeOutput,
+    writer: &mut BufWriter<W>,
+) -> anyhow::Result<()> {
+    do_query_with_dataset_with_options(
+        data_files,
+        named_graph_bindings,
+        query_files,
+        entailment_mode,
+        QueryExecutionOptions::default(),
+        out,
+        writer,
+    )
+    .await
+}
+
+/// Execute a list of sparql queries over a list of RDF files with optional named-graph bindings.
+/// Non-HDT data files are converted to temporary HDT files before query execution.
+pub async fn do_query_with_dataset_with_options<W: Write>(
+    data_files: &[String],
+    named_graph_bindings: &[NamedGraphBinding],
+    query_files: &[String],
+    entailment_mode: EntailmentMode,
+    options: QueryExecutionOptions,
     out: &DeOutput,
     writer: &mut BufWriter<W>,
 ) -> anyhow::Result<()> {
@@ -94,25 +189,94 @@ pub async fn do_query<W: Write>(
         }
     }
 
-    let (dir_path_vec, hdt_path_vec, e) = handle_files(data_files.to_owned()).await;
-    let _cleanup_guard = QueryDirCleanup::new(dir_path_vec);
-
-    if let Some(e) = e {
-        return Err(anyhow::anyhow!("Error reading data files: {e}",));
-    }
-
-    let dataset = sparql::AggregateHdt::new(&hdt_path_vec)
-        .map_err(|e| anyhow::anyhow!("error initializting HDT files: {e}"))?;
-    let snapshot = dataset
-        .get_snapshot(None)
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let mut prepared_by_key: HashMap<DatasetExecutionKey, usize> = HashMap::new();
+    let mut prepared_datasets: Vec<PreparedDataset> = Vec::new();
 
     for rq in query_files {
-        let mut f = File::open(rq)?;
+        let query_path = PathBuf::from(rq);
+        let mut f = File::open(&query_path)?;
         let mut buffer = String::new();
-
         f.read_to_string(&mut buffer)?;
-        let qr = match sparql::query(&buffer, &snapshot, None) {
+
+        let (parsed_query, query_dataset_files) =
+            parse_query_and_extract_dataset_local_files(&buffer, &query_path)?;
+        let dataset_key =
+            build_dataset_execution_key(data_files, named_graph_bindings, &query_dataset_files)?;
+
+        let dataset_idx = if let Some(idx) = prepared_by_key.get(&dataset_key).copied() {
+            idx
+        } else {
+            let mut dir_path_vec = Vec::new();
+            let mut source_hdt_cache = HashMap::new();
+            let mut hdt_path_vec = Vec::new();
+            for source_file in &dataset_key.default_data_files {
+                let hdt_path = prepare_source_hdt_path(
+                    source_file,
+                    entailment_mode,
+                    &mut source_hdt_cache,
+                    &mut dir_path_vec,
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("Error reading data files: {e}"))?;
+                hdt_path_vec.push(hdt_path);
+            }
+            hdt_path_vec.sort_unstable();
+            hdt_path_vec.dedup();
+
+            let mut named_hdt_graphs = Vec::new();
+            for binding in &dataset_key.named_graphs {
+                let hdt_path = prepare_source_hdt_path(
+                    &binding.data_file,
+                    entailment_mode,
+                    &mut source_hdt_cache,
+                    &mut dir_path_vec,
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("Error reading named graph files: {e}"))?;
+                named_hdt_graphs.push((binding.graph_iri.clone(), hdt_path));
+            }
+            for binding in &dataset_key.default_source_graphs {
+                if named_hdt_graphs
+                    .iter()
+                    .any(|(iri, _)| iri == &binding.graph_iri)
+                {
+                    continue;
+                }
+                let hdt_path = prepare_source_hdt_path(
+                    &binding.data_file,
+                    entailment_mode,
+                    &mut source_hdt_cache,
+                    &mut dir_path_vec,
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("Error reading named graph files: {e}"))?;
+                named_hdt_graphs.push((binding.graph_iri.clone(), hdt_path));
+            }
+
+            let cleanup_guard = QueryDirCleanup::new(dir_path_vec);
+            named_hdt_graphs.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+            named_hdt_graphs.dedup();
+
+            let dataset = sparql::AggregateHdt::new_with_mappings(&hdt_path_vec, &named_hdt_graphs)
+                .map_err(|e| anyhow::anyhow!("error initializting HDT files: {e}"))?;
+            let snapshot = dataset
+                .get_snapshot(None)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+            let idx = prepared_datasets.len();
+            prepared_datasets.push(PreparedDataset {
+                snapshot,
+                _cleanup_guard: cleanup_guard,
+            });
+            prepared_by_key.insert(dataset_key, idx);
+            idx
+        };
+        let prepared = &prepared_datasets[dataset_idx];
+        let qr = match sparql::query_parsed_with_debug_plan(
+            parsed_query,
+            &prepared.snapshot,
+            options.debug_query_plan,
+        ) {
             Ok(r) => r,
             Err(e) => {
                 error!("problem executing the hdt query: {e}");
@@ -128,9 +292,9 @@ pub async fn do_query<W: Write>(
                     DeOutput::JSON => QueryResultsFormat::Json,
                     DeOutput::XML => QueryResultsFormat::Xml,
                     _ => {
-                        error!("ASK queries support only CSV, TSV, JSON, or XML");
+                        error!("SELECT queries support only CSV, TSV, JSON, or XML");
                         return Err(anyhow::anyhow!(
-                            "ASK queries support only CSV, TSV, JSON, or XML"
+                            "SELECT queries support only CSV, TSV, JSON, or XML"
                         ));
                     }
                 };
@@ -182,7 +346,9 @@ pub async fn do_query<W: Write>(
                     DeOutput::TRIG => RdfFormat::TriG,
                     DeOutput::TURTLE => RdfFormat::Turtle,
                     _ => {
-                        warn!("CONSTRUCT and DESCRIBE queries only support NQ, NT, RDFXML, TRIG, and TTL formats. Defaulting to NTriple format");
+                        warn!(
+                            "CONSTRUCT and DESCRIBE queries only support NQ, NT, RDFXML, TRIG, and TTL formats. Defaulting to NTriple format"
+                        );
                         RdfFormat::NTriples
                     }
                 };
@@ -201,101 +367,233 @@ pub async fn do_query<W: Write>(
     Ok(())
 }
 
-async fn handle_files(files: Vec<String>) -> (Vec<String>, Vec<String>, Option<anyhow::Error>) {
-    let mut dir_path_vec: Vec<String> = vec![]; // This is holding the path to the tempfiles that havent been removed from disk
-    let mut hdt_path_vec: Vec<String> = vec![]; // This is holding all the paths to the hdt files. this needs to stay
-    let tmp_dir = match tempdir() {
-        Ok(d) => d,
-        Err(e) => {
-            return (
-                dir_path_vec,
-                hdt_path_vec,
-                Some(anyhow::anyhow!(
-                    "Error creating temporary working dir: {:?}",
-                    e
-                )),
+fn parse_query_and_extract_dataset_local_files(
+    query_text: &str,
+    query_path: &Path,
+) -> anyhow::Result<(spargebra::Query, QueryDatasetLocalFiles)> {
+    let base_iri = query_base_iri(query_path).unwrap_or_else(|| "http://example.com/".to_string());
+    let query = sparql::parse_query(query_text, &base_iri)
+        .map_err(|e| anyhow::anyhow!("Invalid SPARQL query {:?}: {e}", query_path))?;
+
+    let mut files = QueryDatasetLocalFiles::default();
+    let mut seen_default = HashSet::new();
+    let mut seen_named = HashSet::new();
+
+    if let Some(dataset) = query.dataset() {
+        for iri in &dataset.default {
+            if let Some(path) = file_uri_to_local_path(iri.as_str()) {
+                let path = normalize_local_path_string(&path);
+                if seen_default.insert(path.clone()) {
+                    files.default_data_files.push(path);
+                }
+            }
+        }
+        if let Some(named) = &dataset.named {
+            for iri in named {
+                if let Some(path) = file_uri_to_local_path(iri.as_str()) {
+                    let path = normalize_local_path_string(&path);
+                    let binding = NamedGraphBinding {
+                        graph_iri: iri.as_str().to_string(),
+                        data_file: path,
+                    };
+                    if seen_named.insert((binding.graph_iri.clone(), binding.data_file.clone())) {
+                        files.named_graphs.push(binding);
+                    }
+                }
+            }
+        }
+    }
+
+    Ok((query, files))
+}
+
+fn normalize_local_path_string(path: &Path) -> String {
+    path.canonicalize()
+        .unwrap_or_else(|_| path.to_path_buf())
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn normalize_named_graph_binding(binding: NamedGraphBinding) -> NamedGraphBinding {
+    NamedGraphBinding {
+        graph_iri: binding.graph_iri,
+        data_file: normalize_local_path_string(Path::new(&binding.data_file)),
+    }
+}
+
+fn file_uri_to_local_path(uri: &str) -> Option<PathBuf> {
+    let parsed = Url::parse(uri).ok()?;
+    if parsed.scheme() != "file" {
+        return None;
+    }
+    parsed.to_file_path().ok()
+}
+
+fn query_base_iri(query_path: &Path) -> Option<String> {
+    let canonical = query_path.canonicalize().ok()?;
+    let parent = canonical.parent()?;
+    Url::from_directory_path(parent)
+        .ok()
+        .map(|url| url.to_string())
+}
+
+fn local_path_to_file_uri(path: &Path) -> anyhow::Result<String> {
+    crate::file_graph_uri_for_path(path)
+}
+
+fn build_dataset_execution_key(
+    data_files: &[String],
+    named_graph_bindings: &[NamedGraphBinding],
+    query_dataset_files: &QueryDatasetLocalFiles,
+) -> anyhow::Result<DatasetExecutionKey> {
+    let mut default_data_files: Vec<String> = data_files
+        .iter()
+        .map(|f| normalize_local_path_string(Path::new(f)))
+        .collect();
+    for file in &query_dataset_files.default_data_files {
+        default_data_files.push(normalize_local_path_string(Path::new(file)));
+    }
+
+    let mut named_graphs = named_graph_bindings
+        .iter()
+        .cloned()
+        .map(normalize_named_graph_binding)
+        .collect::<Vec<_>>();
+    for binding in query_dataset_files.named_graphs.iter().cloned() {
+        named_graphs.push(normalize_named_graph_binding(binding));
+    }
+
+    let mut default_source_graphs = Vec::new();
+    // Preserve a stable graph IRI mapping for FROM <file://...> sources.
+    // The query dataset may reference source file URIs, while execution runs on converted HDT files.
+    // Adding these mappings keeps query-specified dataset IRIs resolvable during evaluation.
+    for file in &query_dataset_files.default_data_files {
+        let data_file = normalize_local_path_string(Path::new(file));
+        let graph_iri = local_path_to_file_uri(Path::new(&data_file)).map_err(|e| {
+            anyhow::anyhow!(
+                "failed to derive graph IRI for default dataset source {data_file}: {e}"
             )
+        })?;
+        default_source_graphs.push(NamedGraphBinding {
+            graph_iri,
+            data_file,
+        });
+    }
+
+    default_data_files.sort_unstable();
+    default_data_files.dedup();
+    named_graphs.sort_unstable_by(|a, b| {
+        a.graph_iri
+            .cmp(&b.graph_iri)
+            .then(a.data_file.cmp(&b.data_file))
+    });
+    named_graphs.dedup();
+    default_source_graphs.sort_unstable_by(|a, b| {
+        a.graph_iri
+            .cmp(&b.graph_iri)
+            .then(a.data_file.cmp(&b.data_file))
+    });
+    default_source_graphs.dedup();
+
+    Ok(DatasetExecutionKey {
+        default_data_files,
+        named_graphs,
+        default_source_graphs,
+    })
+}
+
+fn is_hdt_file_path(path: &str) -> bool {
+    Path::new(path)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("hdt"))
+}
+
+async fn prepare_source_hdt_path(
+    source_file: &str,
+    entailment_mode: EntailmentMode,
+    source_hdt_cache: &mut HashMap<String, String>,
+    dir_path_vec: &mut Vec<String>,
+) -> anyhow::Result<String> {
+    if let Some(cached) = source_hdt_cache.get(source_file) {
+        return Ok(cached.clone());
+    }
+
+    let prepared = handle_files(vec![source_file.to_string()], entailment_mode).await?;
+    dir_path_vec.extend(prepared.cleanup_dirs);
+    let hdt_paths = prepared.hdt_paths;
+
+    let resolved_hdt_path = match hdt_paths.len() {
+        0 => {
+            let (dir, path) = create_empty_hdt_for_named_graph()?;
+            dir_path_vec.push(dir);
+            path
+        }
+        1 => hdt_paths[0].clone(),
+        _ => {
+            return Err(anyhow::anyhow!(
+                "multiple prepared HDT paths for source {:?}: {:?}",
+                source_file,
+                hdt_paths
+            ));
         }
     };
+
+    source_hdt_cache.insert(source_file.to_string(), resolved_hdt_path.clone());
+    Ok(resolved_hdt_path)
+}
+
+async fn handle_files(
+    files: Vec<String>,
+    entailment_mode: EntailmentMode,
+) -> anyhow::Result<PreparedQueryInputs> {
+    let mut dir_path_vec: Vec<String> = vec![]; // Paths scheduled for cleanup via QueryDirCleanup
+    let mut hdt_path_vec: Vec<String> = vec![]; // Paths to prepared/queryable HDT files
+    let tmp_dir = query_work_dir_tempdir()?;
     let t_path = tmp_dir.path(); // Getting the tempdir path.
 
     // Creating TempFile to hold the hdt contents
-    let mut rdf_tempfile: NamedTempFile = match Builder::new()
+    let mut rdf_tempfile: NamedTempFile = Builder::new()
         .suffix(".nt")
         .append(true)
         .tempfile_in(t_path)
-    {
-        Ok(tf) => tf,
-        Err(e) => {
-            return (
-                dir_path_vec,
-                hdt_path_vec,
-                Some(anyhow::anyhow!(
-                    "Failed to create temporary RDF file in {:?}: {e}",
-                    t_path
-                )),
-            );
-        }
-    };
+        .map_err(|e| anyhow::anyhow!("Failed to create temporary RDF file in {:?}: {e}", t_path))?;
 
     let mut files_to_convert = vec![];
     for f in &files {
-        if f.ends_with(".hdt") {
+        if is_hdt_file_path(f) {
             hdt_path_vec.push(f.to_string())
         } else {
             files_to_convert.push(f.to_string());
         }
     }
 
-    let (combined_rdf_path, unknown_files) = match create::files_to_rdf(
+    let (combined_rdf_path, unknown_files) = create::files_to_rdf(
         &files_to_convert,
         &mut rdf_tempfile,
         Arc::new(OxRdfConvert {}),
-    ) {
-        Ok((p, u)) => (p, u),
-        Err(e) => {
-            return (
-                dir_path_vec,
-                hdt_path_vec,
-                Some(Error::msg(format!("error processing files to RDF {e}"))),
-            );
-        }
-    };
+    )
+    .map_err(|e| Error::msg(format!("error processing files to RDF {e}")))?;
 
     for file in unknown_files.iter() {
         if !Path::new(file).exists() {
-            return (
-                dir_path_vec,
-                hdt_path_vec,
-                Some(Error::msg(format!("unable to locate local file {file}"))),
-            );
+            return Err(Error::msg(format!("unable to locate local file {file}")));
         }
-        if file.ends_with(".hdt") {
+        if is_hdt_file_path(file) {
             hdt_path_vec.push(file.to_string())
         }
         // should be able to query plain rdf files directly
         else {
-            return (
-                dir_path_vec,
-                hdt_path_vec,
-                Some(anyhow::anyhow!("unrecognized file type: {file}")),
-            );
+            return Err(anyhow::anyhow!("unrecognized file type: {file}"));
         }
     }
 
-    let meta = match std::fs::metadata(rdf_tempfile.path()) {
-        Ok(m) => m,
-        Err(e) => {
-            return (
-                dir_path_vec,
-                hdt_path_vec,
-                Some(anyhow::anyhow!(
-                    "Error getting metadata for temporary RDF file {:?}: {e}",
-                    rdf_tempfile.path()
-                )),
-            );
-        }
-    };
+    let meta = std::fs::metadata(rdf_tempfile.path()).map_err(|e| {
+        anyhow::anyhow!(
+            "Error getting metadata for temporary RDF file {:?}: {e}",
+            rdf_tempfile.path()
+        )
+    })?;
 
     let converted_rdf = if meta.len() == 0 {
         Path::new(&combined_rdf_path)
@@ -303,39 +601,43 @@ async fn handle_files(files: Vec<String>) -> (Vec<String>, Vec<String>, Option<a
         rdf_tempfile.path()
     };
 
-    if meta.len() != 0 || rdf_tempfile.path() != Path::new(&combined_rdf_path) {
+    let had_rdf_input = meta.len() != 0 || rdf_tempfile.path() != Path::new(&combined_rdf_path);
+    let mut source_for_hdt = if had_rdf_input {
+        Some(converted_rdf.to_path_buf())
+    } else {
+        None
+    };
+
+    if entailment_mode == EntailmentMode::OwlRl {
+        let entailment_source = source_for_hdt
+            .clone()
+            .unwrap_or_else(|| rdf_tempfile.path().to_path_buf());
+        source_for_hdt = Some(
+            materialize_entailment_closure_nt(&hdt_path_vec, &entailment_source, t_path)
+                .map_err(|e| anyhow::anyhow!("entailment materialization failed: {e}"))?,
+        );
+        hdt_path_vec.clear();
+    }
+
+    if let Some(source_for_hdt) = source_for_hdt {
         // Creating TempFile to hold the hdt contents
-        let named_tempfile: NamedTempFile = match Builder::new()
+        let named_tempfile: NamedTempFile = Builder::new()
             .suffix(".hdt")
             .append(true)
             .tempfile_in(t_path)
-        {
-            Ok(tf) => tf,
-            Err(e) => {
-                return (
-                    dir_path_vec,
-                    hdt_path_vec,
-                    Some(anyhow::anyhow!(
-                        "Failed to create temporary HDT file in {:?}: {e}",
-                        t_path
-                    )),
-                );
-            }
-        };
+            .map_err(|e| {
+                anyhow::anyhow!("Failed to create temporary HDT file in {:?}: {e}", t_path)
+            })?;
 
         debug!("Running RDF2HDT");
 
-        let converted_rdf_path = match converted_rdf.to_str() {
+        let converted_rdf_path = match source_for_hdt.to_str() {
             Some(path) => path,
             None => {
-                return (
-                    dir_path_vec,
-                    hdt_path_vec,
-                    Some(anyhow::anyhow!(
-                        "Temporary RDF path is not valid UTF-8: {:?}",
-                        converted_rdf
-                    )),
-                );
+                return Err(anyhow::anyhow!(
+                    "Temporary RDF path is not valid UTF-8: {:?}",
+                    source_for_hdt
+                ));
             }
         };
         let hdt_conversion = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -348,23 +650,22 @@ async fn handle_files(files: Vec<String>) -> (Vec<String>, Vec<String>, Option<a
                 match hdt_conv.write(&mut buf) {
                     Ok(_) => {}
                     Err(e) => {
-                        return (
-                            dir_path_vec,
-                            hdt_path_vec,
-                            Some(anyhow::anyhow!("failed to write converted HDT file: {e}")),
-                        );
+                        return Err(anyhow::anyhow!("failed to write converted HDT file: {e}"));
                     }
                 }
+                buf.flush().map_err(|e| {
+                    anyhow::anyhow!(
+                        "failed to flush converted HDT tempfile {:?}: {e}",
+                        named_tempfile.path()
+                    )
+                })?;
+                drop(buf);
             }
             Ok(Err(e)) => {
-                return (
-                    dir_path_vec,
-                    hdt_path_vec,
-                    Some(anyhow::anyhow!(
-                        "error converting plain RDF file {:?} to HDT: {e}",
-                        rdf_tempfile.path()
-                    )),
-                );
+                return Err(anyhow::anyhow!(
+                    "error converting plain RDF file {:?} to HDT: {e}",
+                    rdf_tempfile.path()
+                ));
             }
             Err(panic_err) => {
                 let panic_msg = if let Some(msg) = panic_err.downcast_ref::<&str>() {
@@ -374,48 +675,202 @@ async fn handle_files(files: Vec<String>) -> (Vec<String>, Vec<String>, Option<a
                 } else {
                     "unknown panic while reading RDF"
                 };
-                return (
-                    dir_path_vec,
-                    hdt_path_vec,
-                    Some(anyhow::anyhow!(
-                        "panic converting plain RDF file {:?} to HDT: {}",
-                        rdf_tempfile.path(),
-                        panic_msg
-                    )),
-                );
+                return Err(anyhow::anyhow!(
+                    "panic converting plain RDF file {:?} to HDT: {}",
+                    rdf_tempfile.path(),
+                    panic_msg
+                ));
             }
         }
-        hdt_path_vec.push(named_tempfile.path().to_string_lossy().to_string());
-        let _ = named_tempfile.keep();
-        dir_path_vec.push(t_path.to_string_lossy().to_string());
-        let _ = tmp_dir.keep();
+        let (_, persisted_hdt_path) = named_tempfile
+            .keep()
+            .map_err(|e| anyhow::anyhow!("failed to persist converted HDT tempfile: {e}"))?;
+        hdt_path_vec.push(persisted_hdt_path.to_string_lossy().to_string());
+        let persisted_tmp_dir = tmp_dir.keep();
+        dir_path_vec.push(persisted_tmp_dir.to_string_lossy().to_string());
     }
 
     if hdt_path_vec.is_empty() {
         error!("no files to query")
     }
-    (dir_path_vec, hdt_path_vec, None)
+    Ok(PreparedQueryInputs {
+        cleanup_dirs: dir_path_vec,
+        hdt_paths: hdt_path_vec,
+    })
 }
 
-// performs directory removal for a list of directories
-pub async fn file_cleanup(dirs: Vec<String>) {
-    debug!("Cleaning up environment");
-    for dir in dirs.iter() {
-        if let Err(e) = fs::remove_dir_all(dir) {
-            error!("Failed to remove directory {dir:?}: {e:?}")
-        };
+fn query_work_dir_tempdir() -> anyhow::Result<tempfile::TempDir> {
+    fn ensure_utf8_tempdir(dir: tempfile::TempDir) -> anyhow::Result<tempfile::TempDir> {
+        if dir.path().to_str().is_none() {
+            return Err(anyhow::anyhow!(
+                "Error creating temporary working dir: UTF-8 path required, got {:?}",
+                dir.path()
+            ));
+        }
+        Ok(dir)
     }
+
+    #[cfg(test)]
+    {
+        let maybe_root = TEST_TEMP_ROOT_OVERRIDE
+            .lock()
+            .map_err(|_| anyhow::anyhow!("temporary directory override lock poisoned"))?
+            .clone();
+        if let Some(root) = maybe_root {
+            let dir = tempfile::tempdir_in(root)
+                .map_err(|e| anyhow::anyhow!("Error creating temporary working dir: {:?}", e))?;
+            return ensure_utf8_tempdir(dir);
+        }
+    }
+
+    let dir =
+        tempdir().map_err(|e| anyhow::anyhow!("Error creating temporary working dir: {:?}", e))?;
+    ensure_utf8_tempdir(dir)
+}
+
+fn create_empty_hdt_for_named_graph() -> anyhow::Result<(String, String)> {
+    let tmp_dir = query_work_dir_tempdir()?;
+    let dir_path = tmp_dir
+        .path()
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("temporary working dir path is not valid UTF-8"))?
+        .to_string();
+    let empty_nt = Builder::new()
+        .suffix(".nt")
+        .append(true)
+        .tempfile_in(tmp_dir.path())?;
+    let hdt = hdt::Hdt::read_nt(empty_nt.path())
+        .map_err(|e| anyhow::anyhow!("failed to create empty HDT for named graph: {e}"))?;
+    let empty_hdt = Builder::new()
+        .suffix(".hdt")
+        .append(true)
+        .tempfile_in(tmp_dir.path())?;
+    let mut writer = BufWriter::new(&empty_hdt);
+    hdt.write(&mut writer)?;
+    writer.flush()?;
+    drop(writer);
+    let (_, persisted_hdt_path) = empty_hdt
+        .keep()
+        .map_err(|e| anyhow::anyhow!("failed to persist empty HDT tempfile: {e}"))?;
+    let empty_hdt_path = persisted_hdt_path
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("empty HDT path is not valid UTF-8"))?
+        .to_string();
+    let _persisted_tmp_dir = tmp_dir.keep();
+    Ok((dir_path, empty_hdt_path))
+}
+
+pub fn parse_named_graph_bindings(
+    raw_bindings: &[String],
+) -> anyhow::Result<Vec<NamedGraphBinding>> {
+    let mut parsed = Vec::new();
+    let mut seen = HashSet::new();
+    for raw in raw_bindings {
+        let (graph_iri_raw, data_file_raw) = raw.split_once('=').ok_or_else(|| {
+            anyhow::anyhow!("invalid --named-graph value {raw:?}; expected IRI=PATH")
+        })?;
+        let graph_iri_raw = graph_iri_raw.trim();
+        let data_file = data_file_raw.trim();
+        if graph_iri_raw.is_empty() || data_file.is_empty() {
+            return Err(anyhow::anyhow!(
+                "invalid --named-graph value {raw:?}; expected non-empty IRI and PATH"
+            ));
+        }
+        let graph_iri = NamedNode::new(graph_iri_raw)
+            .map_err(|e| anyhow::anyhow!("invalid --named-graph IRI {graph_iri_raw:?}: {e}"))?
+            .into_string();
+        let binding = NamedGraphBinding {
+            graph_iri,
+            data_file: data_file.to_string(),
+        };
+        if seen.insert((binding.graph_iri.clone(), binding.data_file.clone())) {
+            parsed.push(binding);
+        }
+    }
+    Ok(parsed)
+}
+
+fn materialize_entailment_closure_nt(
+    hdt_paths: &[String],
+    rdf_nt_path: &Path,
+    temp_dir: &Path,
+) -> anyhow::Result<PathBuf> {
+    let mut reasoner = Reasoner::new();
+    let mut triples = Vec::<Triple>::new();
+
+    for path in hdt_paths {
+        let hdt = hdt::Hdt::new_hybrid_cache(Path::new(path), true)
+            .map_err(|e| anyhow::anyhow!("failed to read HDT {path}: {e}"))?;
+        for [s, p, o] in hdt.triples_all() {
+            triples.push(hdt_raw_triple_to_oxrdf(&s, &p, &o)?);
+        }
+    }
+
+    if rdf_nt_path.exists() {
+        let parser =
+            RdfParser::from_format(RdfFormat::NTriples).for_reader(File::open(rdf_nt_path)?);
+        for quad in parser {
+            let quad = quad?;
+            triples.push(Triple::new(quad.subject, quad.predicate, quad.object));
+        }
+    }
+    reasoner.load_triples(triples);
+    reasoner.reason();
+
+    let entailed_nt = Builder::new()
+        .suffix(".entailed.nt")
+        .tempfile_in(temp_dir)?;
+    let entailed_path = entailed_nt.path().to_path_buf();
+    let mut out = BufWriter::new(&entailed_nt);
+    let mut serializer = RdfSerializer::from_format(RdfFormat::NTriples).for_writer(&mut out);
+    for triple in reasoner.view_output() {
+        serializer.serialize_triple(triple.as_ref())?;
+    }
+    serializer.finish()?;
+    drop(out);
+    let _ = entailed_nt.keep()?;
+
+    Ok(entailed_path)
+}
+
+fn hdt_raw_triple_to_oxrdf(s: &str, p: &str, o: &str) -> anyhow::Result<Triple> {
+    let subject_term = sparql::hdt_bgp_str_to_term(s)
+        .map_err(|e| anyhow::anyhow!("failed to parse HDT subject term {s:?}: {e}"))?;
+    let predicate_term = sparql::hdt_bgp_str_to_term(p)
+        .map_err(|e| anyhow::anyhow!("failed to parse HDT predicate term {p:?}: {e}"))?;
+    let object_term = sparql::hdt_bgp_str_to_term(o)
+        .map_err(|e| anyhow::anyhow!("failed to parse HDT object term {o:?}: {e}"))?;
+
+    let subject = match subject_term {
+        Term::NamedNode(node) => NamedOrBlankNode::from(node),
+        Term::BlankNode(node) => NamedOrBlankNode::from(node),
+        Term::Literal(_) => {
+            return Err(anyhow::anyhow!(
+                "invalid literal subject in HDT triple: {s:?}"
+            ));
+        }
+    };
+    let predicate = match predicate_term {
+        Term::NamedNode(node) => node,
+        _ => {
+            return Err(anyhow::anyhow!(
+                "invalid non-IRI predicate in HDT triple: {p:?}"
+            ));
+        }
+    };
+
+    Ok(Triple::new(subject, predicate, object_term))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::env;
-    use std::ffi::OsString;
+    use std::collections::HashSet;
     use std::fs;
     use std::io::{self, BufWriter, Write};
     use tempfile::tempdir;
     use tokio::sync::{Mutex, MutexGuard};
+    use url::Url;
 
     static TMPDIR_LOCK: Mutex<()> = Mutex::const_new(());
 
@@ -440,28 +895,33 @@ mod tests {
         }
     }
 
-    struct TmpDirEnvGuard(Option<OsString>);
+    struct TempRootOverrideGuard(Option<PathBuf>);
 
-    impl TmpDirEnvGuard {
-        fn new(prev_tmpdir: Option<OsString>) -> Self {
-            Self(prev_tmpdir)
+    impl TempRootOverrideGuard {
+        fn new(override_root: Option<PathBuf>) -> anyhow::Result<Self> {
+            let mut guard = TEST_TEMP_ROOT_OVERRIDE
+                .lock()
+                .map_err(|_| anyhow::anyhow!("temporary directory override lock poisoned"))?;
+            let previous = guard.clone();
+            *guard = override_root;
+            Ok(Self(previous))
         }
     }
 
-    impl Drop for TmpDirEnvGuard {
+    impl Drop for TempRootOverrideGuard {
         fn drop(&mut self) {
-            match self.0.take() {
-                Some(v) => env::set_var("TMPDIR", v),
-                None => env::remove_var("TMPDIR"),
+            if let Ok(mut guard) = TEST_TEMP_ROOT_OVERRIDE.lock() {
+                *guard = self.0.take();
             }
         }
     }
 
-    fn dir_count(path: &str) -> anyhow::Result<usize> {
+    fn dir_entries(path: &Path) -> anyhow::Result<HashSet<String>> {
         Ok(fs::read_dir(path)?
             .filter_map(|entry| entry.ok())
             .filter(|entry| entry.file_type().is_ok_and(|f| f.is_dir()))
-            .count())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect())
     }
 
     #[tokio::test]
@@ -471,9 +931,7 @@ mod tests {
         let tmp_root = work_dir.path().join("tmp");
         fs::create_dir(&tmp_root)?;
 
-        let prev_tmpdir = env::var_os("TMPDIR");
-        env::set_var("TMPDIR", &tmp_root);
-        let _tmpdir_guard = TmpDirEnvGuard::new(prev_tmpdir);
+        let _tmpdir_guard = TempRootOverrideGuard::new(Some(tmp_root.clone()))?;
 
         let data_path = work_dir.path().join("dataset.nt");
         fs::write(
@@ -484,16 +942,27 @@ mod tests {
         let query_path = work_dir.path().join("query.rq");
         fs::write(&query_path, "SELECT * WHERE { ?s ?p ?o }")?;
 
-        let before = dir_count(&tmp_root.to_string_lossy())?;
+        let before = dir_entries(&tmp_root)?;
 
         let data_files = vec![data_path.to_string_lossy().to_string()];
         let query_files = vec![query_path.to_string_lossy().to_string()];
         let mut writer = BufWriter::new(FailingWriter);
-        let res = do_query(&data_files, &query_files, &DeOutput::CSV, &mut writer).await;
+        let res = do_query(
+            &data_files,
+            &query_files,
+            EntailmentMode::Off,
+            &DeOutput::CSV,
+            &mut writer,
+        )
+        .await;
         assert!(res.is_err());
 
-        let after = dir_count(&tmp_root.to_string_lossy())?;
-        assert_eq!(before, after);
+        let after = dir_entries(&tmp_root)?;
+        let leaked = after.difference(&before).cloned().collect::<Vec<_>>();
+        assert!(
+            leaked.is_empty(),
+            "query leaked temporary directory entries: {leaked:?}"
+        );
 
         Ok(())
     }
@@ -512,12 +981,12 @@ mod tests {
             Err(e) => panic!("failed to write invalid dataset: {e}"),
         };
 
-        let (dir_path_vec, hdt_path_vec, err) =
-            handle_files(vec![invalid_nt.to_string_lossy().to_string()]).await;
-        assert!(err.is_some());
-        assert!(hdt_path_vec.is_empty());
-        assert!(dir_path_vec.is_empty());
-        let err = err.expect("handle_files should fail when RDF -> HDT conversion fails");
+        let err = handle_files(
+            vec![invalid_nt.to_string_lossy().to_string()],
+            EntailmentMode::Off,
+        )
+        .await
+        .expect_err("handle_files should fail when RDF -> HDT conversion fails");
         assert!(
             err.to_string().contains("converting plain RDF file")
                 || err.to_string().contains("Error converting file(s) to NT"),
@@ -545,9 +1014,8 @@ mod tests {
         let _ = fs::remove_dir_all(&invalid_tmp);
         fs::create_dir(&invalid_tmp).expect("failed to create non-utf8 tmp dir");
 
-        let prev_tmpdir = env::var_os("TMPDIR");
-        env::set_var("TMPDIR", &invalid_tmp);
-        let _tmpdir_guard = TmpDirEnvGuard::new(prev_tmpdir);
+        let _tmpdir_guard =
+            TempRootOverrideGuard::new(Some(invalid_tmp.clone())).expect("failed to set tmp dir");
 
         let dataset = data_dir.path().join("dataset.nt");
         fs::write(
@@ -559,15 +1027,336 @@ mod tests {
         let files = vec![dataset.to_string_lossy().to_string()];
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
-            rt.block_on(handle_files(files))
+            rt.block_on(handle_files(files, EntailmentMode::Off))
         }));
 
         assert!(result.is_ok(), "handle_files should not panic");
-        let (_dir_paths, _hdt_paths, err) = result.expect("handle_files panicked");
-        let err = err.expect("non-utf8 temporary path should become an error");
+        let err = result
+            .expect("handle_files panicked")
+            .expect_err("non-utf8 temporary path should become an error");
         assert!(
             err.to_string().contains("UTF-8"),
             "Expected UTF-8 related temporary path error"
         );
+    }
+
+    #[tokio::test]
+    async fn test_named_graph_binding_does_not_mutate_hdt_file() -> anyhow::Result<()> {
+        let _tmpdir_lock = lock_tmpdir_async().await;
+        let work_dir = tempdir()?;
+        let data_path = work_dir.path().join("dataset.nt");
+        fs::write(
+            &data_path,
+            "<http://example.org/s> <http://example.org/p> <http://example.org/o> .\n",
+        )?;
+        let hdt_path = work_dir.path().join("dataset.hdt");
+        create::do_create(
+            hdt_path
+                .to_str()
+                .ok_or_else(|| anyhow::anyhow!("invalid HDT path"))?,
+            &[data_path.to_string_lossy().to_string()],
+        )?;
+
+        let query_path = work_dir.path().join("query.rq");
+        fs::write(
+            &query_path,
+            "SELECT ?s WHERE { GRAPH <http://example.org/g> { ?s ?p ?o } }",
+        )?;
+
+        let before = fs::read(&hdt_path)?;
+        let named_bindings = vec![NamedGraphBinding {
+            graph_iri: "http://example.org/g".to_string(),
+            data_file: hdt_path.to_string_lossy().to_string(),
+        }];
+        let mut output = Vec::new();
+        {
+            let mut writer = BufWriter::new(&mut output);
+            do_query_with_dataset(
+                &[],
+                &named_bindings,
+                &[query_path.to_string_lossy().to_string()],
+                EntailmentMode::Off,
+                &DeOutput::CSV,
+                &mut writer,
+            )
+            .await?;
+        }
+        let after = fs::read(&hdt_path)?;
+        assert_eq!(before, after, "query should not mutate input HDT files");
+
+        let rendered = String::from_utf8(output)?;
+        assert!(rendered.contains("http://example.org/s"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_entailment_mode_applies_to_hdt_only_inputs() -> anyhow::Result<()> {
+        let _tmpdir_lock = lock_tmpdir_async().await;
+        let work_dir = tempdir()?;
+        let data_path = work_dir.path().join("dataset.nt");
+        fs::write(
+            &data_path,
+            "<http://ex/a> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://ex/B> .\n\
+             <http://ex/B> <http://www.w3.org/2000/01/rdf-schema#subClassOf> <http://ex/C> .\n",
+        )?;
+        let hdt_path = work_dir.path().join("dataset.hdt");
+        create::do_create(
+            hdt_path
+                .to_str()
+                .ok_or_else(|| anyhow::anyhow!("invalid HDT path"))?,
+            &[data_path.to_string_lossy().to_string()],
+        )?;
+
+        let query_path = work_dir.path().join("query.rq");
+        fs::write(
+            &query_path,
+            "SELECT ?o WHERE { <http://ex/a> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> ?o }",
+        )?;
+        let data_files = vec![hdt_path.to_string_lossy().to_string()];
+        let query_files = vec![query_path.to_string_lossy().to_string()];
+
+        let mut off_out = Vec::new();
+        {
+            let mut writer = BufWriter::new(&mut off_out);
+            do_query(
+                &data_files,
+                &query_files,
+                EntailmentMode::Off,
+                &DeOutput::CSV,
+                &mut writer,
+            )
+            .await?;
+        }
+
+        let mut on_out = Vec::new();
+        {
+            let mut writer = BufWriter::new(&mut on_out);
+            do_query(
+                &data_files,
+                &query_files,
+                EntailmentMode::OwlRl,
+                &DeOutput::CSV,
+                &mut writer,
+            )
+            .await?;
+        }
+
+        let off = String::from_utf8(off_out)?;
+        let on = String::from_utf8(on_out)?;
+        assert!(off.contains("http://ex/B"));
+        assert!(!off.contains("http://ex/C"));
+        assert!(on.contains("http://ex/C"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_duplicate_graph_iri_metadata_in_data_files_errors() -> anyhow::Result<()> {
+        let _tmpdir_lock = lock_tmpdir_async().await;
+        let work_dir = tempdir()?;
+        let a_nt = work_dir.path().join("a.nt");
+        let b_nt = work_dir.path().join("b.nt");
+        fs::write(&a_nt, "<http://ex/s1> <http://ex/p> <http://ex/o1> .\n")?;
+        fs::write(&b_nt, "<http://ex/s2> <http://ex/p> <http://ex/o2> .\n")?;
+
+        let a_hdt = work_dir.path().join("a.hdt");
+        let b_hdt = work_dir.path().join("b.hdt");
+        create::do_create_with_options(
+            a_hdt
+                .to_str()
+                .ok_or_else(|| anyhow::anyhow!("invalid HDT path"))?,
+            &[a_nt.to_string_lossy().to_string()],
+            false,
+            Some("http://ex/g"),
+        )?;
+        create::do_create_with_options(
+            b_hdt
+                .to_str()
+                .ok_or_else(|| anyhow::anyhow!("invalid HDT path"))?,
+            &[b_nt.to_string_lossy().to_string()],
+            false,
+            Some("http://ex/g"),
+        )?;
+
+        let query_path = work_dir.path().join("query.rq");
+        fs::write(&query_path, "SELECT ?s WHERE { ?s <http://ex/p> ?o }")?;
+        let data_files = vec![
+            a_hdt.to_string_lossy().to_string(),
+            b_hdt.to_string_lossy().to_string(),
+        ];
+        let query_files = vec![query_path.to_string_lossy().to_string()];
+
+        let mut out = Vec::new();
+        let mut writer = BufWriter::new(&mut out);
+        let result = do_query(
+            &data_files,
+            &query_files,
+            EntailmentMode::Off,
+            &DeOutput::CSV,
+            &mut writer,
+        )
+        .await;
+        assert!(result.is_err());
+        let msg = result
+            .expect_err("expected duplicate graph IRI error")
+            .to_string();
+        assert!(msg.contains("duplicate graph IRI"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_graph_optional_query_filters_rows_when_graph_variable_is_reused_in_optional()
+    -> anyhow::Result<()> {
+        let _tmpdir_lock = lock_tmpdir_async().await;
+        let work_dir = tempdir()?;
+        let data_path = work_dir.path().join("dataset.nt");
+        fs::write(&data_path, "<http://ex/s> <http://ex/p> <http://ex/o> .\n")?;
+
+        let query_path = work_dir.path().join("query.rq");
+        fs::write(
+            &query_path,
+            "SELECT ?g ?o WHERE { GRAPH ?g { ?s <http://ex/p> ?o OPTIONAL { ?s <http://ex/p> ?g } } }",
+        )?;
+
+        let named_bindings = vec![NamedGraphBinding {
+            graph_iri: "http://ex/g1".to_string(),
+            data_file: data_path.to_string_lossy().to_string(),
+        }];
+        let mut output = Vec::new();
+        {
+            let mut writer = BufWriter::new(&mut output);
+            do_query_with_dataset(
+                &[],
+                &named_bindings,
+                &[query_path.to_string_lossy().to_string()],
+                EntailmentMode::Off,
+                &DeOutput::CSV,
+                &mut writer,
+            )
+            .await?;
+        }
+        let rendered = String::from_utf8(output)?;
+        let lines = rendered
+            .lines()
+            .map(|line| line.trim_end_matches('\r'))
+            .collect::<Vec<_>>();
+        assert_eq!(lines, vec!["g,o"]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_named_graph_bindings_rejects_invalid_iri() {
+        let err = parse_named_graph_bindings(&["not an iri=tests/resources/fruit.nt".to_string()])
+            .expect_err("expected invalid IRI");
+        assert!(
+            err.to_string().contains("invalid --named-graph IRI"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_parse_named_graph_bindings_deduplicates_exact_entries() -> anyhow::Result<()> {
+        let parsed = parse_named_graph_bindings(&[
+            "http://example.org/g=tests/resources/fruit.nt".to_string(),
+            "http://example.org/g=tests/resources/fruit.nt".to_string(),
+        ])?;
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].graph_iri, "http://example.org/g");
+        assert_eq!(parsed[0].data_file, "tests/resources/fruit.nt");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_from_default_graph_is_not_exposed_as_named_graph() -> anyhow::Result<()> {
+        let _tmpdir_lock = lock_tmpdir_async().await;
+        let work_dir = tempdir()?;
+        let data_path = work_dir.path().join("dataset.nt");
+        fs::write(&data_path, "<http://ex/s> <http://ex/p> <http://ex/o> .\n")?;
+
+        let data_uri = Url::from_file_path(&data_path)
+            .map_err(|_| anyhow::anyhow!("failed to build file URI for test dataset"))?
+            .to_string();
+
+        let query_path = work_dir.path().join("query.rq");
+        fs::write(
+            &query_path,
+            format!("SELECT ?g FROM <{data_uri}> WHERE {{ GRAPH ?g {{ ?s ?p ?o }} }}"),
+        )?;
+
+        let mut output = Vec::new();
+        {
+            let mut writer = BufWriter::new(&mut output);
+            do_query(
+                &[],
+                &[query_path.to_string_lossy().to_string()],
+                EntailmentMode::Off,
+                &DeOutput::CSV,
+                &mut writer,
+            )
+            .await?;
+        }
+
+        let rendered = String::from_utf8(output)?;
+        let lines = rendered
+            .lines()
+            .map(|line| line.trim_end_matches('\r'))
+            .collect::<Vec<_>>();
+        assert_eq!(lines, vec!["g"]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_from_and_from_named_same_file_do_not_conflict() -> anyhow::Result<()> {
+        let _tmpdir_lock = lock_tmpdir_async().await;
+        let work_dir = tempdir()?;
+        let data_path = work_dir.path().join("dataset.nt");
+        fs::write(&data_path, "<http://ex/s> <http://ex/p> <http://ex/o> .\n")?;
+
+        let data_uri = Url::from_file_path(&data_path)
+            .map_err(|_| anyhow::anyhow!("failed to build file URI for test dataset"))?
+            .to_string();
+
+        let query_path = work_dir.path().join("query.rq");
+        fs::write(
+            &query_path,
+            format!(
+                "SELECT ?s FROM <{data_uri}> FROM NAMED <{data_uri}> \
+                 WHERE {{ {{ ?s ?p ?o }} UNION {{ GRAPH ?g {{ ?s ?p ?o }} }} }}"
+            ),
+        )?;
+
+        let mut output = Vec::new();
+        {
+            let mut writer = BufWriter::new(&mut output);
+            do_query(
+                &[],
+                &[query_path.to_string_lossy().to_string()],
+                EntailmentMode::Off,
+                &DeOutput::CSV,
+                &mut writer,
+            )
+            .await?;
+        }
+
+        let rendered = String::from_utf8(output)?;
+        assert!(rendered.starts_with("s"), "unexpected output: {rendered}");
+        Ok(())
+    }
+
+    #[test]
+    fn test_file_uri_to_local_path_decodes_percent_escaped_paths() -> anyhow::Result<()> {
+        let work_dir = tempdir()?;
+        let path_with_space = work_dir.path().join("with space.nt");
+        fs::write(
+            &path_with_space,
+            "<http://example.org/s> <http://example.org/p> <http://example.org/o> .\n",
+        )?;
+        let uri = Url::from_file_path(&path_with_space)
+            .map_err(|_| anyhow::anyhow!("failed to build file URI"))?
+            .to_string();
+
+        let resolved = file_uri_to_local_path(&uri)
+            .ok_or_else(|| anyhow::anyhow!("file URI should resolve to local path"))?;
+        assert_eq!(resolved, path_with_space);
+        Ok(())
     }
 }

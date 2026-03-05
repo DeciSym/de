@@ -1,7 +1,11 @@
 // Copyright (c) 2025, Decisym, LLC
 // Licensed under the BSD 3-Clause License (see LICENSE file in the project root).
 
+use std::path::Path;
+
 pub mod create;
+mod graph_iri;
+mod hdt_meta;
 pub mod query;
 pub mod rdf2nt;
 #[cfg(feature = "server")]
@@ -10,3 +14,7 @@ pub mod serve;
 pub mod service_description;
 pub mod sparql;
 pub mod view;
+
+pub fn file_graph_uri_for_path(path: &Path) -> anyhow::Result<String> {
+    graph_iri::file_graph_uri_for_path(path)
+}
