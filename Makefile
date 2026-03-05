@@ -1,4 +1,3 @@
-
 HUB ?= decisym
 TAG ?= latest
 VERSION ?= 0.0.0-test
@@ -6,7 +5,7 @@ VERSION ?= 0.0.0-test
 init:
 	scripts/download-sample-bench.sh
 	cargo install cargo-deb cargo-machete
-	
+
 lint:
 	cargo install cargo-deb cargo-machete
 	cargo fmt --check

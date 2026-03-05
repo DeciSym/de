@@ -76,6 +76,7 @@ impl ResolvedGraphPath {
     }
 
     /// Returns the canonicalized HDT path.
+    #[cfg(feature = "server")]
     pub(crate) fn canonical_path(&self) -> &Path {
         &self.canonical_path
     }

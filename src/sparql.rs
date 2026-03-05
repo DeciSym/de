@@ -29,7 +29,7 @@ fn lock_write_file_paths<'a>(
         .map_err(|e| anyhow::anyhow!("{context}: poisoned lock: {e}"))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "server"))]
 fn graph_uri_for_path(path: &Path) -> anyhow::Result<String> {
     resolve_hdt_graph_path(path).map(|resolved| resolved.into_parts().0)
 }
