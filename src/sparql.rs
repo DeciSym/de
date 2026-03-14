@@ -1,10 +1,12 @@
 use crate::graph_iri::{insert_graph_mapping, resolve_hdt_graph_path, resolve_named_graph_path};
+use sparesults::{QueryResultsFormat, QueryResultsSerializer};
 use spareval::{InternalQuad, QueryEvaluationError, QueryEvaluator, QueryableDataset};
 use spargebra::term::{BlankNode, NamedNode, Term};
 use spargebra::{Query, SparqlParser};
 use std::{
     collections::{HashMap, HashSet},
     io::{Error, ErrorKind},
+    iter,
     path::{Path, PathBuf},
     str::FromStr,
     sync::{Arc, RwLock},
@@ -53,6 +55,14 @@ pub struct AggregateHdtSnapshot {
     pub default_graphs: Option<HashSet<String>>,
     // Optional explicit named graph membership. If None, all loaded graphs are named.
     pub named_graphs: Option<HashSet<String>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PatternQuad {
+    pub subject: String,
+    pub predicate: String,
+    pub object: String,
+    pub graph_name: Option<String>,
 }
 
 impl AggregateHdt {
@@ -282,18 +292,134 @@ struct StreamingInternalQuadIter<'a> {
 
 type StreamingInternalQuadIterator<'a> =
     Box<dyn Iterator<Item = Result<InternalQuad<Arc<str>>, Error>> + 'a>;
+type StringTriple = [Arc<str>; 3];
 
 fn scoped_blank_node(term: Arc<str>, graph_name: &Arc<str>) -> Arc<str> {
     if !term.starts_with("_:") {
         return term;
     }
+    let graph_hex = graph_name_hex(graph_name);
+    let original = &term[2..];
+    Arc::from(format!("_:g{graph_hex}_{original}"))
+}
+
+fn graph_name_hex(graph_name: &Arc<str>) -> String {
     let mut graph_hex = String::with_capacity(graph_name.len() * 2);
     for b in graph_name.as_bytes() {
         use std::fmt::Write as _;
         let _ = write!(&mut graph_hex, "{b:02x}");
     }
-    let original = &term[2..];
-    Arc::from(format!("_:g{graph_hex}_{original}"))
+    graph_hex
+}
+
+fn unscoped_pattern_term(term: &Arc<str>, graph_name: &Arc<str>) -> Option<Arc<str>> {
+    if !term.starts_with("_:g") {
+        return Some(term.clone());
+    }
+    let prefix = format!("_:g{}_", graph_name_hex(graph_name));
+    let original = term.strip_prefix(&prefix)?;
+    Some(Arc::from(format!("_:{original}")))
+}
+
+fn indexed_triples_with_pattern<'a>(
+    hdt: &'a hdt::hdt::HdtHybrid,
+    subject: Option<Arc<str>>,
+    predicate: Option<Arc<str>>,
+    object: Option<Arc<str>>,
+) -> Box<dyn Iterator<Item = StringTriple> + 'a> {
+    use hdt::IdKind;
+    use hdt::triples::{ObjectIter, PredicateIter, PredicateObjectIter, SubjectIter};
+
+    let pattern: [Option<(Arc<str>, usize)>; 3] = [
+        subject.as_ref().map(|term| {
+            (
+                term.clone(),
+                hdt.dict.string_to_id(term.as_ref(), IdKind::Subject),
+            )
+        }),
+        predicate.as_ref().map(|term| {
+            (
+                term.clone(),
+                hdt.dict.string_to_id(term.as_ref(), IdKind::Predicate),
+            )
+        }),
+        object.as_ref().map(|term| {
+            (
+                term.clone(),
+                hdt.dict.string_to_id(term.as_ref(), IdKind::Object),
+            )
+        }),
+    ];
+
+    if pattern.iter().flatten().any(|entry| entry.1 == 0) {
+        return Box::new(iter::empty());
+    }
+
+    match pattern {
+        [Some(s), Some(p), Some(o)] => {
+            if SubjectIter::with_pattern(&hdt.triples, [s.1, p.1, o.1])
+                .next()
+                .is_some()
+            {
+                Box::new(iter::once([s.0, p.0, o.0]))
+            } else {
+                Box::new(iter::empty())
+            }
+        }
+        [Some(s), Some(p), None] => Box::new(
+            SubjectIter::with_pattern(&hdt.triples, [s.1, p.1, 0]).map(move |triple| {
+                [
+                    s.0.clone(),
+                    p.0.clone(),
+                    Arc::from(hdt.dict.id_to_string(triple[2], IdKind::Object).unwrap()),
+                ]
+            }),
+        ),
+        [Some(s), None, Some(o)] => Box::new(
+            SubjectIter::with_pattern(&hdt.triples, [s.1, 0, o.1]).map(move |triple| {
+                [
+                    s.0.clone(),
+                    Arc::from(hdt.dict.id_to_string(triple[1], IdKind::Predicate).unwrap()),
+                    o.0.clone(),
+                ]
+            }),
+        ),
+        [Some(s), None, None] => Box::new(
+            SubjectIter::with_pattern(&hdt.triples, [s.1, 0, 0]).map(move |triple| {
+                [
+                    s.0.clone(),
+                    Arc::from(hdt.dict.id_to_string(triple[1], IdKind::Predicate).unwrap()),
+                    Arc::from(hdt.dict.id_to_string(triple[2], IdKind::Object).unwrap()),
+                ]
+            }),
+        ),
+        [None, Some(p), Some(o)] => Box::new(PredicateObjectIter::new(&hdt.triples, p.1, o.1).map(
+            move |subject_id| {
+                [
+                    Arc::from(hdt.dict.id_to_string(subject_id, IdKind::Subject).unwrap()),
+                    p.0.clone(),
+                    o.0.clone(),
+                ]
+            },
+        )),
+        [None, Some(p), None] => {
+            Box::new(PredicateIter::new(&hdt.triples, p.1).map(move |triple| {
+                [
+                    Arc::from(hdt.dict.id_to_string(triple[0], IdKind::Subject).unwrap()),
+                    p.0.clone(),
+                    Arc::from(hdt.dict.id_to_string(triple[2], IdKind::Object).unwrap()),
+                ]
+            }))
+        }
+        [None, None, Some(o)] => Box::new(ObjectIter::new(&hdt.triples, o.1).map(move |triple| {
+            [
+                Arc::from(hdt.dict.id_to_string(triple[0], IdKind::Subject).unwrap()),
+                Arc::from(hdt.dict.id_to_string(triple[1], IdKind::Predicate).unwrap()),
+                o.0.clone(),
+            ]
+        })),
+        [None, None, None] => Box::new(hdt.triples_all()),
+    }
 }
 
 impl<'a> StreamingInternalQuadIter<'a> {
@@ -302,24 +428,31 @@ impl<'a> StreamingInternalQuadIter<'a> {
             let (graph_name, hdt) = self.graphs[self.current_graph];
             self.current_graph += 1;
             let graph_name: Arc<str> = Arc::from(graph_name.as_str());
-            let subject_filter = self.subject.clone();
-            let predicate_filter = self.predicate.clone();
-            let object_filter = self.object.clone();
+            let subject_filter = match self.subject.as_ref() {
+                Some(term) => match unscoped_pattern_term(term, &graph_name) {
+                    Some(term) => Some(term),
+                    None => continue,
+                },
+                None => None,
+            };
+            let predicate_filter = match self.predicate.as_ref() {
+                Some(term) => match unscoped_pattern_term(term, &graph_name) {
+                    Some(term) => Some(term),
+                    None => continue,
+                },
+                None => None,
+            };
+            let object_filter = match self.object.as_ref() {
+                Some(term) => match unscoped_pattern_term(term, &graph_name) {
+                    Some(term) => Some(term),
+                    None => continue,
+                },
+                None => None,
+            };
             let emit_default_graph = self.emit_default_graph;
 
             self.current_iter = Some(Box::new(
-                hdt.triples_all()
-                    .filter(move |[subject, predicate, object]| {
-                        subject_filter
-                            .as_ref()
-                            .is_none_or(|s| s.as_ref() == subject.as_ref())
-                            && predicate_filter
-                                .as_ref()
-                                .is_none_or(|p| p.as_ref() == predicate.as_ref())
-                            && object_filter
-                                .as_ref()
-                                .is_none_or(|o| o.as_ref() == object.as_ref())
-                    })
+                indexed_triples_with_pattern(hdt, subject_filter, predicate_filter, object_filter)
                     .map(move |[subject, predicate, object]| {
                         let output_graph_name = if emit_default_graph {
                             None
@@ -484,6 +617,63 @@ pub fn query_with_debug_plan<'a>(
     evaluate_query_with_debug_plan(parsed, hdt, debug_plan)
 }
 
+pub fn query_select_tsv_with_debug_plan(
+    q: &str,
+    hdt: &AggregateHdtSnapshot,
+    base_iri: Option<String>,
+    debug_plan: bool,
+) -> anyhow::Result<Vec<u8>> {
+    let results = query_with_debug_plan(q, hdt, base_iri, debug_plan)
+        .map_err(|e| anyhow::anyhow!("problem executing the hdt query: {e}"))?;
+    let spareval::QueryResults::Solutions(query_solution_iter) = results else {
+        return Err(anyhow::anyhow!(
+            "expected SELECT query results while serializing TSV"
+        ));
+    };
+    let mut output = Vec::new();
+    let results_writer = QueryResultsSerializer::from_format(QueryResultsFormat::Tsv);
+    let mut serializer = results_writer
+        .serialize_solutions_to_writer(&mut output, query_solution_iter.variables().into())?;
+    for solution in query_solution_iter {
+        serializer.serialize(&solution?)?;
+    }
+    serializer.finish()?;
+    Ok(output)
+}
+
+pub fn quads_for_pattern_strings(
+    hdt: &AggregateHdtSnapshot,
+    subject: Option<&str>,
+    predicate: Option<&str>,
+    object: Option<&str>,
+    graph_name: Option<Option<&str>>,
+) -> anyhow::Result<Vec<PatternQuad>> {
+    use spareval::QueryableDataset;
+
+    let subject = subject.map(Arc::<str>::from);
+    let predicate = predicate.map(Arc::<str>::from);
+    let object = object.map(Arc::<str>::from);
+    let graph_name = graph_name.map(|value| value.map(Arc::<str>::from));
+    let graph_name_ref = graph_name.as_ref().map(|value| value.as_ref());
+
+    let mut quads = Vec::new();
+    for quad in hdt.internal_quads_for_pattern(
+        subject.as_ref(),
+        predicate.as_ref(),
+        object.as_ref(),
+        graph_name_ref,
+    ) {
+        let quad = quad?;
+        quads.push(PatternQuad {
+            subject: quad.subject.to_string(),
+            predicate: quad.predicate.to_string(),
+            object: quad.object.to_string(),
+            graph_name: quad.graph_name.map(|value| value.to_string()),
+        });
+    }
+    Ok(quads)
+}
+
 fn evaluate_query_with_debug_plan<'a>(
     parsed: Query,
     hdt: &'a AggregateHdtSnapshot,
@@ -507,10 +697,14 @@ fn evaluate_query_with_debug_plan<'a>(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     #[cfg(feature = "server")]
     use super::*;
     #[cfg(not(feature = "server"))]
-    use super::{AggregateHdtSnapshot, QueryEvaluationError, query};
+    use super::{
+        AggregateHdtSnapshot, QueryEvaluationError, query, scoped_blank_node, unscoped_pattern_term,
+    };
     #[cfg(feature = "server")]
     use spareval::QueryableDataset;
 
@@ -862,5 +1056,25 @@ mod tests {
         } else {
             panic!("expected unexpected parser error");
         }
+    }
+
+    #[test]
+    fn test_scoped_blank_node_round_trips_for_same_graph() {
+        let graph_name: Arc<str> = Arc::from("file:///tmp/example.hdt");
+        let scoped = scoped_blank_node(Arc::from("_:b0"), &graph_name);
+        let unscoped = unscoped_pattern_term(&scoped, &graph_name)
+            .expect("scoped blank node should round-trip");
+        assert_eq!(unscoped.as_ref(), "_:b0");
+    }
+
+    #[test]
+    fn test_scoped_blank_node_does_not_match_other_graph() {
+        let graph_a: Arc<str> = Arc::from("file:///tmp/a.hdt");
+        let graph_b: Arc<str> = Arc::from("file:///tmp/b.hdt");
+        let scoped = scoped_blank_node(Arc::from("_:b0"), &graph_a);
+        assert!(
+            unscoped_pattern_term(&scoped, &graph_b).is_none(),
+            "scoped blank nodes should stay graph-local"
+        );
     }
 }
