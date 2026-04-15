@@ -104,7 +104,7 @@ impl AggregateHdt {
             .map(
                 |(graph_name, path)| -> anyhow::Result<(String, hdt::hdt::HdtHybrid)> {
                     // let mut reader = BufReader::new(std::fs::File::open(path)?);
-                    let hdt = hdt::Hdt::new_hybrid_cache(path, true).map_err(|e| {
+                    let hdt = hdt::Hdt::new_hybrid_cache(path).map_err(|e| {
                         anyhow::anyhow!("Failed to load HDT from {:?}: {}", path, e)
                     })?;
                     Ok((graph_name.clone(), hdt))
