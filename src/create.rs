@@ -177,7 +177,7 @@ pub fn files_to_rdf(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::enrich::Enricher;
+    use crate::enrich::{EnrichResult, Enricher};
     use oxrdf::{NamedNode, Triple};
     use tempfile::Builder;
 
@@ -188,11 +188,7 @@ mod tests {
             vec!["mock"]
         }
 
-        fn enrich(
-            &self,
-            _file_path: &str,
-            _pkg_id: &NamedNode,
-        ) -> Result<Vec<Triple>, Box<dyn std::error::Error>> {
+        fn enrich(&self, _file_path: &str, _pkg_id: &NamedNode) -> EnrichResult<Vec<Triple>> {
             Ok(vec![Triple::new(
                 NamedNode::new("http://example.org/mock-subject")?,
                 NamedNode::new("http://example.org/type")?,
