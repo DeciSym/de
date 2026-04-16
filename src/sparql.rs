@@ -334,7 +334,7 @@ impl AggregateHdt {
         let mut result = Vec::new();
         for (graph_name, path) in file_paths.iter() {
             // Create HDT instance for this file
-            if let Ok(hdt) = hdt::hdt::Hdt::new_hybrid_cache(path, true) {
+            if let Ok(hdt) = hdt::hdt::Hdt::new_hybrid_cache(path) {
                 for triple in hdt.triples_all() {
                     result.push((graph_name.clone(), triple));
                 }
