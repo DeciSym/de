@@ -5,6 +5,7 @@ use crate::enrich::{EnrichCtx, EnrichOutcome, EnrichResult, Enricher};
 use crate::rdf2nt::ConvertResult;
 use crate::rdf2nt::OxRdfConvert;
 use crate::rdf2nt::Rdf2Nt;
+use anyhow::Context;
 use log::*;
 use oxrdf::NamedNode;
 use std::fs::{self, File, OpenOptions};
@@ -22,6 +23,7 @@ use tempfile::{Builder, NamedTempFile};
 /// `files_to_rdf` is awaited from a multi-threaded Tokio runtime.
 pub type FileIdFn<'a> = &'a (dyn Fn(&str) -> EnrichResult<NamedNode> + Send + Sync);
 
+#[derive(Debug)]
 pub struct FilesToRdfResult {
     pub rdf_path: String,
     pub unhandled_files: Vec<String>,
@@ -129,8 +131,8 @@ pub async fn files_to_rdf(
 
         if let Some(enricher) = matched_enricher {
             debug!("Enriching file: {file}");
-            let file_id = file_id_fn(file)
-                .map_err(|e| anyhow::anyhow!("Error computing file id for {file}: {e}"))?;
+            let file_id =
+                file_id_fn(file).with_context(|| format!("error computing file id for {file}"))?;
             let ctx = EnrichCtx {
                 file_path: file,
                 file_id: &file_id,
@@ -139,7 +141,7 @@ pub async fn files_to_rdf(
             let outcome = enricher
                 .enrich(&ctx)
                 .await
-                .map_err(|e| anyhow::anyhow!("Error enriching file {file}: {e}"))?;
+                .with_context(|| format!("error enriching file {file}"))?;
             match outcome {
                 EnrichOutcome::Declined => {
                     debug!("Enricher declined {file}, routing to converter");
@@ -147,8 +149,8 @@ pub async fn files_to_rdf(
                 }
                 EnrichOutcome::Triples(triples) => {
                     for triple in &triples {
-                        writeln!(out_file, "{triple} .").map_err(|e| {
-                            anyhow::anyhow!("Error writing enriched triples for {file}: {e}")
+                        writeln!(out_file, "{triple} .").with_context(|| {
+                            format!("error writing enriched triples for {file}")
                         })?;
                     }
                     enriched_sources.push(file.clone());
@@ -167,7 +169,7 @@ pub async fn files_to_rdf(
     let conv_res = if !files_to_convert.is_empty() {
         let r = converter
             .convert_to_nt(files_to_convert, out_file.as_file())
-            .map_err(|e| anyhow::anyhow!("Error converting file(s) to NT: {e}"))?;
+            .context("error converting file(s) to NT")?;
         unrecognized_files.extend(r.unhandled.clone());
         r
     } else {
@@ -178,12 +180,12 @@ pub async fn files_to_rdf(
     // inefficient when creating an HDT file from one large file
     if nt_files.len() > 1 || conv_res.converted != 0 || !enriched_sources.is_empty() {
         for nt_file in nt_files {
-            let source = File::open(&nt_file)
-                .map_err(|e| anyhow::anyhow!("Error opening file {:?}: {:?}", nt_file, e))?;
+            let source =
+                File::open(&nt_file).with_context(|| format!("error opening file {nt_file:?}"))?;
             let mut source_reader = BufReader::new(source);
 
             copy(&mut source_reader, out_file)
-                .map_err(|e| anyhow::anyhow!("Error copying file {:?}: {:?}", &nt_file, e))?;
+                .with_context(|| format!("error copying file {nt_file:?}"))?;
         }
     } else if nt_files.len() == 1 && conv_res.converted == 0 {
         return Ok(FilesToRdfResult {
@@ -207,7 +209,7 @@ pub async fn files_to_rdf(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::enrich::{EnrichCtx, EnrichOutcome, EnrichResult, Enricher};
+    use crate::enrich::{EnrichCtx, EnrichError, EnrichOutcome, EnrichResult, Enricher};
     use async_trait::async_trait;
     use oxrdf::{NamedNode, Triple};
     use tempfile::Builder;
@@ -381,6 +383,64 @@ mod tests {
         async fn enrich(&self, _ctx: &EnrichCtx<'_>) -> EnrichResult<EnrichOutcome> {
             Ok(EnrichOutcome::Declined)
         }
+    }
+
+    struct FailingParseEnricher;
+
+    #[async_trait]
+    impl Enricher for FailingParseEnricher {
+        fn supported_extensions(&self) -> Vec<&str> {
+            vec!["mock"]
+        }
+
+        async fn enrich(&self, ctx: &EnrichCtx<'_>) -> EnrichResult<EnrichOutcome> {
+            Err(EnrichError::parse(ctx.file_path, "synthetic parse failure"))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_files_to_rdf_preserves_enricher_error_source_chain() {
+        // Regression test for the stringification anti-pattern. The dispatcher
+        // must wrap `EnrichError` as the *source* of the returned
+        // `anyhow::Error` (not flatten it into the message), so callers can
+        // downcast to recover the typed variant.
+        let tmp = Builder::new().suffix(".mock").tempfile().unwrap();
+        let mock_path = tmp.path().to_str().unwrap().to_string();
+
+        let mut out_file = Builder::new()
+            .suffix(".nt")
+            .append(true)
+            .tempfile()
+            .unwrap();
+        let enrichers: Vec<Box<dyn Enricher>> = vec![Box::new(FailingParseEnricher)];
+        let file_id_fn: FileIdFn = &test_file_id;
+
+        let err = files_to_rdf(
+            std::slice::from_ref(&mock_path),
+            &mut out_file,
+            Arc::new(OxRdfConvert {}),
+            &enrichers,
+            None,
+            file_id_fn,
+        )
+        .await
+        .expect_err("FailingParseEnricher should propagate an error");
+
+        // The outer anyhow context must mention the file path.
+        assert!(
+            err.to_string().contains(&mock_path),
+            "context message missing file path: {err}"
+        );
+
+        // Crucial: the underlying EnrichError must be reachable via downcast.
+        let source = err
+            .chain()
+            .find_map(|e| e.downcast_ref::<EnrichError>())
+            .expect("EnrichError must survive as a source, not be stringified");
+        assert!(
+            matches!(source, EnrichError::Parse { .. }),
+            "expected EnrichError::Parse variant, got {source:?}"
+        );
     }
 
     #[tokio::test]
