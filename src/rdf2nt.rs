@@ -43,8 +43,11 @@ fn format_path_for(file: &Path) -> PathBuf {
 }
 
 /// Trait for different RDF libraries to implement for converting a list of files into NTriple RDF
-/// returns stats on converted data via ConvertResult
-pub trait Rdf2Nt {
+/// returns stats on converted data via ConvertResult.
+///
+/// `Send + Sync` bounds let `Arc<dyn Rdf2Nt>` live across await points inside
+/// the async `files_to_rdf` dispatcher.
+pub trait Rdf2Nt: Send + Sync {
     fn convert_to_nt(
         &self,
         file_paths: Vec<String>,
@@ -164,10 +167,8 @@ mod tests {
         enc.finish()?;
 
         let out = tempfile::Builder::new().suffix(".nt").tempfile()?;
-        let res = OxRdfConvert {}.convert_to_nt(
-            vec![gz_path.to_string_lossy().into_owned()],
-            &out.reopen()?,
-        )?;
+        let res = OxRdfConvert {}
+            .convert_to_nt(vec![gz_path.to_string_lossy().into_owned()], &out.reopen()?)?;
         assert_eq!(res.converted, 1);
         assert!(res.unhandled.is_empty());
         assert_eq!(count_triples_in(&out), APPLE_TRIPLES);
@@ -185,10 +186,8 @@ mod tests {
         enc.finish()?;
 
         let out = tempfile::Builder::new().suffix(".nt").tempfile()?;
-        let res = OxRdfConvert {}.convert_to_nt(
-            vec![bz_path.to_string_lossy().into_owned()],
-            &out.reopen()?,
-        )?;
+        let res = OxRdfConvert {}
+            .convert_to_nt(vec![bz_path.to_string_lossy().into_owned()], &out.reopen()?)?;
         assert_eq!(res.converted, 1);
         assert!(res.unhandled.is_empty());
         assert_eq!(count_triples_in(&out), APPLE_TRIPLES);

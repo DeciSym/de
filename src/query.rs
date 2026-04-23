@@ -217,13 +217,19 @@ async fn handle_files(files: Vec<String>) -> (Vec<String>, Vec<String>, Option<a
         }
     }
 
+    // No enrichers are wired in this path, so the file_id closure is never
+    // invoked. A panic closure documents that expectation at the type level.
+    let file_id_fn: create::FileIdFn = &|_| unreachable!("no enrichers registered");
     let (combined_rdf_path, unknown_files) = match create::files_to_rdf(
         &files_to_convert,
         &mut rdf_tempfile,
         Arc::new(OxRdfConvert {}),
         &[],
         None,
-    ) {
+        file_id_fn,
+    )
+    .await
+    {
         Ok(result) => (result.rdf_path, result.unhandled_files),
         Err(e) => {
             return (

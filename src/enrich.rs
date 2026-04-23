@@ -1,6 +1,7 @@
 // Copyright (c) 2025, Decisym, LLC
 // Licensed under the BSD 3-Clause License (see LICENSE file in the project root).
 
+use async_trait::async_trait;
 use oxrdf::{IriParseError, NamedNode, Triple};
 
 #[derive(Debug, thiserror::Error)]
@@ -60,10 +61,50 @@ impl EnrichError {
     }
 }
 
+/// Result of invoking an [`Enricher`] on a single file.
+///
+/// The two variants disambiguate "enricher handled the file and produced these
+/// triples (possibly zero)" from "enricher saw the file and chose not to
+/// handle it". The caller uses the latter to fall through to a generic
+/// converter.
+#[derive(Debug)]
+pub enum EnrichOutcome {
+    /// The enricher handled the file. The inner `Vec` may be empty if the
+    /// file legitimately had nothing to extract (e.g. an OOXML archive with
+    /// no `docProps/core.xml`).
+    Triples(Vec<Triple>),
+    /// The enricher saw the file and declined to handle it (e.g. the content
+    /// was already the target RDF format). The caller should fall through to
+    /// generic conversion.
+    Declined,
+}
+
+/// Per-file context handed to [`Enricher::enrich`].
+///
+/// Grouping the parameters in a struct keeps the trait's signature stable as
+/// new optional inputs (limits, configuration, cancellation) are added.
+pub struct EnrichCtx<'a> {
+    /// Path to the source file on disk.
+    pub file_path: &'a str,
+    /// Stable identifier for this file (typically a content-hash IRI),
+    /// precomputed by the caller so enrichers don't re-hash the file.
+    pub file_id: &'a NamedNode,
+    /// Optional root/parent node that generated triples may be linked back
+    /// to — e.g. as the object of `dcterms:hasPart` on the file's own
+    /// subject, or as the subject in SBOM-style enrichers that emit
+    /// component information about the artifact. `None` means the enricher
+    /// should produce file-local triples only.
+    pub root_id: Option<&'a NamedNode>,
+}
+
+#[async_trait]
 pub trait Enricher: Send + Sync {
     fn supported_extensions(&self) -> Vec<&str>;
-    /// Extract triples from `file_path`. When `pkg_id` is `None`, the enricher
-    /// may still produce triples (if it does not need a package identity) or
-    /// return an empty vec to let the caller fall back to generic conversion.
-    fn enrich(&self, file_path: &str, pkg_id: Option<&NamedNode>) -> EnrichResult<Vec<Triple>>;
+    /// Extract triples from `ctx.file_path`.
+    ///
+    /// Return [`EnrichOutcome::Triples`] (possibly empty) when the file was
+    /// handled. Return [`EnrichOutcome::Declined`] to let the caller fall
+    /// through to the generic converter — typical when the file is already in
+    /// the target RDF format.
+    async fn enrich(&self, ctx: &EnrichCtx<'_>) -> EnrichResult<EnrichOutcome>;
 }

@@ -1,7 +1,7 @@
 // Copyright (c) 2025, Decisym, LLC
 // Licensed under the BSD 3-Clause License (see LICENSE file in the project root).
 
-use crate::enrich::Enricher;
+use crate::enrich::{EnrichCtx, EnrichOutcome, EnrichResult, Enricher};
 use crate::rdf2nt::ConvertResult;
 use crate::rdf2nt::OxRdfConvert;
 use crate::rdf2nt::Rdf2Nt;
@@ -13,6 +13,15 @@ use std::path::Path;
 use std::sync::Arc;
 use tempfile::{Builder, NamedTempFile};
 
+/// Closure supplied by the caller that computes a stable `NamedNode`
+/// identifier for a given file path (typically a content-hash IRI). Passed
+/// into `files_to_rdf` so the enricher dispatch layer can hash each file
+/// exactly once and share the result with every enricher.
+///
+/// `Send + Sync` bounds let the closure live across await points when
+/// `files_to_rdf` is awaited from a multi-threaded Tokio runtime.
+pub type FileIdFn<'a> = &'a (dyn Fn(&str) -> EnrichResult<NamedNode> + Send + Sync);
+
 pub struct FilesToRdfResult {
     pub rdf_path: String,
     pub unhandled_files: Vec<String>,
@@ -22,7 +31,7 @@ pub struct FilesToRdfResult {
 }
 
 /// Creates a HDT file from RDF source
-pub fn do_create(hdt_name: &str, data: &[String]) -> anyhow::Result<hdt::Hdt, anyhow::Error> {
+pub async fn do_create(hdt_name: &str, data: &[String]) -> anyhow::Result<hdt::Hdt, anyhow::Error> {
     debug!("Creating HDT...");
     // creating a tempfile to hold all the contents of the rdf input files
     let mut tmp_file = Builder::new()
@@ -31,7 +40,18 @@ pub fn do_create(hdt_name: &str, data: &[String]) -> anyhow::Result<hdt::Hdt, an
         .tempfile()
         .map_err(|e| anyhow::anyhow!("Error creating temporary file: {:?}", e))?;
 
-    let result = files_to_rdf(data, &mut tmp_file, Arc::new(OxRdfConvert {}), &[], None)?;
+    // No enrichers are wired in this path, so the file_id closure is never
+    // invoked. A panic closure documents that expectation at the type level.
+    let file_id_fn: FileIdFn = &|_| unreachable!("no enrichers registered");
+    let result = files_to_rdf(
+        data,
+        &mut tmp_file,
+        Arc::new(OxRdfConvert {}),
+        &[],
+        None,
+        file_id_fn,
+    )
+    .await?;
     if !result.unhandled_files.is_empty() {
         for f in &result.unhandled_files {
             if !Path::new(f).exists() {
@@ -75,13 +95,18 @@ pub fn do_create(hdt_name: &str, data: &[String]) -> anyhow::Result<hdt::Hdt, an
 
 /// Converts a list of RDF files to NTriple RDF
 /// returns the name of the file containing combined NTriple RDF, the names of any unhandled files,
-/// and any files that should be preserved as blobs
-pub fn files_to_rdf(
+/// and any files that should be preserved as blobs.
+///
+/// `file_id_fn` is invoked exactly once per file that matches an enricher, so
+/// the produced `NamedNode` can be reused inside the enricher without
+/// re-hashing the file contents.
+pub async fn files_to_rdf(
     data: &[String],
     out_file: &mut NamedTempFile,
     converter: Arc<dyn Rdf2Nt>,
     enrichers: &[Box<dyn Enricher>],
-    pkg_id: Option<&NamedNode>,
+    root_id: Option<&NamedNode>,
+    file_id_fn: FileIdFn<'_>,
 ) -> anyhow::Result<FilesToRdfResult> {
     let mut nt_files = vec![];
     let mut files_to_convert = vec![];
@@ -104,20 +129,30 @@ pub fn files_to_rdf(
 
         if let Some(enricher) = matched_enricher {
             debug!("Enriching file: {file}");
-            let triples = enricher
-                .enrich(file, pkg_id)
+            let file_id = file_id_fn(file)
+                .map_err(|e| anyhow::anyhow!("Error computing file id for {file}: {e}"))?;
+            let ctx = EnrichCtx {
+                file_path: file,
+                file_id: &file_id,
+                root_id,
+            };
+            let outcome = enricher
+                .enrich(&ctx)
+                .await
                 .map_err(|e| anyhow::anyhow!("Error enriching file {file}: {e}"))?;
-            if triples.is_empty() {
-                // Enricher declined — let the generic converter handle the file.
-                debug!("Enricher produced no triples for {file}, routing to converter");
-                files_to_convert.push(file.clone());
-            } else {
-                for triple in &triples {
-                    writeln!(out_file, "{triple} .").map_err(|e| {
-                        anyhow::anyhow!("Error writing enriched triples for {file}: {e}")
-                    })?;
+            match outcome {
+                EnrichOutcome::Declined => {
+                    debug!("Enricher declined {file}, routing to converter");
+                    files_to_convert.push(file.clone());
                 }
-                enriched_sources.push(file.clone());
+                EnrichOutcome::Triples(triples) => {
+                    for triple in &triples {
+                        writeln!(out_file, "{triple} .").map_err(|e| {
+                            anyhow::anyhow!("Error writing enriched triples for {file}: {e}")
+                        })?;
+                    }
+                    enriched_sources.push(file.clone());
+                }
             }
         }
         // Check for triples, this is the preferred RDF format and no additional conversion is required
@@ -172,32 +207,36 @@ pub fn files_to_rdf(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::enrich::{EnrichResult, Enricher};
+    use crate::enrich::{EnrichCtx, EnrichOutcome, EnrichResult, Enricher};
+    use async_trait::async_trait;
     use oxrdf::{NamedNode, Triple};
     use tempfile::Builder;
 
     struct MockEnricher;
 
+    #[async_trait]
     impl Enricher for MockEnricher {
         fn supported_extensions(&self) -> Vec<&str> {
             vec!["mock"]
         }
 
-        fn enrich(
-            &self,
-            _file_path: &str,
-            _pkg_id: Option<&NamedNode>,
-        ) -> EnrichResult<Vec<Triple>> {
-            Ok(vec![Triple::new(
+        async fn enrich(&self, _ctx: &EnrichCtx<'_>) -> EnrichResult<EnrichOutcome> {
+            Ok(EnrichOutcome::Triples(vec![Triple::new(
                 NamedNode::new("http://example.org/mock-subject")?,
                 NamedNode::new("http://example.org/type")?,
                 NamedNode::new("http://example.org/Mock")?,
-            )])
+            )]))
         }
     }
 
-    #[test]
-    fn test_files_to_rdf_with_mock_enricher() {
+    /// Returns a deterministic per-path id for tests, so the same path always
+    /// maps to the same `NamedNode`.
+    fn test_file_id(path: &str) -> EnrichResult<NamedNode> {
+        Ok(NamedNode::new(format!("http://example.org/file/{path}"))?)
+    }
+
+    #[tokio::test]
+    async fn test_files_to_rdf_with_mock_enricher() {
         let tmp = Builder::new().suffix(".mock").tempfile().unwrap();
         let mock_path = tmp.path().to_str().unwrap().to_string();
 
@@ -206,16 +245,19 @@ mod tests {
             .append(true)
             .tempfile()
             .unwrap();
-        let pkg_id = NamedNode::new("http://example.org/pkg1").unwrap();
+        let root_id = NamedNode::new("http://example.org/pkg1").unwrap();
         let enrichers: Vec<Box<dyn Enricher>> = vec![Box::new(MockEnricher)];
+        let file_id_fn: FileIdFn = &test_file_id;
 
         let result = files_to_rdf(
             std::slice::from_ref(&mock_path),
             &mut out_file,
             Arc::new(OxRdfConvert {}),
             &enrichers,
-            Some(&pkg_id),
+            Some(&root_id),
+            file_id_fn,
         )
+        .await
         .unwrap();
 
         assert_eq!(result.enriched_sources, vec![mock_path]);
@@ -223,8 +265,8 @@ mod tests {
         assert!(contents.contains("<http://example.org/Mock>"));
     }
 
-    #[test]
-    fn test_files_to_rdf_empty_enrichers_backward_compat() {
+    #[tokio::test]
+    async fn test_files_to_rdf_empty_enrichers_backward_compat() {
         let tmp = Builder::new().suffix(".nt").tempfile().unwrap();
         std::fs::write(
             tmp.path(),
@@ -238,6 +280,7 @@ mod tests {
             .append(true)
             .tempfile()
             .unwrap();
+        let file_id_fn: FileIdFn = &|_| unreachable!("no enrichers registered");
 
         let result = files_to_rdf(
             std::slice::from_ref(&nt_path),
@@ -245,7 +288,9 @@ mod tests {
             Arc::new(OxRdfConvert {}),
             &[],
             None,
+            file_id_fn,
         )
+        .await
         .unwrap();
 
         assert!(result.unhandled_files.is_empty());
@@ -254,8 +299,8 @@ mod tests {
         assert_eq!(result.rdf_path, nt_path);
     }
 
-    #[test]
-    fn test_files_to_rdf_mixed_enricher_and_rdf() {
+    #[tokio::test]
+    async fn test_files_to_rdf_mixed_enricher_and_rdf() {
         // Create a .mock file
         let mock_tmp = Builder::new().suffix(".mock").tempfile().unwrap();
         let mock_path = mock_tmp.path().to_str().unwrap().to_string();
@@ -274,16 +319,19 @@ mod tests {
             .append(true)
             .tempfile()
             .unwrap();
-        let pkg_id = NamedNode::new("http://example.org/pkg1").unwrap();
+        let root_id = NamedNode::new("http://example.org/pkg1").unwrap();
         let enrichers: Vec<Box<dyn Enricher>> = vec![Box::new(MockEnricher)];
+        let file_id_fn: FileIdFn = &test_file_id;
 
         let result = files_to_rdf(
             &[mock_path.clone(), nt_path],
             &mut out_file,
             Arc::new(OxRdfConvert {}),
             &enrichers,
-            Some(&pkg_id),
+            Some(&root_id),
+            file_id_fn,
         )
+        .await
         .unwrap();
 
         assert_eq!(result.enriched_sources, vec![mock_path]);
@@ -292,8 +340,8 @@ mod tests {
         assert!(contents.contains("<http://example.org/o>"));
     }
 
-    #[test]
-    fn test_files_to_rdf_enricher_without_pkg_id() {
+    #[tokio::test]
+    async fn test_files_to_rdf_enricher_without_root_id() {
         let tmp = Builder::new().suffix(".mock").tempfile().unwrap();
         let mock_path = tmp.path().to_str().unwrap().to_string();
 
@@ -303,6 +351,7 @@ mod tests {
             .tempfile()
             .unwrap();
         let enrichers: Vec<Box<dyn Enricher>> = vec![Box::new(MockEnricher)];
+        let file_id_fn: FileIdFn = &test_file_id;
 
         let result = files_to_rdf(
             std::slice::from_ref(&mock_path),
@@ -310,12 +359,65 @@ mod tests {
             Arc::new(OxRdfConvert {}),
             &enrichers,
             None,
+            file_id_fn,
         )
+        .await
         .unwrap();
 
         assert_eq!(result.enriched_sources, vec![mock_path]);
         assert!(result.unhandled_files.is_empty());
         let contents = std::fs::read_to_string(result.rdf_path).unwrap();
         assert!(contents.contains("<http://example.org/Mock>"));
+    }
+
+    struct DeclineEnricher;
+
+    #[async_trait]
+    impl Enricher for DeclineEnricher {
+        fn supported_extensions(&self) -> Vec<&str> {
+            vec!["mock"]
+        }
+
+        async fn enrich(&self, _ctx: &EnrichCtx<'_>) -> EnrichResult<EnrichOutcome> {
+            Ok(EnrichOutcome::Declined)
+        }
+    }
+
+    #[tokio::test]
+    async fn test_files_to_rdf_enricher_declines_falls_through_to_converter() {
+        // Write an NT-shaped body into a .mock file. Because the enricher
+        // declines, the file is passed to the generic converter, which here
+        // is `OxRdfConvert`. That converter doesn't handle `.mock`, so the
+        // file lands in `unhandled_files` — demonstrating that decline does
+        // route to the fallback path.
+        let tmp = Builder::new().suffix(".mock").tempfile().unwrap();
+        std::fs::write(
+            tmp.path(),
+            "<http://example.org/s> <http://example.org/p> <http://example.org/o> .\n",
+        )
+        .unwrap();
+        let mock_path = tmp.path().to_str().unwrap().to_string();
+
+        let mut out_file = Builder::new()
+            .suffix(".nt")
+            .append(true)
+            .tempfile()
+            .unwrap();
+        let enrichers: Vec<Box<dyn Enricher>> = vec![Box::new(DeclineEnricher)];
+        let file_id_fn: FileIdFn = &test_file_id;
+
+        let result = files_to_rdf(
+            std::slice::from_ref(&mock_path),
+            &mut out_file,
+            Arc::new(OxRdfConvert {}),
+            &enrichers,
+            None,
+            file_id_fn,
+        )
+        .await
+        .unwrap();
+
+        assert!(result.enriched_sources.is_empty());
+        assert_eq!(result.unhandled_files, vec![mock_path]);
     }
 }
