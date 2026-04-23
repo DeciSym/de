@@ -103,26 +103,21 @@ pub fn files_to_rdf(
             .find(|e| e.supported_extensions().contains(&ext));
 
         if let Some(enricher) = matched_enricher {
-            if let Some(id) = pkg_id {
-                debug!("Enriching file: {file}");
-                let triples = enricher
-                    .enrich(file, id)
-                    .map_err(|e| anyhow::anyhow!("Error enriching file {file}: {e}"))?;
-                if triples.is_empty() {
-                    // Enricher declined — let the generic converter handle the file.
-                    debug!("Enricher produced no triples for {file}, routing to converter");
-                    files_to_convert.push(file.clone());
-                } else {
-                    for triple in &triples {
-                        writeln!(out_file, "{triple} .").map_err(|e| {
-                            anyhow::anyhow!("Error writing enriched triples for {file}: {e}")
-                        })?;
-                    }
-                    enriched_sources.push(file.clone());
-                }
+            debug!("Enriching file: {file}");
+            let triples = enricher
+                .enrich(file, pkg_id)
+                .map_err(|e| anyhow::anyhow!("Error enriching file {file}: {e}"))?;
+            if triples.is_empty() {
+                // Enricher declined — let the generic converter handle the file.
+                debug!("Enricher produced no triples for {file}, routing to converter");
+                files_to_convert.push(file.clone());
             } else {
-                warn!("Enricher matched for {file} but no pkg_id provided, skipping enrichment");
-                unrecognized_files.push(file.clone());
+                for triple in &triples {
+                    writeln!(out_file, "{triple} .").map_err(|e| {
+                        anyhow::anyhow!("Error writing enriched triples for {file}: {e}")
+                    })?;
+                }
+                enriched_sources.push(file.clone());
             }
         }
         // Check for triples, this is the preferred RDF format and no additional conversion is required
@@ -188,7 +183,11 @@ mod tests {
             vec!["mock"]
         }
 
-        fn enrich(&self, _file_path: &str, _pkg_id: &NamedNode) -> EnrichResult<Vec<Triple>> {
+        fn enrich(
+            &self,
+            _file_path: &str,
+            _pkg_id: Option<&NamedNode>,
+        ) -> EnrichResult<Vec<Triple>> {
             Ok(vec![Triple::new(
                 NamedNode::new("http://example.org/mock-subject")?,
                 NamedNode::new("http://example.org/type")?,
@@ -291,5 +290,32 @@ mod tests {
         let contents = std::fs::read_to_string(result.rdf_path).unwrap();
         assert!(contents.contains("<http://example.org/Mock>"));
         assert!(contents.contains("<http://example.org/o>"));
+    }
+
+    #[test]
+    fn test_files_to_rdf_enricher_without_pkg_id() {
+        let tmp = Builder::new().suffix(".mock").tempfile().unwrap();
+        let mock_path = tmp.path().to_str().unwrap().to_string();
+
+        let mut out_file = Builder::new()
+            .suffix(".nt")
+            .append(true)
+            .tempfile()
+            .unwrap();
+        let enrichers: Vec<Box<dyn Enricher>> = vec![Box::new(MockEnricher)];
+
+        let result = files_to_rdf(
+            std::slice::from_ref(&mock_path),
+            &mut out_file,
+            Arc::new(OxRdfConvert {}),
+            &enrichers,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(result.enriched_sources, vec![mock_path]);
+        assert!(result.unhandled_files.is_empty());
+        let contents = std::fs::read_to_string(result.rdf_path).unwrap();
+        assert!(contents.contains("<http://example.org/Mock>"));
     }
 }

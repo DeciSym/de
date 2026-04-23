@@ -62,5 +62,8 @@ impl EnrichError {
 
 pub trait Enricher: Send + Sync {
     fn supported_extensions(&self) -> Vec<&str>;
-    fn enrich(&self, file_path: &str, pkg_id: &NamedNode) -> EnrichResult<Vec<Triple>>;
+    /// Extract triples from `file_path`. When `pkg_id` is `None`, the enricher
+    /// may still produce triples (if it does not need a package identity) or
+    /// return an empty vec to let the caller fall back to generic conversion.
+    fn enrich(&self, file_path: &str, pkg_id: Option<&NamedNode>) -> EnrichResult<Vec<Triple>>;
 }
