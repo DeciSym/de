@@ -21,10 +21,12 @@ harness = false
 
 [dependencies]
 anyhow = { version = "1.0", default-features = false }
+bzip2 = "0.6"
 clap = { version = "4.5" }
 clap-verbosity-flag = { version = "3.0", default-features = false, features = ["log"] }
 env_logger = { version = "0.11", default-features = false }
 exitcode = "1.1"
+flate2 = "1"
 hdt = { git = "https://github.com/DeciSym/hdt", default-features = false, features = ["nt", "sparql", "cache"], rev = "5adf1f716c3c713a51046b24651c825fa306c9e4" }
 http = { version = "1.4", optional = true }
 log = "0.4"
