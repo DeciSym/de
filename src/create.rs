@@ -110,6 +110,22 @@ pub async fn files_to_rdf(
     root_id: Option<&NamedNode>,
     file_id_fn: FileIdFn<'_>,
 ) -> anyhow::Result<FilesToRdfResult> {
+    // Reject ambiguous enricher configurations up front: a single extension
+    // claimed by more than one enricher is a caller bug. The previous
+    // Vec-order-wins dispatch silently masked this — here we fail explicitly
+    // so a misconfigured default set can't ship undetected.
+    let mut claimed: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for (idx, enricher) in enrichers.iter().enumerate() {
+        for ext in enricher.supported_extensions() {
+            if let Some(prev_idx) = claimed.insert(ext, idx) {
+                return Err(anyhow::anyhow!(
+                    "ambiguous enricher configuration: extension \"{ext}\" \
+                     claimed by enrichers at positions {prev_idx} and {idx}"
+                ));
+            }
+        }
+    }
+
     let mut nt_files = vec![];
     let mut files_to_convert = vec![];
     let mut unrecognized_files = vec![];
@@ -440,6 +456,48 @@ mod tests {
         assert!(
             matches!(source, EnrichError::Parse { .. }),
             "expected EnrichError::Parse variant, got {source:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_files_to_rdf_rejects_duplicate_extension_claims() {
+        // Two enrichers both claim ".mock". Dispatch must refuse to proceed
+        // rather than let Vec ordering silently pick a winner.
+        let tmp = Builder::new().suffix(".mock").tempfile().unwrap();
+        let mock_path = tmp.path().to_str().unwrap().to_string();
+
+        let mut out_file = Builder::new()
+            .suffix(".nt")
+            .append(true)
+            .tempfile()
+            .unwrap();
+        let enrichers: Vec<Box<dyn Enricher>> =
+            vec![Box::new(MockEnricher), Box::new(DeclineEnricher)];
+        let file_id_fn: FileIdFn = &test_file_id;
+
+        let err = files_to_rdf(
+            std::slice::from_ref(&mock_path),
+            &mut out_file,
+            Arc::new(OxRdfConvert {}),
+            &enrichers,
+            None,
+            file_id_fn,
+        )
+        .await
+        .expect_err("duplicate extension claim must be rejected");
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("ambiguous"),
+            "error should flag ambiguity: {msg}"
+        );
+        assert!(
+            msg.contains("mock"),
+            "error should name the conflicting extension: {msg}"
+        );
+        assert!(
+            msg.contains("0") && msg.contains("1"),
+            "error should point at both enricher positions: {msg}"
         );
     }
 
