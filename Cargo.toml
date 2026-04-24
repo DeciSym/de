@@ -21,6 +21,7 @@ harness = false
 
 [dependencies]
 anyhow = { version = "1.0", default-features = false }
+async-trait = "0.1"
 bzip2 = "0.6"
 clap = { version = "4.5" }
 clap-verbosity-flag = { version = "3.0", default-features = false, features = ["log"] }
