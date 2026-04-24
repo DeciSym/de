@@ -1,18 +1,53 @@
 // Copyright (c) 2025, Decisym, LLC
 // Licensed under the BSD 3-Clause License (see LICENSE file in the project root).
 
+use bzip2::bufread::MultiBzDecoder;
+use flate2::bufread::MultiGzDecoder;
 use log::{debug, error, warn};
 use oxrdf::GraphName::DefaultGraph;
 use oxrdf::TripleRef;
 use oxrdfio::RdfFormat::{self, NTriples};
 use oxrdfio::RdfSerializer;
 use oxrdfio::{RdfParseError, RdfParser};
-use std::io::{BufReader, BufWriter, Write};
-use std::path::Path;
+use std::fs::File;
+use std::io::{self, BufReader, BufWriter, Read, Write};
+use std::path::{Path, PathBuf};
+
+const IO_BUF: usize = 1 << 20;
+
+/// Open `file` for reading, transparently decoding `.gz` and `.bz2` wrappers.
+fn open_rdf_reader(file: &Path) -> io::Result<Box<dyn Read>> {
+    let fp = File::open(file)?;
+    let buffered = BufReader::with_capacity(IO_BUF, fp);
+    match file.extension().and_then(|e| e.to_str()) {
+        Some(e) if e.eq_ignore_ascii_case("gz") => Ok(Box::new(BufReader::with_capacity(
+            IO_BUF,
+            MultiGzDecoder::new(buffered),
+        ))),
+        Some(e) if e.eq_ignore_ascii_case("bz2") => Ok(Box::new(BufReader::with_capacity(
+            IO_BUF,
+            MultiBzDecoder::new(buffered),
+        ))),
+        _ => Ok(Box::new(buffered)),
+    }
+}
+
+/// Strip a trailing `.gz`/`.bz2` so the inner RDF extension drives format detection.
+fn format_path_for(file: &Path) -> PathBuf {
+    match file.extension().and_then(|e| e.to_str()) {
+        Some(e) if e.eq_ignore_ascii_case("gz") || e.eq_ignore_ascii_case("bz2") => {
+            file.with_extension("")
+        }
+        _ => file.to_path_buf(),
+    }
+}
 
 /// Trait for different RDF libraries to implement for converting a list of files into NTriple RDF
-/// returns stats on converted data via ConvertResult
-pub trait Rdf2Nt {
+/// returns stats on converted data via ConvertResult.
+///
+/// `Send + Sync` bounds let `Arc<dyn Rdf2Nt>` live across await points inside
+/// the async `files_to_rdf` dispatcher.
+pub trait Rdf2Nt: Send + Sync {
     fn convert_to_nt(
         &self,
         file_paths: Vec<String>,
@@ -39,28 +74,27 @@ impl Rdf2Nt for OxRdfConvert {
         let mut res = ConvertResult::default();
         let mut dest_writer = BufWriter::new(output_file);
         for file in &file_paths {
-            let source = std::fs::File::open(file)
+            let path = Path::new(file);
+            let source_reader = open_rdf_reader(path)
                 .map_err(|e| anyhow::anyhow!("Error opening file {:?}: {:?}", file, e))?;
-            let source_reader = BufReader::new(source);
 
             debug!("converting {} to nt format", &file);
 
             let mut serializer =
                 RdfSerializer::from_format(NTriples).for_writer(dest_writer.by_ref());
             let v = std::time::Instant::now();
-            let rdf_format = match Path::new(&file)
-                .extension()
-                .and_then(|ext| ext.to_str())
-                .and_then(RdfFormat::from_extension)
-            {
-                Some(format) => format,
-                None if file.ends_with(".owl") => {
-                    // OWL files should be in XML format: https://www.w3.org/TR/owl-xmlsyntax/
-                    RdfFormat::RdfXml
-                }
-                None => {
-                    res.unhandled.push(file.to_string());
-                    continue;
+            let fmt_path = format_path_for(path);
+            let fmt_ext = fmt_path.extension().and_then(|ext| ext.to_str());
+            let rdf_format = if fmt_ext.is_some_and(|e| e.eq_ignore_ascii_case("owl")) {
+                // OWL files should be in XML format: https://www.w3.org/TR/owl-xmlsyntax/
+                RdfFormat::RdfXml
+            } else {
+                match fmt_ext.and_then(RdfFormat::from_extension) {
+                    Some(format) => format,
+                    None => {
+                        res.unhandled.push(file.to_string());
+                        continue;
+                    }
                 }
             };
             // TODO oxrdfio does offer split_file_for_parallel_parsing() which greatly improves performance, but only available for NT or NQ formats
@@ -102,5 +136,61 @@ impl Rdf2Nt for OxRdfConvert {
         }
         dest_writer.flush()?;
         Ok(res)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    const APPLE_TTL: &str = "tests/resources/apple.ttl";
+    const APPLE_TRIPLES: usize = 9;
+
+    fn count_triples_in(nt_file: &tempfile::NamedTempFile) -> usize {
+        let reader = BufReader::new(nt_file.reopen().expect("reopen tmp nt"));
+        RdfParser::from_format(NTriples)
+            .for_reader(reader)
+            .collect::<Result<Vec<_>, _>>()
+            .expect("parse nt")
+            .len()
+    }
+
+    #[test]
+    fn gzipped_ttl_input() -> anyhow::Result<()> {
+        let tmp = tempfile::tempdir()?;
+        let gz_path = tmp.path().join("apple.ttl.gz");
+        let source = std::fs::read(APPLE_TTL)?;
+        let mut enc =
+            flate2::write::GzEncoder::new(File::create(&gz_path)?, flate2::Compression::default());
+        enc.write_all(&source)?;
+        enc.finish()?;
+
+        let out = tempfile::Builder::new().suffix(".nt").tempfile()?;
+        let res = OxRdfConvert {}
+            .convert_to_nt(vec![gz_path.to_string_lossy().into_owned()], &out.reopen()?)?;
+        assert_eq!(res.converted, 1);
+        assert!(res.unhandled.is_empty());
+        assert_eq!(count_triples_in(&out), APPLE_TRIPLES);
+        Ok(())
+    }
+
+    #[test]
+    fn bzipped_ttl_input() -> anyhow::Result<()> {
+        let tmp = tempfile::tempdir()?;
+        let bz_path = tmp.path().join("apple.ttl.bz2");
+        let source = std::fs::read(APPLE_TTL)?;
+        let mut enc =
+            bzip2::write::BzEncoder::new(File::create(&bz_path)?, bzip2::Compression::default());
+        enc.write_all(&source)?;
+        enc.finish()?;
+
+        let out = tempfile::Builder::new().suffix(".nt").tempfile()?;
+        let res = OxRdfConvert {}
+            .convert_to_nt(vec![bz_path.to_string_lossy().into_owned()], &out.reopen()?)?;
+        assert_eq!(res.converted, 1);
+        assert!(res.unhandled.is_empty());
+        assert_eq!(count_triples_in(&out), APPLE_TRIPLES);
+        Ok(())
     }
 }

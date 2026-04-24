@@ -10,7 +10,7 @@ mod server_tests {
     use tempfile::tempdir;
 
     // Helper to create test HDT files
-    fn setup_test_store() -> anyhow::Result<(tempfile::TempDir, AggregateHdt)> {
+    async fn setup_test_store() -> anyhow::Result<(tempfile::TempDir, AggregateHdt)> {
         let tmp_dir = tempdir()?;
 
         // Create a test HDT from banana.ttl
@@ -18,14 +18,16 @@ mod server_tests {
         de::create::do_create(
             banana_hdt.to_str().unwrap(),
             &["tests/resources/banana.ttl".to_string()],
-        )?;
+        )
+        .await?;
 
         // Create a test HDT from pineapple.ttl
         let pineapple_hdt = tmp_dir.path().join("pineapple.hdt");
         de::create::do_create(
             pineapple_hdt.to_str().unwrap(),
             &["tests/resources/pineapple.ttl".to_string()],
-        )?;
+        )
+        .await?;
 
         // Create AggregateHdt store
         let store = AggregateHdt::new(&[
@@ -51,9 +53,9 @@ mod server_tests {
         result.map_err(|(status, msg)| anyhow::anyhow!("HTTP Error {}: {}", status, msg))
     }
 
-    #[test]
-    fn test_sparql_query_post() -> anyhow::Result<()> {
-        let (tmp_dir, store) = setup_test_store()?;
+    #[tokio::test]
+    async fn test_sparql_query_post() -> anyhow::Result<()> {
+        let (tmp_dir, store) = setup_test_store().await?;
 
         // Test SPARQL query via POST
         let query = "PREFIX ex: <http://example.org/> PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> SELECT ?fruit WHERE { ?fruit rdf:type ex:Fruit }";
@@ -80,9 +82,9 @@ mod server_tests {
         Ok(())
     }
 
-    #[test]
-    fn test_sparql_query_ask() -> anyhow::Result<()> {
-        let (tmp_dir, store) = setup_test_store()?;
+    #[tokio::test]
+    async fn test_sparql_query_ask() -> anyhow::Result<()> {
+        let (tmp_dir, store) = setup_test_store().await?;
 
         // Test ASK query
         let query = "PREFIX ex: <http://example.org/> PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> ASK { ?fruit rdf:type ex:Fruit }";
@@ -109,9 +111,9 @@ mod server_tests {
         Ok(())
     }
 
-    #[test]
-    fn test_sparql_query_service_description() -> anyhow::Result<()> {
-        let (tmp_dir, store) = setup_test_store()?;
+    #[tokio::test]
+    async fn test_sparql_query_service_description() -> anyhow::Result<()> {
+        let (tmp_dir, store) = setup_test_store().await?;
 
         // Test GET to /query without query parameter (should return service description)
         let mut request = Request::builder()
@@ -140,9 +142,9 @@ mod server_tests {
         Ok(())
     }
 
-    #[test]
-    fn test_update_create_graph() -> anyhow::Result<()> {
-        let (tmp_dir, store) = setup_test_store()?;
+    #[tokio::test]
+    async fn test_update_create_graph() -> anyhow::Result<()> {
+        let (tmp_dir, store) = setup_test_store().await?;
 
         // Test CREATE GRAPH
         let update = "CREATE GRAPH <http://example.org/newgraph>";
@@ -166,9 +168,9 @@ mod server_tests {
         Ok(())
     }
 
-    #[test]
-    fn test_update_insert_data() -> anyhow::Result<()> {
-        let (tmp_dir, store) = setup_test_store()?;
+    #[tokio::test]
+    async fn test_update_insert_data() -> anyhow::Result<()> {
+        let (tmp_dir, store) = setup_test_store().await?;
 
         // Test INSERT DATA to a new graph
         let update = r#"
@@ -199,9 +201,9 @@ mod server_tests {
         Ok(())
     }
 
-    #[test]
-    fn test_update_delete_data_forbidden() -> anyhow::Result<()> {
-        let (tmp_dir, store) = setup_test_store()?;
+    #[tokio::test]
+    async fn test_update_delete_data_forbidden() -> anyhow::Result<()> {
+        let (tmp_dir, store) = setup_test_store().await?;
 
         // Test that DELETE DATA is forbidden (read-only for existing graphs)
         let update = r#"
@@ -235,9 +237,9 @@ mod server_tests {
         Ok(())
     }
 
-    #[test]
-    fn test_store_get_all() -> anyhow::Result<()> {
-        let (tmp_dir, store) = setup_test_store()?;
+    #[tokio::test]
+    async fn test_store_get_all() -> anyhow::Result<()> {
+        let (tmp_dir, store) = setup_test_store().await?;
 
         // Test GET /store (get all graphs)
         let mut request = Request::builder()
@@ -269,9 +271,9 @@ mod server_tests {
         Ok(())
     }
 
-    #[test]
-    fn test_store_get_specific_graph() -> anyhow::Result<()> {
-        let (tmp_dir, store) = setup_test_store()?;
+    #[tokio::test]
+    async fn test_store_get_specific_graph() -> anyhow::Result<()> {
+        let (tmp_dir, store) = setup_test_store().await?;
 
         // Test GET /store with graph parameter
         let mut request = Request::builder()
@@ -295,9 +297,9 @@ mod server_tests {
         Ok(())
     }
 
-    #[test]
-    fn test_store_put_new_graph() -> anyhow::Result<()> {
-        let (tmp_dir, store) = setup_test_store()?;
+    #[tokio::test]
+    async fn test_store_put_new_graph() -> anyhow::Result<()> {
+        let (tmp_dir, store) = setup_test_store().await?;
 
         // Test PUT /store with new graph
         let turtle_data = r#"
@@ -325,9 +327,9 @@ ex:Orange ex:hasColor "orange" .
         Ok(())
     }
 
-    #[test]
-    fn test_store_delete_graph() -> anyhow::Result<()> {
-        let (tmp_dir, store) = setup_test_store()?;
+    #[tokio::test]
+    async fn test_store_delete_graph() -> anyhow::Result<()> {
+        let (tmp_dir, store) = setup_test_store().await?;
 
         // Test DELETE endpoint structure
         // (Creating and deleting may fail due to implementation details)
@@ -349,9 +351,9 @@ ex:Orange ex:hasColor "orange" .
         Ok(())
     }
 
-    #[test]
-    fn test_store_head_graph_exists() -> anyhow::Result<()> {
-        let (tmp_dir, store) = setup_test_store()?;
+    #[tokio::test]
+    async fn test_store_head_graph_exists() -> anyhow::Result<()> {
+        let (tmp_dir, store) = setup_test_store().await?;
 
         // Test HEAD /store with existing graph
         let mut request = Request::builder()
@@ -372,9 +374,9 @@ ex:Orange ex:hasColor "orange" .
         Ok(())
     }
 
-    #[test]
-    fn test_store_head_graph_not_exists() -> anyhow::Result<()> {
-        let (tmp_dir, store) = setup_test_store()?;
+    #[tokio::test]
+    async fn test_store_head_graph_not_exists() -> anyhow::Result<()> {
+        let (tmp_dir, store) = setup_test_store().await?;
 
         // Test HEAD /store with non-existing graph
         let mut request = Request::builder()
@@ -397,9 +399,9 @@ ex:Orange ex:hasColor "orange" .
         Ok(())
     }
 
-    #[test]
-    fn test_invalid_sparql_query() -> anyhow::Result<()> {
-        let (tmp_dir, store) = setup_test_store()?;
+    #[tokio::test]
+    async fn test_invalid_sparql_query() -> anyhow::Result<()> {
+        let (tmp_dir, store) = setup_test_store().await?;
 
         // Test invalid SPARQL query
         let query = "INVALID SPARQL QUERY";
@@ -428,9 +430,9 @@ ex:Orange ex:hasColor "orange" .
         Ok(())
     }
 
-    #[test]
-    fn test_unsupported_media_type() -> anyhow::Result<()> {
-        let (tmp_dir, store) = setup_test_store()?;
+    #[tokio::test]
+    async fn test_unsupported_media_type() -> anyhow::Result<()> {
+        let (tmp_dir, store) = setup_test_store().await?;
 
         // Test PUT with unsupported content type
         let mut request = Request::builder()

@@ -76,10 +76,12 @@ async fn main() {
             sparql,
             output,
         } => query::do_query(data, sparql, output, &mut stdout_writer).await,
-        Commands::Create { output_name, data } => match create::do_create(output_name, data) {
-            Ok(_) => Ok(()),
-            Err(e) => Err(e),
-        },
+        Commands::Create { output_name, data } => {
+            match create::do_create(output_name, data).await {
+                Ok(_) => Ok(()),
+                Err(e) => Err(e),
+            }
+        }
         Commands::View { data } => view::view_hdt(data, &mut stdout_writer),
         #[cfg(feature = "server")]
         Commands::Serve { location, bind } => de::serve::serve(location.to_owned(), bind),
