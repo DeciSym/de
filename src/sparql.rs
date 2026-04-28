@@ -167,8 +167,10 @@ impl AggregateHdt {
             .par_iter()
             .map(
                 |(graph_name, path)| -> anyhow::Result<(String, hdt::hdt::HdtHybrid)> {
-                    let hdt = hdt::Hdt::new_hybrid_cache(path, true)
-                        .map_err(|e| anyhow::anyhow!("failed to load HDT from {:?}: {e}", path))?;
+                    // let mut reader = BufReader::new(std::fs::File::open(path)?);
+                    let hdt = hdt::Hdt::new_hybrid_cache(path).map_err(|e| {
+                        anyhow::anyhow!("Failed to load HDT from {:?}: {}", path, e)
+                    })?;
                     Ok((graph_name.clone(), hdt))
                 },
             )
@@ -952,9 +954,9 @@ mod tests {
         Ok(())
     }
 
-    #[test]
+    #[tokio::test]
     #[cfg(feature = "server")]
-    fn test_sync_rejects_duplicate_graph_iri_metadata() -> anyhow::Result<()> {
+    async fn test_sync_rejects_duplicate_graph_iri_metadata() -> anyhow::Result<()> {
         let work_dir = utf8_tempdir()?;
         let sync_dir = work_dir.path().join("sync-duplicate-iri");
         std::fs::create_dir(&sync_dir)?;
@@ -978,13 +980,15 @@ mod tests {
             &[nt_a.to_string_lossy().into_owned()],
             false,
             Some(shared_graph_iri),
-        )?;
+        )
+        .await?;
         crate::create::do_create_with_options(
             &hdt_b.to_string_lossy(),
             &[nt_b.to_string_lossy().into_owned()],
             false,
             Some(shared_graph_iri),
-        )?;
+        )
+        .await?;
 
         let store = AggregateHdt::new(&[hdt_a.to_string_lossy().into_owned()])?;
         let err = store

@@ -763,7 +763,7 @@ pub(super) fn parse_query_results_rdf(
         rows.push((index, row));
     }
 
-    rows.sort_by(|(a, _), (b, _)| a.cmp(b));
+    rows.sort_by_key(|(a, _)| *a);
     let rows = rows.into_iter().map(|(_, row)| row).collect::<Vec<_>>();
     Ok(ParsedQueryResults::Solutions { variables, rows })
 }

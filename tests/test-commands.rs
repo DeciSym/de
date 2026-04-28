@@ -63,8 +63,8 @@ mod integration {
             .to_string())
     }
 
-    #[test]
-    fn test_do_create_rdf() -> anyhow::Result<()> {
+    #[tokio::test]
+    async fn test_do_create_rdf() -> anyhow::Result<()> {
         let tmp_dir: tempfile::TempDir = match tempdir() {
             Ok(d) => d,
             Err(e) => {
@@ -78,6 +78,7 @@ mod integration {
 
         assert!(
             create::do_create(&new_hdt.clone(), &["tests/resources/apple.ttl".to_string()],)
+                .await
                 .is_ok()
         );
         assert!(Path::new(&new_hdt).exists());
@@ -85,8 +86,8 @@ mod integration {
         Ok(())
     }
 
-    #[test]
-    fn test_view() -> anyhow::Result<()> {
+    #[tokio::test]
+    async fn test_view() -> anyhow::Result<()> {
         let tmp_dir: tempfile::TempDir = match tempdir() {
             Ok(d) => d,
             Err(e) => {
@@ -100,6 +101,7 @@ mod integration {
 
         assert!(
             create::do_create(&new_hdt.clone(), &["tests/resources/apple.ttl".to_string()],)
+                .await
                 .is_ok()
         );
         assert!(Path::new(&new_hdt).exists());
@@ -125,6 +127,7 @@ mod integration {
 
         assert!(
             create::do_create(&new_hdt.clone(), &["tests/resources/banana.nt".to_string()],)
+                .await
                 .is_ok()
         );
 
@@ -169,6 +172,7 @@ http://example.org/Banana"#
                 &new_hdt.clone(),
                 &["tests/resources/banana.ttl".to_string()],
             )
+            .await
             .is_ok()
         );
 
@@ -212,6 +216,7 @@ http://example.org/Banana"#
                 &pineapple_hdt.clone(),
                 &["tests/resources/pineapple.ttl".to_string()],
             )
+            .await
             .is_ok()
         );
 
@@ -392,6 +397,7 @@ http://example.org/Pineapple,yellow"#
                     "tests/resources/banana.ttl".to_string()
                 ],
             )
+            .await
             .is_ok()
         );
 
@@ -469,7 +475,9 @@ http://example.org/Banana"#
                 d.replace(".ttl", ".hdt")
             );
             assert!(
-                create::do_create(&new_hdt.clone(), &[format!("tests/resources/{d}")],).is_ok()
+                create::do_create(&new_hdt.clone(), &[format!("tests/resources/{d}")],)
+                    .await
+                    .is_ok()
             );
             pkgs.push(new_hdt.clone());
         }

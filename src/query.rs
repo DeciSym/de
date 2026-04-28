@@ -4,7 +4,6 @@
 use crate::create;
 use crate::rdf2nt::OxRdfConvert;
 use crate::sparql;
-use anyhow::Error;
 use log::*;
 use oxrdf::{NamedNode, NamedOrBlankNode, Term, Triple};
 use oxrdfio::RdfFormat;
@@ -568,16 +567,26 @@ async fn handle_files(
         }
     }
 
-    let (combined_rdf_path, unknown_files) = create::files_to_rdf(
+    // No enrichers are wired in this path, so the file_id closure is never
+    // invoked. A panic closure documents that expectation at the type level.
+    let file_id_fn: create::FileIdFn = &|_| unreachable!("no enrichers registered");
+    let result = match create::files_to_rdf(
         &files_to_convert,
         &mut rdf_tempfile,
         Arc::new(OxRdfConvert {}),
+        &[],
+        None,
+        file_id_fn,
     )
-    .map_err(|e| Error::msg(format!("error processing files to RDF {e}")))?;
+    .await
+    {
+        Ok(result) => result,
+        Err(e) => return Err(anyhow::anyhow!("error processing files to RDF {e}")),
+    };
 
-    for file in unknown_files.iter() {
+    for file in result.unknown_files.iter() {
         if !Path::new(file).exists() {
-            return Err(Error::msg(format!("unable to locate local file {file}")));
+            return Err(anyhow::anyhow!("unable to locate local file {file}"));
         }
         if is_hdt_file_path(file) {
             hdt_path_vec.push(file.to_string())
@@ -596,12 +605,13 @@ async fn handle_files(
     })?;
 
     let converted_rdf = if meta.len() == 0 {
-        Path::new(&combined_rdf_path)
+        Path::new(&result.combined_rdf_path)
     } else {
         rdf_tempfile.path()
     };
 
-    let had_rdf_input = meta.len() != 0 || rdf_tempfile.path() != Path::new(&combined_rdf_path);
+    let had_rdf_input =
+        meta.len() != 0 || rdf_tempfile.path() != Path::new(&result.combined_rdf_path);
     let mut source_for_hdt = if had_rdf_input {
         Some(converted_rdf.to_path_buf())
     } else {
@@ -799,7 +809,7 @@ fn materialize_entailment_closure_nt(
     let mut triples = Vec::<Triple>::new();
 
     for path in hdt_paths {
-        let hdt = hdt::Hdt::new_hybrid_cache(Path::new(path), true)
+        let hdt = hdt::Hdt::new_hybrid_cache(Path::new(path))
             .map_err(|e| anyhow::anyhow!("failed to read HDT {path}: {e}"))?;
         for [s, p, o] in hdt.triples_all() {
             triples.push(hdt_raw_triple_to_oxrdf(&s, &p, &o)?);
@@ -1055,7 +1065,8 @@ mod tests {
                 .to_str()
                 .ok_or_else(|| anyhow::anyhow!("invalid HDT path"))?,
             &[data_path.to_string_lossy().to_string()],
-        )?;
+        )
+        .await?;
 
         let query_path = work_dir.path().join("query.rq");
         fs::write(
@@ -1105,7 +1116,8 @@ mod tests {
                 .to_str()
                 .ok_or_else(|| anyhow::anyhow!("invalid HDT path"))?,
             &[data_path.to_string_lossy().to_string()],
-        )?;
+        )
+        .await?;
 
         let query_path = work_dir.path().join("query.rq");
         fs::write(
@@ -1167,7 +1179,8 @@ mod tests {
             &[a_nt.to_string_lossy().to_string()],
             false,
             Some("http://ex/g"),
-        )?;
+        )
+        .await?;
         create::do_create_with_options(
             b_hdt
                 .to_str()
@@ -1175,7 +1188,8 @@ mod tests {
             &[b_nt.to_string_lossy().to_string()],
             false,
             Some("http://ex/g"),
-        )?;
+        )
+        .await?;
 
         let query_path = work_dir.path().join("query.rq");
         fs::write(&query_path, "SELECT ?s WHERE { ?s <http://ex/p> ?o }")?;

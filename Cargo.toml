@@ -21,11 +21,14 @@ harness = false
 
 [dependencies]
 anyhow = { version = "1.0", default-features = false }
+async-trait = "0.1"
+bzip2 = "0.6"
 clap = { version = "4.5" }
 clap-verbosity-flag = { version = "3.0", default-features = false, features = ["log"] }
 env_logger = { version = "0.11", default-features = false }
 exitcode = "1.1"
-hdt = { git = "https://github.com/DeciSym/hdt", default-features = false, features = ["nt", "sparql"], rev = "1c31287ce99f4a38640f230b20072322d0fa9852" }
+flate2 = "1"
+hdt = { path = "../hdt", default-features = false, features = ["nt", "sparql", "cache"] }
 http = { version = "1.4", optional = true }
 log = "0.4"
 oxhttp = { version = "0.3", optional=true }
@@ -37,12 +40,14 @@ spareval = { version = "0.2", features = ["sep-0002", "sep-0006"] }
 spargebra = "0.4"
 reasonable = "0.3.2"
 tempfile = {version = "3.25"}
-tokio = { version = "1.49", default-features = false, features = ["rt-multi-thread", "macros", "sync"] }
-url = "2.5"
+thiserror = "2.0"
+tokio = { version = "1.49", default-features = false, features = ["full"] }
+url = { version = "2.5" }
 
 [dev-dependencies]
 urlencoding = "2.1"
 criterion = { version = "0.5", features = ["async_tokio"] }
+futures = "0.3"
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 pprof = { version = "0.15", features = ["protobuf", "protobuf-codec", "criterion"] }

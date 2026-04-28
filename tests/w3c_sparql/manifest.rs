@@ -43,7 +43,7 @@ fn collect_cases_from_manifest(
     }
     let manifest_base = manifest_path
         .parent()
-        .map_or_else(|| Path::new(""), |d| d)
+        .unwrap_or_else(|| Path::new(""))
         .to_path_buf();
 
     let graph = match load_manifest_graph(&manifest_path) {

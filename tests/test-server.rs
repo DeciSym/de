@@ -63,7 +63,7 @@ mod server_tests {
     }
 
     // Helper to create test HDT files
-    fn setup_test_store() -> anyhow::Result<(tempfile::TempDir, AggregateHdt)> {
+    async fn setup_test_store() -> anyhow::Result<(tempfile::TempDir, AggregateHdt)> {
         let tmp_dir = tempdir()?;
 
         let book1_nt = tmp_dir.path().join("book1.nt");
@@ -82,13 +82,15 @@ mod server_tests {
         de::create::do_create(
             &book1_hdt.to_string_lossy(),
             &[book1_nt.to_string_lossy().to_string()],
-        )?;
+        )
+        .await?;
 
         let book2_hdt = tmp_dir.path().join("book2.hdt");
         de::create::do_create(
             &book2_hdt.to_string_lossy(),
             &[book2_nt.to_string_lossy().to_string()],
-        )?;
+        )
+        .await?;
 
         // Create AggregateHdt store
         let store = AggregateHdt::new(&[
@@ -130,9 +132,9 @@ mod server_tests {
         result.map_err(|(status, msg)| anyhow::anyhow!("HTTP Error {}: {}", status, msg))
     }
 
-    #[test]
-    fn test_sparql_query_post() -> anyhow::Result<()> {
-        let (tmp_dir, store) = setup_test_store()?;
+    #[tokio::test]
+    async fn test_sparql_query_post() -> anyhow::Result<()> {
+        let (tmp_dir, store) = setup_test_store().await?;
 
         let query = format!("SELECT ?title WHERE {{ {BOOK1_IRI} {DC_TITLE} ?title . }}");
 
@@ -160,9 +162,9 @@ mod server_tests {
         Ok(())
     }
 
-    #[test]
-    fn test_sparql_query_respects_default_graph_uri() -> anyhow::Result<()> {
-        let (tmp_dir, store) = setup_test_store()?;
+    #[tokio::test]
+    async fn test_sparql_query_respects_default_graph_uri() -> anyhow::Result<()> {
+        let (tmp_dir, store) = setup_test_store().await?;
         let book2_graph = file_graph_uri(tmp_dir.path(), "book2.hdt");
         let encode = |value: &str| {
             url::form_urlencoded::byte_serialize(value.as_bytes()).collect::<String>()
@@ -209,9 +211,9 @@ mod server_tests {
         Ok(())
     }
 
-    #[test]
-    fn test_sparql_query_ask() -> anyhow::Result<()> {
-        let (tmp_dir, store) = setup_test_store()?;
+    #[tokio::test]
+    async fn test_sparql_query_ask() -> anyhow::Result<()> {
+        let (tmp_dir, store) = setup_test_store().await?;
 
         let query = format!("ASK {{ {BOOK1_IRI} {DC_TITLE} \"SPARQL Tutorial\" . }}");
 
@@ -237,8 +239,8 @@ mod server_tests {
         Ok(())
     }
 
-    #[test]
-    fn test_sparql_query_streams_large_solution_set() -> anyhow::Result<()> {
+    #[tokio::test]
+    async fn test_sparql_query_streams_large_solution_set() -> anyhow::Result<()> {
         let tmp_dir = tempdir()?;
 
         let large_nt = tmp_dir.path().join("large.nt");
@@ -248,7 +250,8 @@ mod server_tests {
         de::create::do_create(
             &large_hdt.to_string_lossy(),
             &[large_nt.to_string_lossy().to_string()],
-        )?;
+        )
+        .await?;
 
         let store = AggregateHdt::new(&[large_hdt.to_string_lossy().to_string()])?;
 
@@ -279,9 +282,9 @@ mod server_tests {
         Ok(())
     }
 
-    #[test]
-    fn test_sparql_query_service_description() -> anyhow::Result<()> {
-        let (tmp_dir, store) = setup_test_store()?;
+    #[tokio::test]
+    async fn test_sparql_query_service_description() -> anyhow::Result<()> {
+        let (tmp_dir, store) = setup_test_store().await?;
 
         // Test GET to /query without query parameter (should return service description)
         let mut request = Request::builder()
@@ -310,9 +313,9 @@ mod server_tests {
         Ok(())
     }
 
-    #[test]
-    fn test_update_create_graph_not_implemented() -> anyhow::Result<()> {
-        let (tmp_dir, store) = setup_test_store()?;
+    #[tokio::test]
+    async fn test_update_create_graph_not_implemented() -> anyhow::Result<()> {
+        let (tmp_dir, store) = setup_test_store().await?;
 
         // Test CREATE GRAPH
         let update = "CREATE GRAPH <http://example.org/newgraph>";
@@ -338,9 +341,9 @@ mod server_tests {
         Ok(())
     }
 
-    #[test]
-    fn test_update_insert_data_not_implemented() -> anyhow::Result<()> {
-        let (tmp_dir, store) = setup_test_store()?;
+    #[tokio::test]
+    async fn test_update_insert_data_not_implemented() -> anyhow::Result<()> {
+        let (tmp_dir, store) = setup_test_store().await?;
 
         // Test INSERT DATA to a new graph
         let update = r#"
@@ -373,9 +376,9 @@ mod server_tests {
         Ok(())
     }
 
-    #[test]
-    fn test_update_delete_data_not_implemented() -> anyhow::Result<()> {
-        let (tmp_dir, store) = setup_test_store()?;
+    #[tokio::test]
+    async fn test_update_delete_data_not_implemented() -> anyhow::Result<()> {
+        let (tmp_dir, store) = setup_test_store().await?;
 
         // Test that DELETE DATA is forbidden (read-only for existing graphs)
         let book1_graph = file_graph_uri(tmp_dir.path(), "book1.hdt");
@@ -440,9 +443,9 @@ mod server_tests {
         Ok(())
     }
 
-    #[test]
-    fn test_store_get_not_implemented() -> anyhow::Result<()> {
-        let (tmp_dir, store) = setup_test_store()?;
+    #[tokio::test]
+    async fn test_store_get_not_implemented() -> anyhow::Result<()> {
+        let (tmp_dir, store) = setup_test_store().await?;
         assert_store_not_implemented(
             &store,
             &tmp_dir,
@@ -453,9 +456,9 @@ mod server_tests {
         )
     }
 
-    #[test]
-    fn test_store_put_not_implemented() -> anyhow::Result<()> {
-        let (tmp_dir, store) = setup_test_store()?;
+    #[tokio::test]
+    async fn test_store_put_not_implemented() -> anyhow::Result<()> {
+        let (tmp_dir, store) = setup_test_store().await?;
         assert_store_not_implemented(
             &store,
             &tmp_dir,
@@ -466,9 +469,9 @@ mod server_tests {
         )
     }
 
-    #[test]
-    fn test_store_post_not_implemented() -> anyhow::Result<()> {
-        let (tmp_dir, store) = setup_test_store()?;
+    #[tokio::test]
+    async fn test_store_post_not_implemented() -> anyhow::Result<()> {
+        let (tmp_dir, store) = setup_test_store().await?;
         assert_store_not_implemented(
             &store,
             &tmp_dir,
@@ -479,9 +482,9 @@ mod server_tests {
         )
     }
 
-    #[test]
-    fn test_store_delete_not_implemented() -> anyhow::Result<()> {
-        let (tmp_dir, store) = setup_test_store()?;
+    #[tokio::test]
+    async fn test_store_delete_not_implemented() -> anyhow::Result<()> {
+        let (tmp_dir, store) = setup_test_store().await?;
         assert_store_not_implemented(
             &store,
             &tmp_dir,
@@ -492,9 +495,9 @@ mod server_tests {
         )
     }
 
-    #[test]
-    fn test_store_head_not_implemented() -> anyhow::Result<()> {
-        let (tmp_dir, store) = setup_test_store()?;
+    #[tokio::test]
+    async fn test_store_head_not_implemented() -> anyhow::Result<()> {
+        let (tmp_dir, store) = setup_test_store().await?;
         assert_store_not_implemented(
             &store,
             &tmp_dir,
@@ -505,9 +508,9 @@ mod server_tests {
         )
     }
 
-    #[test]
-    fn test_store_prefix_path_is_not_treated_as_store() -> anyhow::Result<()> {
-        let (tmp_dir, store) = setup_test_store()?;
+    #[tokio::test]
+    async fn test_store_prefix_path_is_not_treated_as_store() -> anyhow::Result<()> {
+        let (tmp_dir, store) = setup_test_store().await?;
         let mut request = Request::builder()
             .method(Method::GET)
             .uri("http://localhost/storehouse")
@@ -526,9 +529,9 @@ mod server_tests {
         Ok(())
     }
 
-    #[test]
-    fn test_invalid_sparql_query() -> anyhow::Result<()> {
-        let (tmp_dir, store) = setup_test_store()?;
+    #[tokio::test]
+    async fn test_invalid_sparql_query() -> anyhow::Result<()> {
+        let (tmp_dir, store) = setup_test_store().await?;
 
         // Test invalid SPARQL query
         let query = "INVALID SPARQL QUERY";

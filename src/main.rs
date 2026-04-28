@@ -139,6 +139,7 @@ async fn run_command<W: Write>(
             *allow_merge_named_graphs,
             graph_iri.as_deref(),
         )
+        .await
         .map(|_| ()),
         Commands::View { data } => view::view_hdt(data, stdout_writer),
         #[cfg(feature = "server")]

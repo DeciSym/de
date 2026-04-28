@@ -34,8 +34,8 @@ fn remove_hdt_cache_files(hdt_path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-#[test]
-fn test_parallel_processes_query_same_hdt_without_cache_races() -> anyhow::Result<()> {
+#[tokio::test]
+async fn test_parallel_processes_query_same_hdt_without_cache_races() -> anyhow::Result<()> {
     let tmp = tempfile::tempdir()?;
     let nt_path = tmp.path().join("dataset.nt");
     let hdt_path = tmp.path().join("dataset.hdt");
@@ -50,7 +50,8 @@ fn test_parallel_processes_query_same_hdt_without_cache_races() -> anyhow::Resul
             .to_str()
             .ok_or_else(|| anyhow::anyhow!("invalid HDT path"))?,
         &[nt_path.to_string_lossy().to_string()],
-    )?;
+    )
+    .await?;
     fs::write(&query_path, "SELECT ?s WHERE { ?s ?p ?o }")?;
 
     let bin = env!("CARGO_BIN_EXE_de");

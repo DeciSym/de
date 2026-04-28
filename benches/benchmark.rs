@@ -41,25 +41,29 @@ fn query(c: &mut Criterion) {
         .expect("temporary HDT path must be valid UTF-8")
         .to_string();
     let query_files = vec![query_file];
-
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("failed to build tokio runtime");
     let mut create_group = c.benchmark_group("create_hdt_from_ttl_file");
     create_group.sample_size(10);
     create_group.measurement_time(Duration::from_secs(120));
     create_group.bench_function("create_hdt", |b| {
         b.iter(|| {
-            create::do_create(&test_hdt_path, std::slice::from_ref(&source_rdf))
-                .expect("failed to create HDT from benchmark fixture");
+            runtime.block_on(async {
+                create::do_create(&test_hdt_path, std::slice::from_ref(&source_rdf))
+                    .await
+                    .expect("failed to create HDT from benchmark fixture");
+            })
         });
     });
     create_group.finish();
 
-    create::do_create(&test_hdt_path, std::slice::from_ref(&source_rdf))
-        .expect("failed to prepare HDT fixture for query benchmarks");
-
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("failed to build tokio runtime");
+    runtime.block_on(async {
+        create::do_create(&test_hdt_path, std::slice::from_ref(&source_rdf))
+            .await
+            .expect("failed to prepare HDT fixture for query benchmarks");
+    });
 
     let hdt_data_files = vec![test_hdt_path];
     let mut hdt_writer = devnull_writer();

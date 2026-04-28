@@ -4,6 +4,7 @@
 use std::path::Path;
 
 pub mod create;
+pub mod enrich;
 mod graph_iri;
 mod hdt_meta;
 pub mod query;
