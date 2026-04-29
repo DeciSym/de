@@ -921,6 +921,7 @@ checksum = "4f467dd6dccf739c208452f8014c75c18bb8301b050ad1cfb27153803edb0f51"
 [[package]]
 name = "hdt"
 version = "0.5.0"
+source = "git+https://github.com/DeciSym/hdt.git?rev=77fed96f900ef975c9cf1ea55d88bed9c2f6365d#77fed96f900ef975c9cf1ea55d88bed9c2f6365d"
 dependencies = [
  "bincode 2.0.1",
  "bitset-core",
@@ -1855,8 +1856,8 @@ dependencies = [
 
 [[package]]
 name = "reasonable"
-version = "0.3.2"
-source = "git+https://github.com/DeciSym/reasonable.git?rev=840b62fb9954cefb91f816886cd83727a1752629#840b62fb9954cefb91f816886cd83727a1752629"
+version = "0.4.0"
+source = "git+https://github.com/DeciSym/reasonable.git?rev=8f866a596739e18e97b5b1d87efa35a20122b0c5#8f866a596739e18e97b5b1d87efa35a20122b0c5"
 dependencies = [
  "anyhow",
  "clap",

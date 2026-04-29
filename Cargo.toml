@@ -28,7 +28,7 @@ clap-verbosity-flag = { version = "3.0", default-features = false, features = ["
 env_logger = { version = "0.11", default-features = false }
 exitcode = "1.1"
 flate2 = "1"
-hdt = { path = "../hdt", default-features = false, features = ["nt", "sparql", "cache"] }
+hdt = { version = "0.5.0", default-features = false, features = ["nt", "sparql", "cache"] }
 http = { version = "1.4", optional = true }
 log = "0.4"
 oxhttp = { version = "0.3", optional=true }
@@ -38,7 +38,7 @@ rayon = "1.11.0"
 sparesults = "0.3"
 spareval = { version = "0.2", features = ["sep-0002", "sep-0006"] }
 spargebra = "0.4"
-reasonable = "0.3.2"
+reasonable = "0.4.0"
 tempfile = {version = "3.27"}
 thiserror = "2.0"
 tokio = { version = "1.49", default-features = false, features = ["full"] }
@@ -70,9 +70,10 @@ default = []
 server = ["dep:oxhttp", "dep:http"]
 
 [patch.crates-io]
-reasonable = { git = "https://github.com/DeciSym/reasonable.git", rev = "840b62fb9954cefb91f816886cd83727a1752629" }
+reasonable = { git = "https://github.com/DeciSym/reasonable.git", rev = "8f866a596739e18e97b5b1d87efa35a20122b0c5" }
 spareval = { git = "https://github.com/DeciSym/oxigraph.git", rev = "41f06ccc28650ebed22cc8354964972f3a817006" }
 sparopt = { git = "https://github.com/DeciSym/oxigraph.git", rev = "41f06ccc28650ebed22cc8354964972f3a817006" }
 spargebra = { git = "https://github.com/DeciSym/oxigraph.git", rev = "41f06ccc28650ebed22cc8354964972f3a817006" }
 lasso = { git = "https://github.com/DeciSym/lasso.git", rev = "8fbbb1a229b7f1d49920233cdf01177a5bef180c" }
+hdt = { git = "https://github.com/DeciSym/hdt.git", rev = "77fed96f900ef975c9cf1ea55d88bed9c2f6365d" }
 
