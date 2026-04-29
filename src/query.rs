@@ -805,14 +805,36 @@ fn materialize_entailment_closure_nt(
     rdf_nt_path: &Path,
     temp_dir: &Path,
 ) -> anyhow::Result<PathBuf> {
+    // Cap the in-flight `Vec<Triple>` at CHUNK triples and feed the reasoner
+    // in batches. Each flush drains the buffer into `reasoner.load_triples`,
+    // which extends `Reasoner::base`/`input` (no `reason()` is called between
+    // flushes, so `is_materialized` stays false and every batch takes the
+    // `add_base_triples` path). A single `reason()` after all input is loaded
+    // runs the datafrog fixpoint once over the full union, producing the
+    // same closure as the previous "buffer everything, single load+reason"
+    // pattern but with peak `Vec<Triple>` memory bounded by CHUNK regardless
+    // of total input size.
+    const CHUNK: usize = 1_000_000;
+
     let mut reasoner = Reasoner::new();
-    let mut triples = Vec::<Triple>::new();
+    let mut buf: Vec<Triple> = Vec::with_capacity(CHUNK);
+
+    let flush = |buf: &mut Vec<Triple>, reasoner: &mut Reasoner| {
+        if buf.is_empty() {
+            return;
+        }
+        reasoner.load_triples(std::mem::take(buf));
+        buf.reserve(CHUNK);
+    };
 
     for path in hdt_paths {
         let hdt = hdt::HdtAny::open_with_threshold(Path::new(path), None)
             .map_err(|e| anyhow::anyhow!("failed to read HDT {path}: {e}"))?;
         for [s, p, o] in hdt.triples_all() {
-            triples.push(hdt_raw_triple_to_oxrdf(&s, &p, &o)?);
+            buf.push(hdt_raw_triple_to_oxrdf(&s, &p, &o)?);
+            if buf.len() == CHUNK {
+                flush(&mut buf, &mut reasoner);
+            }
         }
     }
 
@@ -821,10 +843,13 @@ fn materialize_entailment_closure_nt(
             RdfParser::from_format(RdfFormat::NTriples).for_reader(File::open(rdf_nt_path)?);
         for quad in parser {
             let quad = quad?;
-            triples.push(Triple::new(quad.subject, quad.predicate, quad.object));
+            buf.push(Triple::new(quad.subject, quad.predicate, quad.object));
+            if buf.len() == CHUNK {
+                flush(&mut buf, &mut reasoner);
+            }
         }
     }
-    reasoner.load_triples(triples);
+    flush(&mut buf, &mut reasoner);
     reasoner.reason();
 
     let entailed_nt = Builder::new()
