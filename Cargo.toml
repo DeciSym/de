@@ -39,7 +39,7 @@ sparesults = "0.3"
 spareval = { version = "0.2", features = ["sep-0002", "sep-0006"] }
 spargebra = "0.4"
 reasonable = "0.3.2"
-tempfile = {version = "3.25"}
+tempfile = {version = "3.27"}
 thiserror = "2.0"
 tokio = { version = "1.49", default-features = false, features = ["full"] }
 url = { version = "2.5" }
@@ -74,3 +74,5 @@ reasonable = { git = "https://github.com/DeciSym/reasonable.git", rev = "840b62f
 spareval = { git = "https://github.com/DeciSym/oxigraph.git", rev = "41f06ccc28650ebed22cc8354964972f3a817006" }
 sparopt = { git = "https://github.com/DeciSym/oxigraph.git", rev = "41f06ccc28650ebed22cc8354964972f3a817006" }
 spargebra = { git = "https://github.com/DeciSym/oxigraph.git", rev = "41f06ccc28650ebed22cc8354964972f3a817006" }
+lasso = { git = "https://github.com/DeciSym/lasso.git", rev = "8fbbb1a229b7f1d49920233cdf01177a5bef180c" }
+

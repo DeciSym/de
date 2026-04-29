@@ -49,8 +49,10 @@ pub struct AggregateHdt {
 }
 
 pub struct AggregateHdtSnapshot {
-    // Map graph names (URIs) to HDT instances
-    pub hdts: HashMap<String, hdt::hdt::HdtHybrid>,
+    // Map graph names (URIs) to HDT instances. Each value can be either the
+    // hybrid (mmap+cache) or fully in-memory backend; HdtAny picks the right
+    // one per file (see hdt::HdtAny::open).
+    pub hdts: HashMap<String, hdt::HdtAny>,
     // Optional explicit default graph membership. If None, all loaded graphs are used as default.
     pub default_graphs: Option<HashSet<String>>,
     // Optional explicit named graph membership. If None, all loaded graphs are named.
@@ -162,13 +164,15 @@ impl AggregateHdt {
             .collect();
         drop(file_paths_guard);
 
-        // Load filtered HDTs in parallel
-        let hdts: HashMap<String, hdt::hdt::HdtHybrid> = paths_vec
+        // Load filtered HDTs in parallel. HdtAny::open prefers the hybrid
+        // (mmap+cache) backend but falls back to in-memory for files where
+        // the hybrid cache cannot be built (e.g. zero-triple HDTs that the
+        // wavelet-tree library refuses to index).
+        let hdts: HashMap<String, hdt::HdtAny> = paths_vec
             .par_iter()
             .map(
-                |(graph_name, path)| -> anyhow::Result<(String, hdt::hdt::HdtHybrid)> {
-                    // let mut reader = BufReader::new(std::fs::File::open(path)?);
-                    let hdt = hdt::Hdt::new_hybrid_cache(path).map_err(|e| {
+                |(graph_name, path)| -> anyhow::Result<(String, hdt::HdtAny)> {
+                    let hdt = hdt::HdtAny::open_with_threshold(path, None).map_err(|e| {
                         anyhow::anyhow!("Failed to load HDT from {:?}: {}", path, e)
                     })?;
                     Ok((graph_name.clone(), hdt))
@@ -283,7 +287,7 @@ pub fn term_to_hdt_bgp_str(term: Term) -> String {
 }
 
 struct StreamingInternalQuadIter<'a> {
-    graphs: Vec<(&'a String, &'a hdt::hdt::HdtHybrid)>,
+    graphs: Vec<(&'a String, &'a hdt::HdtAny)>,
     subject: Option<Arc<str>>,
     predicate: Option<Arc<str>>,
     object: Option<Arc<str>>,
@@ -323,12 +327,46 @@ fn unscoped_pattern_term(term: &Arc<str>, graph_name: &Arc<str>) -> Option<Arc<s
     Some(Arc::from(format!("_:{original}")))
 }
 
+// TODO: Delete this function once `hdt::HdtGeneric::triples_with_pattern`
+// relaxes its input lifetime constraints. Today upstream's signature is
+// `triples_with_pattern<'a>(&'a self, sp: Option<&'a str>, ...)`, tying the
+// input `&str` lifetime to the returned iterator's lifetime — even though the
+// body internally clones each input to `Arc<str>` and never borrows from the
+// originals past the call. That tight lifetime forces us to keep this owned
+// `Arc<str>` shaped wrapper because our filter terms (computed locally in
+// `StreamingInternalQuadIter::ensure_current_iter` after blank-node
+// unscoping) don't outlive the iterator. When upstream relaxes the signature
+// (e.g. `Option<&str>` with an unrelated lifetime), this whole function
+// collapses to `hdt.triples_with_pattern(s.as_deref(), p.as_deref(),
+// o.as_deref())` and we additionally pick up upstream's `TripleCache` for
+// repeated id->string lookups.
 fn indexed_triples_with_pattern<'a>(
-    hdt: &'a hdt::hdt::HdtHybrid,
+    hdt: &'a hdt::HdtAny,
     subject: Option<Arc<str>>,
     predicate: Option<Arc<str>>,
     object: Option<Arc<str>>,
 ) -> Box<dyn Iterator<Item = StringTriple> + 'a> {
+    match hdt {
+        hdt::HdtAny::Hybrid(h) => {
+            indexed_triples_with_pattern_generic(h, subject, predicate, object)
+        }
+        hdt::HdtAny::InMemory(h) => {
+            indexed_triples_with_pattern_generic(h, subject, predicate, object)
+        }
+    }
+}
+
+fn indexed_triples_with_pattern_generic<'a, D, S, B>(
+    hdt: &'a hdt::HdtGeneric<D, S, B>,
+    subject: Option<Arc<str>>,
+    predicate: Option<Arc<str>>,
+    object: Option<Arc<str>>,
+) -> Box<dyn Iterator<Item = StringTriple> + 'a>
+where
+    D: hdt::DictSectPfcAccess + 'a,
+    S: hdt::containers::SequenceAccess + 'a,
+    B: hdt::containers::BitmapAccess + 'a,
+{
     use hdt::IdKind;
     use hdt::triples::{ObjectIter, PredicateIter, PredicateObjectIter, SubjectIter};
 
@@ -510,7 +548,7 @@ impl<'a> QueryableDataset<'a> for &'a AggregateHdtSnapshot {
         // Note: get_snapshot() already filtered graphs at load time,
         // so self.hdts contains only the required graphs. This filter
         // handles additional runtime graph name matching from the query.
-        let graphs_to_query: Vec<(&String, &hdt::hdt::HdtHybrid)> = self
+        let graphs_to_query: Vec<(&String, &hdt::HdtAny)> = self
             .hdts
             .iter()
             .filter(|(g, _h)| {

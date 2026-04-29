@@ -809,7 +809,7 @@ fn materialize_entailment_closure_nt(
     let mut triples = Vec::<Triple>::new();
 
     for path in hdt_paths {
-        let hdt = hdt::Hdt::new_hybrid_cache(Path::new(path))
+        let hdt = hdt::HdtAny::open_with_threshold(Path::new(path), None)
             .map_err(|e| anyhow::anyhow!("failed to read HDT {path}: {e}"))?;
         for [s, p, o] in hdt.triples_all() {
             triples.push(hdt_raw_triple_to_oxrdf(&s, &p, &o)?);
