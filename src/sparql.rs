@@ -189,6 +189,35 @@ impl AggregateHdt {
         })
     }
 
+    /// Returns `true` if the given graph IRI is registered in the path map.
+    ///
+    /// This is a cheap path-map lookup; it does not load any HDT data.
+    /// Useful for store-protocol HEAD/PUT/DELETE preconditions.
+    #[cfg(feature = "server")]
+    pub fn contains_graph_name(&self, graph_name: &str) -> anyhow::Result<bool> {
+        let guard = lock_read_file_paths(&self.file_paths, "checking graph existence")?;
+        Ok(guard.contains_key(graph_name))
+    }
+
+    /// Returns all graph IRIs currently registered in the path map.
+    ///
+    /// This is a cheap path-map lookup; it does not load any HDT data.
+    #[cfg(feature = "server")]
+    pub fn graph_names(&self) -> anyhow::Result<Vec<String>> {
+        let guard = lock_read_file_paths(&self.file_paths, "listing graph names")?;
+        Ok(guard.keys().cloned().collect())
+    }
+
+    /// Returns the on-disk canonical path for the given graph IRI, or
+    /// `None` if it is not registered.
+    ///
+    /// This is a cheap path-map lookup; it does not load any HDT data.
+    #[cfg(feature = "server")]
+    pub fn graph_path(&self, graph_name: &str) -> anyhow::Result<Option<PathBuf>> {
+        let guard = lock_read_file_paths(&self.file_paths, "reading graph path")?;
+        Ok(guard.get(graph_name).cloned())
+    }
+
     /// Sync the AggregateHdt with the current HDT files in the specified location.
     /// This method refreshes mappings by re-scanning HDT files in the location.
     ///
