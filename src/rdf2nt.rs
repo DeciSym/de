@@ -63,6 +63,12 @@ pub struct ConvertResult {
     pub converted: usize,
     pub unhandled: Vec<String>,
     pub named_graphs: BTreeSet<String>,
+    /// True if any quad in the default graph (`GraphName::DefaultGraph`) was
+    /// observed. Tracked separately because the default graph has no IRI and
+    /// therefore can't live in `named_graphs`. Consumers counting distinct
+    /// graph regions (e.g. to gate a merge-into-single-HDT operation) should
+    /// add `usize::from(has_default_graph_triples)` to `named_graphs.len()`.
+    pub has_default_graph_triples: bool,
 }
 
 /// Rdf2Nt implementation using oxrdf and oxrdfio crates
@@ -136,7 +142,9 @@ impl Rdf2Nt for OxRdfConvert {
                         }
                     }
                 };
-                if q.graph_name != DefaultGraph {
+                if q.graph_name == DefaultGraph {
+                    res.has_default_graph_triples = true;
+                } else {
                     if !warned_named_graph_merge {
                         warn!("HDT does not support named graphs, merging triples for {file}");
                         warned_named_graph_merge = true;

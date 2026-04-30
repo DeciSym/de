@@ -64,6 +64,7 @@ pub async fn do_create_with_options(
         &[],
         None,
         file_id_fn,
+        allow_merge_named_graphs,
     )
     .await?;
     if !rdf_result.unknown_files.is_empty() {
@@ -80,13 +81,6 @@ pub async fn do_create_with_options(
         return Err(anyhow::anyhow!(
             "unsupported files detected: {:?}",
             rdf_result.unknown_files
-        ));
-    }
-    if !allow_merge_named_graphs && rdf_result.named_graphs.len() > 1 {
-        return Err(anyhow::anyhow!(
-            "multiple named graphs detected during create ({:?}). HDT output is single-graph. \
-Use --allow-merge-named-graphs to explicitly merge these graphs into the output graph.",
-            rdf_result.named_graphs
         ));
     }
 
@@ -164,6 +158,7 @@ pub async fn files_to_rdf(
     enrichers: &[Box<dyn Enricher>],
     root_id: Option<&NamedNode>,
     file_id_fn: FileIdFn<'_>,
+    allow_merge_named_graphs: bool,
 ) -> anyhow::Result<FilesToRdfResult, anyhow::Error> {
     // Reject ambiguous enricher configurations up front: a single extension
     // claimed by more than one enricher is a caller bug. The previous
@@ -247,6 +242,33 @@ pub async fn files_to_rdf(
     };
 
     let have_enriched_output = !enriched_sources.is_empty();
+
+    // Gate the multi-graph merge before the orchestrator commits to building
+    // a combined output. Distinct graph regions = each named graph in the
+    // converted slice + the default graph if any input contributes to it.
+    // Default-graph contributions come from three sources:
+    //   - converted formats with default-graph quads (`conv_res.has_default_graph_triples`)
+    //   - `.nt` direct-copy inputs (N-Triples has no graph context)
+    //   - enricher outputs (`Triple`, not `Quad` — implicitly default-graph)
+    // The `convert_to_nt` trait stays observational; the policy decision
+    // lives here because this is the earliest point with full visibility
+    // across all three input categories.
+    let has_default_graph_triples =
+        conv_res.has_default_graph_triples || !nt_files.is_empty() || have_enriched_output;
+    let distinct_regions = conv_res.named_graphs.len() + usize::from(has_default_graph_triples);
+    if !allow_merge_named_graphs && distinct_regions > 1 {
+        let mut regions: Vec<String> = conv_res.named_graphs.iter().cloned().collect();
+        regions.sort_unstable();
+        if has_default_graph_triples {
+            regions.push("<default graph>".to_string());
+        }
+        return Err(anyhow::anyhow!(
+            "multiple graphs detected during create ({:?}). HDT output is single-graph. \
+Use --allow-merge-named-graphs to explicitly merge these graphs into the output graph.",
+            regions
+        ));
+    }
+
     let combined_rdf_path = if nt_files.len() > 1 || conv_res.converted != 0 || have_enriched_output
     {
         for nt_file in nt_files {
@@ -348,6 +370,120 @@ mod tests {
                 .to_string()],
             true,
             None,
+        )
+        .await;
+        assert!(result.is_ok());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn create_fails_when_named_graph_and_default_graph_are_merged_without_override()
+    -> anyhow::Result<()> {
+        // One named graph + at least one default-graph quad is still a merge
+        // into a single-graph HDT output and should require the override,
+        // even though `named_graphs.len() == 1`. Regression guard for the
+        // case the previous `> 1` check missed.
+        let tmp = tempdir()?;
+        let nq_path = tmp.path().join("default_plus_named.nq");
+        let out_hdt = tmp.path().join("out.hdt");
+        write(
+            &nq_path,
+            "<http://example.org/s1> <http://example.org/p> <http://example.org/o1> .\n\
+             <http://example.org/s2> <http://example.org/p> <http://example.org/o2> <http://example.org/g> .\n",
+        )?;
+
+        let result = do_create(
+            out_hdt
+                .to_str()
+                .ok_or_else(|| anyhow::anyhow!("invalid output path"))?,
+            &[nq_path
+                .to_str()
+                .ok_or_else(|| anyhow::anyhow!("invalid input path"))?
+                .to_string()],
+        )
+        .await;
+        assert!(result.is_err());
+        let msg = result.expect_err("expected error").to_string();
+        assert!(msg.contains("--allow-merge-named-graphs"));
+        assert!(msg.contains("<default graph>"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn create_allows_named_graph_and_default_graph_merge_with_override() -> anyhow::Result<()>
+    {
+        let tmp = tempdir()?;
+        let nq_path = tmp.path().join("default_plus_named.nq");
+        let out_hdt = tmp.path().join("out.hdt");
+        write(
+            &nq_path,
+            "<http://example.org/s1> <http://example.org/p> <http://example.org/o1> .\n\
+             <http://example.org/s2> <http://example.org/p> <http://example.org/o2> <http://example.org/g> .\n",
+        )?;
+
+        let result = do_create_with_options(
+            out_hdt
+                .to_str()
+                .ok_or_else(|| anyhow::anyhow!("invalid output path"))?,
+            &[nq_path
+                .to_str()
+                .ok_or_else(|| anyhow::anyhow!("invalid input path"))?
+                .to_string()],
+            true,
+            None,
+        )
+        .await;
+        assert!(result.is_ok());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn create_succeeds_with_only_default_graph_quads() -> anyhow::Result<()> {
+        // Default-graph-only input is not a merge — no override needed.
+        let tmp = tempdir()?;
+        let nq_path = tmp.path().join("default_only.nq");
+        let out_hdt = tmp.path().join("out.hdt");
+        write(
+            &nq_path,
+            "<http://example.org/s1> <http://example.org/p> <http://example.org/o1> .\n\
+             <http://example.org/s2> <http://example.org/p> <http://example.org/o2> .\n",
+        )?;
+
+        let result = do_create(
+            out_hdt
+                .to_str()
+                .ok_or_else(|| anyhow::anyhow!("invalid output path"))?,
+            &[nq_path
+                .to_str()
+                .ok_or_else(|| anyhow::anyhow!("invalid input path"))?
+                .to_string()],
+        )
+        .await;
+        assert!(result.is_ok());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn create_succeeds_with_only_one_named_graph() -> anyhow::Result<()> {
+        // A single named graph with no default-graph activity is not a merge;
+        // no override should be required.
+        let tmp = tempdir()?;
+        let nq_path = tmp.path().join("single_named.nq");
+        let out_hdt = tmp.path().join("out.hdt");
+        write(
+            &nq_path,
+            "<http://example.org/s1> <http://example.org/p> <http://example.org/o1> <http://example.org/g> .\n\
+             <http://example.org/s2> <http://example.org/p> <http://example.org/o2> <http://example.org/g> .\n",
+        )?;
+
+        let result = do_create(
+            out_hdt
+                .to_str()
+                .ok_or_else(|| anyhow::anyhow!("invalid output path"))?,
+            &[nq_path
+                .to_str()
+                .ok_or_else(|| anyhow::anyhow!("invalid input path"))?
+                .to_string()],
         )
         .await;
         assert!(result.is_ok());
@@ -496,6 +632,7 @@ mod tests {
             &enrichers,
             Some(&root_id),
             file_id_fn,
+            true,
         )
         .await?;
 
@@ -554,6 +691,7 @@ mod tests {
             &enrichers,
             Some(&root_id),
             file_id_fn,
+            true,
         )
         .await
         .unwrap();
@@ -587,6 +725,7 @@ mod tests {
             &[],
             None,
             file_id_fn,
+            true,
         )
         .await
         .unwrap();
@@ -628,6 +767,7 @@ mod tests {
             &enrichers,
             Some(&root_id),
             file_id_fn,
+            true,
         )
         .await
         .unwrap();
@@ -658,6 +798,7 @@ mod tests {
             &enrichers,
             None,
             file_id_fn,
+            true,
         )
         .await
         .unwrap();
@@ -718,6 +859,7 @@ mod tests {
             &enrichers,
             None,
             file_id_fn,
+            true,
         )
         .await
         .expect_err("FailingParseEnricher should propagate an error");
@@ -762,6 +904,7 @@ mod tests {
             &enrichers,
             None,
             file_id_fn,
+            true,
         )
         .await
         .expect_err("duplicate extension claim must be rejected");
@@ -811,6 +954,7 @@ mod tests {
             &enrichers,
             None,
             file_id_fn,
+            true,
         )
         .await
         .unwrap();

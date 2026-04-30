@@ -570,6 +570,8 @@ async fn handle_files(
     // No enrichers are wired in this path, so the file_id closure is never
     // invoked. A panic closure documents that expectation at the type level.
     let file_id_fn: create::FileIdFn = &|_| unreachable!("no enrichers registered");
+    // Querying always merges all input data into one HDT for SPARQL evaluation,
+    // so the multi-graph gate is intentionally bypassed here.
     let result = match create::files_to_rdf(
         &files_to_convert,
         &mut rdf_tempfile,
@@ -577,6 +579,7 @@ async fn handle_files(
         &[],
         None,
         file_id_fn,
+        true,
     )
     .await
     {
