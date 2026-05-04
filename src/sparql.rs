@@ -652,12 +652,15 @@ impl<'a> QueryableDataset<'a> for &'a AggregateHdtSnapshot {
     }
 }
 
-pub fn query<'a>(
+pub fn query<'a, D>(
     q: &str,
-    hdt: &'a AggregateHdtSnapshot,
+    dataset: D,
     base_iri: Option<String>,
-) -> Result<spareval::QueryResults<'a>, QueryEvaluationError> {
-    query_with_debug_plan(q, hdt, base_iri, false)
+) -> Result<spareval::QueryResults<'a>, QueryEvaluationError>
+where
+    D: QueryableDataset<'a>,
+{
+    query_with_debug_plan(q, dataset, base_iri, false)
 }
 
 pub fn parse_query(q: &str, base_iri: &str) -> Result<Query, QueryEvaluationError> {
@@ -667,32 +670,41 @@ pub fn parse_query(q: &str, base_iri: &str) -> Result<Query, QueryEvaluationErro
         .parse_query(q)?)
 }
 
-pub fn query_parsed_with_debug_plan<'a>(
+pub fn query_parsed_with_debug_plan<'a, D>(
     parsed: Query,
-    hdt: &'a AggregateHdtSnapshot,
+    dataset: D,
     debug_plan: bool,
-) -> Result<spareval::QueryResults<'a>, QueryEvaluationError> {
-    evaluate_query_with_debug_plan(parsed, hdt, debug_plan)
+) -> Result<spareval::QueryResults<'a>, QueryEvaluationError>
+where
+    D: QueryableDataset<'a>,
+{
+    evaluate_query_with_debug_plan(parsed, dataset, debug_plan)
 }
 
-pub fn query_with_debug_plan<'a>(
+pub fn query_with_debug_plan<'a, D>(
     q: &str,
-    hdt: &'a AggregateHdtSnapshot,
+    dataset: D,
     base_iri: Option<String>,
     debug_plan: bool,
-) -> Result<spareval::QueryResults<'a>, QueryEvaluationError> {
+) -> Result<spareval::QueryResults<'a>, QueryEvaluationError>
+where
+    D: QueryableDataset<'a>,
+{
     let base = base_iri.unwrap_or_else(|| "http://example.com/".to_string());
     let parsed = parse_query(q, &base)?;
-    evaluate_query_with_debug_plan(parsed, hdt, debug_plan)
+    evaluate_query_with_debug_plan(parsed, dataset, debug_plan)
 }
 
-pub fn query_select_tsv_with_debug_plan(
+pub fn query_select_tsv_with_debug_plan<'a, D>(
     q: &str,
-    hdt: &AggregateHdtSnapshot,
+    dataset: D,
     base_iri: Option<String>,
     debug_plan: bool,
-) -> anyhow::Result<Vec<u8>> {
-    let results = query_with_debug_plan(q, hdt, base_iri, debug_plan)
+) -> anyhow::Result<Vec<u8>>
+where
+    D: QueryableDataset<'a>,
+{
+    let results = query_with_debug_plan(q, dataset, base_iri, debug_plan)
         .map_err(|e| anyhow::anyhow!("problem executing the hdt query: {e}"))?;
     let spareval::QueryResults::Solutions(query_solution_iter) = results else {
         return Err(anyhow::anyhow!(
@@ -743,16 +755,19 @@ pub fn quads_for_pattern_strings(
     Ok(quads)
 }
 
-fn evaluate_query_with_debug_plan<'a>(
+fn evaluate_query_with_debug_plan<'a, D>(
     parsed: Query,
-    hdt: &'a AggregateHdtSnapshot,
+    dataset: D,
     debug_plan: bool,
-) -> Result<spareval::QueryResults<'a>, QueryEvaluationError> {
+) -> Result<spareval::QueryResults<'a>, QueryEvaluationError>
+where
+    D: QueryableDataset<'a>,
+{
     // Keep optimizer disabled for all execution paths: this matches current upstream patch behavior
     // used to pass W3C suites in this repository and avoids optimizer-specific regressions.
     let evaluator = QueryEvaluator::new().without_optimizations();
     if debug_plan {
-        let (results, explanation) = evaluator.prepare(&parsed).explain(hdt);
+        let (results, explanation) = evaluator.prepare(&parsed).explain(dataset);
         let mut json = Vec::new();
         explanation
             .write_in_json(&mut json)
@@ -760,7 +775,7 @@ fn evaluate_query_with_debug_plan<'a>(
         eprintln!("{}", String::from_utf8_lossy(&json));
         results
     } else {
-        evaluator.prepare(&parsed).execute(hdt)
+        evaluator.prepare(&parsed).execute(dataset)
     }
 }
 
@@ -1043,17 +1058,23 @@ mod tests {
         let hdt_b = sync_dir.join("b.hdt");
         let shared_graph_iri = "http://example.org/graph/shared";
         crate::create::do_create_with_options(
-            &hdt_a.to_string_lossy(),
+            Some(&hdt_a.to_string_lossy()),
             &[nt_a.to_string_lossy().into_owned()],
             false,
             Some(shared_graph_iri),
+            &[],
+            None,
+            &|_| unreachable!("no enrichers registered"),
         )
         .await?;
         crate::create::do_create_with_options(
-            &hdt_b.to_string_lossy(),
+            Some(&hdt_b.to_string_lossy()),
             &[nt_b.to_string_lossy().into_owned()],
             false,
             Some(shared_graph_iri),
+            &[],
+            None,
+            &|_| unreachable!("no enrichers registered"),
         )
         .await?;
 

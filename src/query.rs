@@ -12,7 +12,8 @@ use oxrdfio::RdfSerializer;
 use reasonable::reasoner::Reasoner;
 use sparesults::QueryResultsFormat;
 use sparesults::QueryResultsSerializer;
-use spareval::QueryResults;
+use spareval::{QueryResults, QueryableDataset};
+use spargebra::Query;
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufWriter, Read, Write};
@@ -271,98 +272,115 @@ pub async fn do_query_with_dataset_with_options<W: Write>(
             idx
         };
         let prepared = &prepared_datasets[dataset_idx];
-        let qr = match sparql::query_parsed_with_debug_plan(
-            parsed_query,
-            &prepared.snapshot,
-            options.debug_query_plan,
-        ) {
-            Ok(r) => r,
-            Err(e) => {
-                error!("problem executing the hdt query: {e}");
-                return Err(anyhow::anyhow!("{e}"));
-            }
-        };
-
-        match qr {
-            QueryResults::Solutions(query_solution_iter) => {
-                let result_format = match out {
-                    DeOutput::CSV => QueryResultsFormat::Csv,
-                    DeOutput::TSV => QueryResultsFormat::Tsv,
-                    DeOutput::JSON => QueryResultsFormat::Json,
-                    DeOutput::XML => QueryResultsFormat::Xml,
-                    _ => {
-                        error!("SELECT queries support only CSV, TSV, JSON, or XML");
-                        return Err(anyhow::anyhow!(
-                            "SELECT queries support only CSV, TSV, JSON, or XML"
-                        ));
-                    }
-                };
-                let results_writer = QueryResultsSerializer::from_format(result_format);
-                let mut serializer = results_writer.serialize_solutions_to_writer(
-                    &mut *writer,
-                    query_solution_iter.variables().into(),
-                )?;
-                for s in query_solution_iter {
-                    let s = s?;
-                    serializer.serialize(&s).map_err(|e| {
-                        error!("error serializing query solutions to desired output format: {e}");
-                        anyhow::anyhow!(
-                            "error serializing query solutions to desired output format: {e}"
-                        )
-                    })?;
-                }
-                serializer.finish()?;
-            }
-            QueryResults::Boolean(result) => {
-                let result_format = match out {
-                    DeOutput::CSV => QueryResultsFormat::Csv,
-                    DeOutput::TSV => QueryResultsFormat::Tsv,
-                    DeOutput::JSON => QueryResultsFormat::Json,
-                    DeOutput::XML => QueryResultsFormat::Xml,
-                    _ => {
-                        warn!(
-                            "ASK queries support only CSV, TSV, JSON, or XML. Defaulting to CSV format"
-                        );
-                        QueryResultsFormat::Csv
-                    }
-                };
-                let results_writer = QueryResultsSerializer::from_format(result_format);
-                results_writer
-                    .serialize_boolean_to_writer(&mut *writer, result)
-                    .map_err(|e| {
-                        error!("error serializing query solutions to desired output format: {e}");
-                        anyhow::anyhow!(
-                            "error serializing query solutions to desired output format: {e}"
-                        )
-                    })?;
-            }
-            QueryResults::Graph(query_triple_iter) => {
-                let result_format = match out {
-                    DeOutput::N3 => RdfFormat::N3,
-                    DeOutput::NQUADS => RdfFormat::NQuads,
-                    DeOutput::NTRIPLE => RdfFormat::NTriples,
-                    DeOutput::RDFXML => RdfFormat::RdfXml,
-                    DeOutput::TRIG => RdfFormat::TriG,
-                    DeOutput::TURTLE => RdfFormat::Turtle,
-                    _ => {
-                        warn!(
-                            "CONSTRUCT and DESCRIBE queries only support NQ, NT, RDFXML, TRIG, and TTL formats. Defaulting to NTriple format"
-                        );
-                        RdfFormat::NTriples
-                    }
-                };
-                let mut serializer =
-                    RdfSerializer::from_format(result_format).for_writer(&mut *writer);
-                for triple in query_triple_iter {
-                    let triple = triple?;
-                    serializer.serialize_triple(&triple)?
-                }
-                serializer.finish()?;
-            }
-        };
+        run_query_against_dataset(parsed_query, &prepared.snapshot, out, writer, options)?;
     }
     writer.flush()?;
 
+    Ok(())
+}
+
+/// Evaluate a parsed SPARQL query against any [`QueryableDataset`] and serialize the
+/// results to `writer` using the requested output format.
+pub fn run_query_against_dataset<'a, W, D>(
+    parsed: Query,
+    dataset: D,
+    out: &DeOutput,
+    writer: &mut BufWriter<W>,
+    options: QueryExecutionOptions,
+) -> anyhow::Result<()>
+where
+    W: Write,
+    D: QueryableDataset<'a>,
+{
+    let qr = sparql::query_parsed_with_debug_plan(parsed, dataset, options.debug_query_plan)
+        .map_err(|e| {
+            error!("problem executing the hdt query: {e}");
+            anyhow::anyhow!("{e}")
+        })?;
+    write_query_results(qr, out, writer)
+}
+
+fn write_query_results<W: Write>(
+    qr: QueryResults<'_>,
+    out: &DeOutput,
+    writer: &mut BufWriter<W>,
+) -> anyhow::Result<()> {
+    match qr {
+        QueryResults::Solutions(query_solution_iter) => {
+            let result_format = match out {
+                DeOutput::CSV => QueryResultsFormat::Csv,
+                DeOutput::TSV => QueryResultsFormat::Tsv,
+                DeOutput::JSON => QueryResultsFormat::Json,
+                DeOutput::XML => QueryResultsFormat::Xml,
+                _ => {
+                    error!("SELECT queries support only CSV, TSV, JSON, or XML");
+                    return Err(anyhow::anyhow!(
+                        "SELECT queries support only CSV, TSV, JSON, or XML"
+                    ));
+                }
+            };
+            let results_writer = QueryResultsSerializer::from_format(result_format);
+            let mut serializer = results_writer.serialize_solutions_to_writer(
+                &mut *writer,
+                query_solution_iter.variables().into(),
+            )?;
+            for s in query_solution_iter {
+                let s = s?;
+                serializer.serialize(&s).map_err(|e| {
+                    error!("error serializing query solutions to desired output format: {e}");
+                    anyhow::anyhow!(
+                        "error serializing query solutions to desired output format: {e}"
+                    )
+                })?;
+            }
+            serializer.finish()?;
+        }
+        QueryResults::Boolean(result) => {
+            let result_format = match out {
+                DeOutput::CSV => QueryResultsFormat::Csv,
+                DeOutput::TSV => QueryResultsFormat::Tsv,
+                DeOutput::JSON => QueryResultsFormat::Json,
+                DeOutput::XML => QueryResultsFormat::Xml,
+                _ => {
+                    warn!(
+                        "ASK queries support only CSV, TSV, JSON, or XML. Defaulting to CSV format"
+                    );
+                    QueryResultsFormat::Csv
+                }
+            };
+            let results_writer = QueryResultsSerializer::from_format(result_format);
+            results_writer
+                .serialize_boolean_to_writer(&mut *writer, result)
+                .map_err(|e| {
+                    error!("error serializing query solutions to desired output format: {e}");
+                    anyhow::anyhow!(
+                        "error serializing query solutions to desired output format: {e}"
+                    )
+                })?;
+        }
+        QueryResults::Graph(query_triple_iter) => {
+            let result_format = match out {
+                DeOutput::N3 => RdfFormat::N3,
+                DeOutput::NQUADS => RdfFormat::NQuads,
+                DeOutput::NTRIPLE => RdfFormat::NTriples,
+                DeOutput::RDFXML => RdfFormat::RdfXml,
+                DeOutput::TRIG => RdfFormat::TriG,
+                DeOutput::TURTLE => RdfFormat::Turtle,
+                _ => {
+                    warn!(
+                        "CONSTRUCT and DESCRIBE queries only support NQ, NT, RDFXML, TRIG, and TTL formats. Defaulting to NTriple format"
+                    );
+                    RdfFormat::NTriples
+                }
+            };
+            let mut serializer = RdfSerializer::from_format(result_format).for_writer(&mut *writer);
+            for triple in query_triple_iter {
+                let triple = triple?;
+                serializer.serialize_triple(&triple)?
+            }
+            serializer.finish()?;
+        }
+    };
     Ok(())
 }
 
@@ -1201,21 +1219,31 @@ mod tests {
         let a_hdt = work_dir.path().join("a.hdt");
         let b_hdt = work_dir.path().join("b.hdt");
         create::do_create_with_options(
-            a_hdt
-                .to_str()
-                .ok_or_else(|| anyhow::anyhow!("invalid HDT path"))?,
+            Some(
+                a_hdt
+                    .to_str()
+                    .ok_or_else(|| anyhow::anyhow!("invalid HDT path"))?,
+            ),
             &[a_nt.to_string_lossy().to_string()],
             false,
             Some("http://ex/g"),
+            &[],
+            None,
+            &|_| unreachable!("no enrichers registered"),
         )
         .await?;
         create::do_create_with_options(
-            b_hdt
-                .to_str()
-                .ok_or_else(|| anyhow::anyhow!("invalid HDT path"))?,
+            Some(
+                b_hdt
+                    .to_str()
+                    .ok_or_else(|| anyhow::anyhow!("invalid HDT path"))?,
+            ),
             &[b_nt.to_string_lossy().to_string()],
             false,
             Some("http://ex/g"),
+            &[],
+            None,
+            &|_| unreachable!("no enrichers registered"),
         )
         .await?;
 
