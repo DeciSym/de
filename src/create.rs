@@ -23,7 +23,6 @@ use tempfile::{Builder, NamedTempFile};
 /// `Send + Sync` bounds let the closure live across await points when
 /// `files_to_rdf` is awaited from a multi-threaded Tokio runtime.
 pub type FileIdFn<'a> = &'a (dyn Fn(&str) -> EnrichResult<NamedNode> + Send + Sync);
-
 #[derive(Debug)]
 pub struct FilesToRdfResult {
     pub combined_rdf_path: String,
@@ -36,15 +35,19 @@ pub struct FilesToRdfResult {
 
 /// Creates a HDT file from RDF source
 pub async fn do_create(hdt_name: &str, data: &[String]) -> anyhow::Result<hdt::Hdt, anyhow::Error> {
-    do_create_with_options(hdt_name, data, false, None).await
+    let file_id_fn: FileIdFn = &|_| unreachable!("no enrichers registered");
+    do_create_with_options(Some(hdt_name), data, false, None, &[], None, file_id_fn).await
 }
 
 /// Creates a HDT file from RDF source with explicit control over named graph merging.
 pub async fn do_create_with_options(
-    hdt_name: &str,
+    hdt_name: Option<&str>,
     data: &[String],
     allow_merge_named_graphs: bool,
     graph_iri: Option<&str>,
+    enrichers: &[Box<dyn Enricher>],
+    root_id: Option<&NamedNode>,
+    file_id_fn: FileIdFn<'_>,
 ) -> anyhow::Result<hdt::Hdt, anyhow::Error> {
     debug!("Creating HDT...");
     // creating a tempfile to hold all the contents of the rdf input files
@@ -54,15 +57,12 @@ pub async fn do_create_with_options(
         .tempfile()
         .map_err(|e| anyhow::anyhow!("Error creating temporary file: {:?}", e))?;
 
-    // No enrichers are wired in this path, so the file_id closure is never
-    // invoked. A panic closure documents that expectation at the type level.
-    let file_id_fn: FileIdFn = &|_| unreachable!("no enrichers registered");
     let rdf_result = files_to_rdf(
         data,
         &mut tmp_file,
         Arc::new(OxRdfConvert {}),
-        &[],
-        None,
+        enrichers,
+        root_id,
         file_id_fn,
         allow_merge_named_graphs,
     )
@@ -83,31 +83,68 @@ pub async fn do_create_with_options(
             rdf_result.unknown_files
         ));
     }
-
     let mut new_hdt = read_nt_hdt_safe(Path::new(&rdf_result.combined_rdf_path))?;
-    if let Some(graph_iri) = graph_iri {
-        hdt_meta::set_graph_iri_metadata_in_hdt(&mut new_hdt, graph_iri)?;
+    if let Some(new_hdt_file) = hdt_name {
+        if let Some(graph_iri) = graph_iri {
+            hdt_meta::set_graph_iri_metadata_in_hdt(&mut new_hdt, graph_iri)?;
+        }
+        write_hdt_to_path(&new_hdt, Path::new(new_hdt_file))?;
+    }
+    let _ = fs::remove_file(tmp_file.path());
+
+    Ok(new_hdt)
+}
+
+/// Write `hdt` to `path`, removing any stale `<name>.index.*` cache sidecars
+/// before truncating the HDT itself. Exposed publicly so consumers that
+/// build an HDT in memory (e.g. via `do_create_with_options(None, ...)`),
+/// modify it (e.g. `header_mut`, custom triples), and then want to persist
+/// can do so with the same on-disk semantics this crate uses internally.
+///
+/// The HDT crate does its own staleness check on load (size/mtime), but
+/// eager cleanup keeps the on-disk state consistent and avoids rare cases
+/// where mtime granularity causes a stale cache to be treated as valid
+/// for a freshly-overwritten HDT.
+pub fn write_hdt_to_path(hdt: &hdt::Hdt, path: &Path) -> anyhow::Result<()> {
+    if let (Some(parent), Some(file_name)) = (
+        path.parent().and_then(|p| {
+            if p.as_os_str().is_empty() {
+                None
+            } else {
+                Some(p)
+            }
+        }),
+        path.file_name().and_then(|n| n.to_str()),
+    ) {
+        let stale_prefix = format!("{file_name}.index.");
+        if let Ok(entries) = fs::read_dir(parent) {
+            for entry in entries.flatten() {
+                if let Some(entry_name) = entry.file_name().to_str()
+                    && entry_name.starts_with(&stale_prefix)
+                {
+                    debug!("Removing stale HDT cache sidecar: {entry_name}");
+                    let _ = fs::remove_file(entry.path());
+                }
+            }
+        }
     }
 
     let out_file = OpenOptions::new()
         .create(true)
         .write(true)
         .truncate(true)
-        .open(hdt_name)?;
+        .open(path)?;
     let mut writer = BufWriter::new(out_file);
-    new_hdt.write(&mut writer)?;
+    hdt.write(&mut writer)?;
     writer.flush()?;
-
-    let _ = fs::remove_file(tmp_file.path());
-
-    if !Path::new(hdt_name).exists() {
+    if !path.exists() {
         return Err(anyhow::anyhow!(
-            "failed to create HDT in requested location {hdt_name}"
+            "failed to create HDT in requested location {}",
+            path.display()
         ));
     }
-    // Prints location of HDT assuming HDT is generated
-    debug!("HDT file created at {hdt_name}");
-    Ok(new_hdt)
+    debug!("HDT file created at {}", path.display());
+    Ok(())
 }
 
 fn read_nt_hdt_safe(path: &Path) -> anyhow::Result<hdt::Hdt> {
@@ -361,15 +398,20 @@ mod tests {
         )?;
 
         let result = do_create_with_options(
-            out_hdt
-                .to_str()
-                .ok_or_else(|| anyhow::anyhow!("invalid output path"))?,
+            Some(
+                out_hdt
+                    .to_str()
+                    .ok_or_else(|| anyhow::anyhow!("invalid output path"))?,
+            ),
             &[nq_path
                 .to_str()
                 .ok_or_else(|| anyhow::anyhow!("invalid input path"))?
                 .to_string()],
             true,
             None,
+            &[],
+            None,
+            &|_| unreachable!("no enrichers registered"),
         )
         .await;
         assert!(result.is_ok());
@@ -422,15 +464,20 @@ mod tests {
         )?;
 
         let result = do_create_with_options(
-            out_hdt
-                .to_str()
-                .ok_or_else(|| anyhow::anyhow!("invalid output path"))?,
+            Some(
+                out_hdt
+                    .to_str()
+                    .ok_or_else(|| anyhow::anyhow!("invalid output path"))?,
+            ),
             &[nq_path
                 .to_str()
                 .ok_or_else(|| anyhow::anyhow!("invalid input path"))?
                 .to_string()],
             true,
             None,
+            &[],
+            None,
+            &|_| unreachable!("no enrichers registered"),
         )
         .await;
         assert!(result.is_ok());
@@ -502,15 +549,20 @@ mod tests {
         )?;
 
         do_create_with_options(
-            out_hdt
-                .to_str()
-                .ok_or_else(|| anyhow::anyhow!("invalid output path"))?,
+            Some(
+                out_hdt
+                    .to_str()
+                    .ok_or_else(|| anyhow::anyhow!("invalid output path"))?,
+            ),
             &[nt_path
                 .to_str()
                 .ok_or_else(|| anyhow::anyhow!("invalid input path"))?
                 .to_string()],
             false,
             Some(graph_iri),
+            &[],
+            None,
+            &|_| unreachable!("no enrichers registered"),
         )
         .await?;
 
@@ -530,15 +582,20 @@ mod tests {
         )?;
 
         let result = do_create_with_options(
-            out_hdt
-                .to_str()
-                .ok_or_else(|| anyhow::anyhow!("invalid output path"))?,
+            Some(
+                out_hdt
+                    .to_str()
+                    .ok_or_else(|| anyhow::anyhow!("invalid output path"))?,
+            ),
             &[nt_path
                 .to_str()
                 .ok_or_else(|| anyhow::anyhow!("invalid input path"))?
                 .to_string()],
             false,
             Some("not an iri"),
+            &[],
+            None,
+            &|_| unreachable!("no enrichers registered"),
         )
         .await;
         assert!(result.is_err());

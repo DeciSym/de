@@ -134,10 +134,13 @@ async fn run_command<W: Write>(
             allow_merge_named_graphs,
             graph_iri,
         } => create::do_create_with_options(
-            output_name,
+            Some(output_name),
             data,
             *allow_merge_named_graphs,
             graph_iri.as_deref(),
+            &[],
+            None,
+            &|_| unreachable!("no enrichers registered"),
         )
         .await
         .map(|_| ()),
