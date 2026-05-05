@@ -35,11 +35,16 @@ pub struct FilesToRdfResult {
 
 /// Creates a HDT file from RDF source
 pub async fn do_create(hdt_name: &str, data: &[String]) -> anyhow::Result<hdt::Hdt, anyhow::Error> {
-    let file_id_fn: FileIdFn = &|_| unreachable!("no enrichers registered");
-    do_create_with_options(Some(hdt_name), data, false, None, &[], None, file_id_fn).await
+    do_create_with_options(Some(hdt_name), data, false, None, &[], None, None).await
 }
 
 /// Creates a HDT file from RDF source with explicit control over named graph merging.
+///
+/// `file_id_fn` is required when `enrichers` is non-empty (it computes the
+/// per-file `NamedNode` the enrichers consume) and **must be** `None` when
+/// `enrichers` is empty — `files_to_rdf` rejects the inconsistent
+/// combination upfront rather than letting it manifest as a runtime panic
+/// in a closure that "shouldn't ever be called."
 pub async fn do_create_with_options(
     hdt_name: Option<&str>,
     data: &[String],
@@ -47,7 +52,7 @@ pub async fn do_create_with_options(
     graph_iri: Option<&str>,
     enrichers: &[Box<dyn Enricher>],
     root_id: Option<&NamedNode>,
-    file_id_fn: FileIdFn<'_>,
+    file_id_fn: Option<FileIdFn<'_>>,
 ) -> anyhow::Result<hdt::Hdt, anyhow::Error> {
     debug!("Creating HDT...");
     // creating a tempfile to hold all the contents of the rdf input files
@@ -187,16 +192,35 @@ fn ensure_nt_line_boundary(out_file: &NamedTempFile) -> anyhow::Result<()> {
 ///
 /// `file_id_fn` is invoked exactly once per file that matches an enricher, so
 /// the produced `NamedNode` can be reused inside the enricher without
-/// re-hashing the file contents.
+/// re-hashing the file contents. It must be `Some(_)` whenever `enrichers`
+/// is non-empty; `files_to_rdf` returns `Err` upfront on the inconsistent
+/// combination rather than letting an enricher dispatch run into a missing
+/// id-generator at the bottom of the loop.
 pub async fn files_to_rdf(
     data: &[String],
     out_file: &mut NamedTempFile,
     converter: Arc<dyn Rdf2Nt>,
     enrichers: &[Box<dyn Enricher>],
     root_id: Option<&NamedNode>,
-    file_id_fn: FileIdFn<'_>,
+    file_id_fn: Option<FileIdFn<'_>>,
     allow_merge_named_graphs: bool,
 ) -> anyhow::Result<FilesToRdfResult, anyhow::Error> {
+    // Pair invariant: enrichers and file_id_fn must agree. If an enricher
+    // is registered, the dispatch path needs an id-generator; if no
+    // enricher is registered, no id-generator should be passed. Catching
+    // this here (rather than via an `unreachable!()` closure at the call
+    // site) means a future caller that adds an enricher without wiring an
+    // id-generator gets a real error instead of a panic.
+    if !enrichers.is_empty() && file_id_fn.is_none() {
+        return Err(anyhow::anyhow!(
+            "files_to_rdf: enrichers were registered but no file_id_fn was provided"
+        ));
+    }
+    if enrichers.is_empty() && file_id_fn.is_some() {
+        return Err(anyhow::anyhow!(
+            "files_to_rdf: file_id_fn was provided but no enrichers are registered"
+        ));
+    }
     // Reject ambiguous enricher configurations up front: a single extension
     // claimed by more than one enricher is a caller bug. The previous
     // Vec-order-wins dispatch silently masked this — here we fail explicitly
@@ -233,6 +257,11 @@ pub async fn files_to_rdf(
 
         if let Some(enricher) = matched_enricher {
             debug!("Enriching file: {file}");
+            // Safe `expect` — the enricher/file_id_fn invariant was checked
+            // upfront, so reaching this branch with `enrichers` non-empty
+            // implies `file_id_fn` is `Some(_)`.
+            let file_id_fn = file_id_fn
+                .expect("enricher/file_id_fn invariant: non-empty enrichers require file_id_fn");
             let file_id =
                 file_id_fn(file).with_context(|| format!("error computing file id for {file}"))?;
             let ctx = EnrichCtx {
@@ -411,7 +440,7 @@ mod tests {
             None,
             &[],
             None,
-            &|_| unreachable!("no enrichers registered"),
+            None,
         )
         .await;
         assert!(result.is_ok());
@@ -477,7 +506,7 @@ mod tests {
             None,
             &[],
             None,
-            &|_| unreachable!("no enrichers registered"),
+            None,
         )
         .await;
         assert!(result.is_ok());
@@ -562,7 +591,7 @@ mod tests {
             Some(graph_iri),
             &[],
             None,
-            &|_| unreachable!("no enrichers registered"),
+            None,
         )
         .await?;
 
@@ -595,7 +624,7 @@ mod tests {
             Some("not an iri"),
             &[],
             None,
-            &|_| unreachable!("no enrichers registered"),
+            None,
         )
         .await;
         assert!(result.is_err());
@@ -678,7 +707,7 @@ mod tests {
         let mut out_file = tempfile::Builder::new().suffix(".nt").tempfile()?;
         let root_id = NamedNode::new("http://example.org/pkg1").unwrap();
         let enrichers: Vec<Box<dyn Enricher>> = vec![Box::new(MockEnricher)];
-        let file_id_fn: FileIdFn = &test_file_id;
+        let file_id_fn: Option<FileIdFn> = Some(&test_file_id);
         let result = files_to_rdf(
             &[nt_path
                 .to_str()
@@ -739,7 +768,7 @@ mod tests {
             .unwrap();
         let root_id = NamedNode::new("http://example.org/pkg1").unwrap();
         let enrichers: Vec<Box<dyn Enricher>> = vec![Box::new(MockEnricher)];
-        let file_id_fn: FileIdFn = &test_file_id;
+        let file_id_fn: Option<FileIdFn> = Some(&test_file_id);
 
         let result = files_to_rdf(
             std::slice::from_ref(&mock_path),
@@ -773,7 +802,7 @@ mod tests {
             .append(true)
             .tempfile()
             .unwrap();
-        let file_id_fn: FileIdFn = &|_| unreachable!("no enrichers registered");
+        let file_id_fn: Option<FileIdFn> = None;
 
         let result = files_to_rdf(
             std::slice::from_ref(&nt_path),
@@ -815,7 +844,7 @@ mod tests {
             .unwrap();
         let root_id = NamedNode::new("http://example.org/pkg1").unwrap();
         let enrichers: Vec<Box<dyn Enricher>> = vec![Box::new(MockEnricher)];
-        let file_id_fn: FileIdFn = &test_file_id;
+        let file_id_fn: Option<FileIdFn> = Some(&test_file_id);
 
         let result = files_to_rdf(
             &[mock_path.clone(), nt_path],
@@ -846,7 +875,7 @@ mod tests {
             .tempfile()
             .unwrap();
         let enrichers: Vec<Box<dyn Enricher>> = vec![Box::new(MockEnricher)];
-        let file_id_fn: FileIdFn = &test_file_id;
+        let file_id_fn: Option<FileIdFn> = Some(&test_file_id);
 
         let result = files_to_rdf(
             std::slice::from_ref(&mock_path),
@@ -907,7 +936,7 @@ mod tests {
             .tempfile()
             .unwrap();
         let enrichers: Vec<Box<dyn Enricher>> = vec![Box::new(FailingParseEnricher)];
-        let file_id_fn: FileIdFn = &test_file_id;
+        let file_id_fn: Option<FileIdFn> = Some(&test_file_id);
 
         let err = files_to_rdf(
             std::slice::from_ref(&mock_path),
@@ -952,7 +981,7 @@ mod tests {
             .unwrap();
         let enrichers: Vec<Box<dyn Enricher>> =
             vec![Box::new(MockEnricher), Box::new(DeclineEnricher)];
-        let file_id_fn: FileIdFn = &test_file_id;
+        let file_id_fn: Option<FileIdFn> = Some(&test_file_id);
 
         let err = files_to_rdf(
             std::slice::from_ref(&mock_path),
@@ -1002,7 +1031,7 @@ mod tests {
             .tempfile()
             .unwrap();
         let enrichers: Vec<Box<dyn Enricher>> = vec![Box::new(DeclineEnricher)];
-        let file_id_fn: FileIdFn = &test_file_id;
+        let file_id_fn: Option<FileIdFn> = Some(&test_file_id);
 
         let result = files_to_rdf(
             std::slice::from_ref(&mock_path),

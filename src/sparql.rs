@@ -1064,7 +1064,7 @@ mod tests {
             Some(shared_graph_iri),
             &[],
             None,
-            &|_| unreachable!("no enrichers registered"),
+            None,
         )
         .await?;
         crate::create::do_create_with_options(
@@ -1074,7 +1074,7 @@ mod tests {
             Some(shared_graph_iri),
             &[],
             None,
-            &|_| unreachable!("no enrichers registered"),
+            None,
         )
         .await?;
 

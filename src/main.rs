@@ -140,7 +140,7 @@ async fn run_command<W: Write>(
             graph_iri.as_deref(),
             &[],
             None,
-            &|_| unreachable!("no enrichers registered"),
+            None,
         )
         .await
         .map(|_| ()),

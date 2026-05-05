@@ -671,18 +671,17 @@ async fn handle_files(
         }
     }
 
-    // No enrichers are wired in this path, so the file_id closure is never
-    // invoked. A panic closure documents that expectation at the type level.
-    let file_id_fn: create::FileIdFn = &|_| unreachable!("no enrichers registered");
     // Querying always merges all input data into one HDT for SPARQL evaluation,
-    // so the multi-graph gate is intentionally bypassed here.
+    // so the multi-graph gate is intentionally bypassed here. No enrichers
+    // are wired in this path, so `file_id_fn` is `None` — the
+    // enrichers/file_id_fn invariant in `files_to_rdf` enforces the pairing.
     let result = match create::files_to_rdf(
         &files_to_convert,
         &mut rdf_tempfile,
         Arc::new(OxRdfConvert {}),
         &[],
         None,
-        file_id_fn,
+        None,
         true,
     )
     .await
@@ -1324,7 +1323,7 @@ mod tests {
             Some("http://ex/g"),
             &[],
             None,
-            &|_| unreachable!("no enrichers registered"),
+            None,
         )
         .await?;
         create::do_create_with_options(
@@ -1338,7 +1337,7 @@ mod tests {
             Some("http://ex/g"),
             &[],
             None,
-            &|_| unreachable!("no enrichers registered"),
+            None,
         )
         .await?;
 
