@@ -415,7 +415,20 @@ pub fn parse_query_and_extract_dataset_files(
     query_text: &str,
     query_path: &Path,
 ) -> anyhow::Result<(spargebra::Query, QueryDatasetFiles)> {
-    let base_iri = query_base_iri(query_path).unwrap_or_else(|| "http://example.com/".to_string());
+    // Surface canonicalize/IO failure as a real error rather than papering
+    // over it with a synthetic `http://example.com/` base. Callers that load
+    // queries from disk have already proved the file exists upstream; if
+    // canonicalize fails here it's a TOCTOU or permission problem the user
+    // needs to know about, not a parser problem to swallow with a fake IRI.
+    // Hand-authored queries that legitimately have no `query_path` (e.g. a
+    // gRPC server's WHERE snippets) should call `query_base_iri` directly
+    // and decide on their own fallback rather than going through this helper.
+    let base_iri = query_base_iri(query_path).ok_or_else(|| {
+        anyhow::anyhow!(
+            "could not derive base IRI for query at {:?}: canonicalize failed",
+            query_path
+        )
+    })?;
     let query = sparql::parse_query(query_text, &base_iri)
         .map_err(|e| anyhow::anyhow!("Invalid SPARQL query {:?}: {e}", query_path))?;
 
