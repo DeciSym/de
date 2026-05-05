@@ -17,7 +17,7 @@ use std::{
 };
 
 pub(super) fn discover_manifest_cases() -> anyhow::Result<Vec<W3cManifestCase>> {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/resources/rdf-tests");
+    let root = super::w3c_resources_root();
     let mut visited = HashSet::new();
     let mut cases = Vec::new();
     let mut seen = HashSet::<String>::new();

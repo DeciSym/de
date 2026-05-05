@@ -1,3 +1,7 @@
+[workspace]
+members = [".", "w3c-validation"]
+resolver = "2"
+
 [package]
 name = "de"
 version = "0.2.0"
@@ -48,6 +52,7 @@ url = { version = "2.5" }
 urlencoding = "2.1"
 criterion = { version = "0.5", features = ["async_tokio"] }
 futures = "0.3"
+w3c-validation = { path = "w3c-validation" }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 pprof = { version = "0.15", features = ["protobuf", "protobuf-codec", "criterion"] }

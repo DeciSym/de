@@ -7,7 +7,7 @@
 //! invokes the same dataset query path used by the CLI.
 
 use super::{compare, manifest, report, *};
-use de::query::{self, EntailmentMode};
+use futures::future::BoxFuture;
 use oxrdf::{Dataset, Term, graph::CanonicalizationAlgorithm};
 use oxrdfio::{RdfFormat, RdfParser};
 use reasonable::reasoner::Reasoner;
@@ -16,11 +16,14 @@ use spargebra::SparqlParser;
 use std::{
     collections::HashMap,
     fs::File,
-    io::{BufReader, BufWriter, Read},
+    io::{BufReader, Read},
     path::Path,
 };
 
-pub(super) async fn run_case(case: &W3cManifestCase) -> CaseStatus {
+pub(super) async fn run_case<F>(case: &W3cManifestCase, runner: &F) -> CaseStatus
+where
+    F: for<'a> Fn(W3cRunInputs<'a>) -> BoxFuture<'a, anyhow::Result<()>>,
+{
     match &case.kind {
         ManifestCaseKind::InvalidCase { reason } => CaseStatus::Fail(reason.clone()),
         ManifestCaseKind::UnsupportedFeature { reason } => CaseStatus::Unsupported(reason.clone()),
@@ -54,14 +57,17 @@ pub(super) async fn run_case(case: &W3cManifestCase) -> CaseStatus {
             regime.as_deref(),
             recognized_datatypes,
         ),
-        ManifestCaseKind::QueryEvaluation(test) => run_query_evaluation_case(test).await,
+        ManifestCaseKind::QueryEvaluation(test) => run_query_evaluation_case(test, runner).await,
     }
 }
 
 /// Executes one query evaluation case and compares actual output with the expected artifact.
 ///
 /// Comparison strategy is selected from [`W3cQueryCase::compare_kind`].
-async fn run_query_evaluation_case(test: &W3cQueryCase) -> CaseStatus {
+async fn run_query_evaluation_case<F>(test: &W3cQueryCase, runner: &F) -> CaseStatus
+where
+    F: for<'a> Fn(W3cRunInputs<'a>) -> BoxFuture<'a, anyhow::Result<()>>,
+{
     let expected = match std::fs::read(&test.result) {
         Ok(bytes) => bytes,
         Err(error) => {
@@ -72,7 +78,7 @@ async fn run_query_evaluation_case(test: &W3cQueryCase) -> CaseStatus {
         }
     };
 
-    let actual = match run_query_case(test).await {
+    let actual = match run_query_case(test, runner).await {
         Ok(bytes) => bytes,
         Err(error) => return CaseStatus::Fail(format!("query execution error: {error}")),
     };
@@ -550,8 +556,8 @@ fn parse_rdf_dataset_file(path: &Path, format: RdfFormat) -> anyhow::Result<Data
 /// Using the upstream GitHub URL keeps relative IRI resolution aligned with
 /// upstream test intent.
 fn w3c_test_file_base_iri(path: &Path) -> String {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/resources/rdf-tests");
-    if let Ok(relative) = path.strip_prefix(root) {
+    let root = super::w3c_resources_root();
+    if let Ok(relative) = path.strip_prefix(&root) {
         return format!(
             "https://w3c.github.io/rdf-tests/{}",
             relative.to_string_lossy().replace('\\', "/")
@@ -571,8 +577,13 @@ fn parse_rdf_dataset_bytes(bytes: &[u8], format: RdfFormat) -> anyhow::Result<Da
     Ok(dataset)
 }
 
-/// Executes one query case through the same dataset query path used by the CLI.
-async fn run_query_case(test: &W3cQueryCase) -> anyhow::Result<Vec<u8>> {
+/// Materializes a query case's inputs and dispatches to the consumer-supplied
+/// runner. The runner is responsible for actually executing the SPARQL query
+/// against its engine and writing the response bytes into `args.writer`.
+async fn run_query_case<F>(test: &W3cQueryCase, runner: &F) -> anyhow::Result<Vec<u8>>
+where
+    F: for<'a> Fn(W3cRunInputs<'a>) -> BoxFuture<'a, anyhow::Result<()>>,
+{
     let query_files = vec![report::path_for_cli(&test.query)];
     let data_files = test
         .default_data
@@ -582,7 +593,7 @@ async fn run_query_case(test: &W3cQueryCase) -> anyhow::Result<Vec<u8>> {
     let named_graph_bindings = test
         .named_graph_data
         .iter()
-        .map(|(iri, path)| query::NamedGraphBinding {
+        .map(|(iri, path)| NamedGraphBinding {
             graph_iri: iri.clone(),
             data_file: report::path_for_cli(path),
         })
@@ -593,17 +604,14 @@ async fn run_query_case(test: &W3cQueryCase) -> anyhow::Result<Vec<u8>> {
         EntailmentMode::Off
     };
     let mut output = Vec::new();
-    {
-        let mut writer = BufWriter::new(&mut output);
-        query::do_query_with_dataset(
-            &data_files,
-            &named_graph_bindings,
-            &query_files,
-            entailment_mode,
-            &test.de_output,
-            &mut writer,
-        )
-        .await?;
-    }
+    runner(W3cRunInputs {
+        data_files: &data_files,
+        named_graph_bindings: &named_graph_bindings,
+        query_files: &query_files,
+        entailment: entailment_mode,
+        out: &test.de_output,
+        writer: &mut output,
+    })
+    .await?;
     Ok(output)
 }

@@ -1,6 +1,6 @@
 [submodule "templates/yasgui"]
 	path = templates/yasgui
 	url = https://github.com/oxigraph/yasgui-release.git
-[submodule "tests/resources/rdf-tests"]
-	path = tests/resources/rdf-tests
+[submodule "w3c-validation/rdf-tests"]
+	path = w3c-validation/rdf-tests
 	url = https://github.com/w3c/rdf-tests

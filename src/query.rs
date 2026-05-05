@@ -446,7 +446,19 @@ fn file_uri_to_local_path(uri: &str) -> Option<PathBuf> {
     parsed.to_file_path().ok()
 }
 
-fn query_base_iri(query_path: &Path) -> Option<String> {
+/// Returns the base IRI to use when parsing a SPARQL query loaded from
+/// `query_path`, derived as `file://<canonical-parent-dir>/`.
+///
+/// This matches the W3C convention where relative IRIs in a query
+/// (`<ng-01.ttl>`, `<friends.ttl>`, etc.) resolve against the directory the
+/// query lives in. Callers that hand-author queries with no relative IRIs
+/// (e.g., the gRPC server's `WHERE` snippets) can fall back to a synthetic
+/// `http://example.com/` base when this returns `None`.
+///
+/// Exposed for downstream crates (e.g. `decisym-engine-rs`) that want to
+/// match `do_query_with_dataset_with_options`'s parsing behavior in their
+/// own orchestrator.
+pub fn query_base_iri(query_path: &Path) -> Option<String> {
     let canonical = query_path.canonicalize().ok()?;
     let parent = canonical.parent()?;
     Url::from_directory_path(parent)
@@ -821,7 +833,18 @@ pub fn parse_named_graph_bindings(
     Ok(parsed)
 }
 
-fn materialize_entailment_closure_nt(
+/// Materialize the OWL-RL/RDFS entailment closure over the union of the given
+/// HDT files plus an optional N-Triples file, and write the result to a fresh
+/// `.entailed.nt` file inside `temp_dir`. The returned path is persisted (the
+/// caller owns its lifetime via `temp_dir`).
+///
+/// `rdf_nt_path` may point at a non-existent file — in that case only the HDT
+/// paths contribute to the closure.
+///
+/// Exposed for downstream crates (e.g. `decisym-engine-rs`) that need to mirror
+/// `do_query`'s entailment step on top of their own dataset construction
+/// (mounted DDPs, distributed datasets).
+pub fn materialize_entailment_closure_nt(
     hdt_paths: &[String],
     rdf_nt_path: &Path,
     temp_dir: &Path,

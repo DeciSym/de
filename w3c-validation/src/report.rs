@@ -6,7 +6,10 @@
 use super::*;
 use std::{collections::BTreeMap, fmt::Write as _, path::Path};
 
-pub(super) fn write_report(rows: &[(String, String, String, CaseStatus)]) -> anyhow::Result<()> {
+pub(super) fn write_report(
+    report_path: &Path,
+    rows: &[(String, String, String, CaseStatus)],
+) -> anyhow::Result<()> {
     let mut by_type = BTreeMap::<String, (usize, usize, usize, usize)>::new();
     let mut total_pass = 0usize;
     let mut total_fail = 0usize;
@@ -31,14 +34,13 @@ pub(super) fn write_report(rows: &[(String, String, String, CaseStatus)]) -> any
         }
     }
 
-    let report_path = report_output_path();
     if let Some(parent) = report_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
 
     let mut out = String::new();
     writeln!(&mut out, "W3C rdf-tests status report").ok();
-    writeln!(&mut out, "suite_root: tests/resources/rdf-tests").ok();
+    writeln!(&mut out, "suite_root: w3c-validation/rdf-tests").ok();
     writeln!(&mut out, "total: {}", rows.len()).ok();
     writeln!(&mut out, "pass: {}", total_pass).ok();
     writeln!(&mut out, "fail: {}", total_fail).ok();
@@ -80,22 +82,22 @@ pub(super) fn write_report(rows: &[(String, String, String, CaseStatus)]) -> any
         }
     }
 
-    std::fs::write(&report_path, out)?;
+    std::fs::write(report_path, out)?;
     Ok(())
 }
 
-/// Report destination path under `target/`.
-pub(super) fn report_output_path() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("target/w3c-rdf-tests-report.txt")
-}
-
-/// Formats an absolute path relative to the crate root for stable report output.
+/// Formats an absolute path as a report-friendly relative form, stripping the
+/// vendored W3C resources root when possible. Falls back to the absolute path
+/// if the input doesn't sit under that tree.
 pub(super) fn path_for_report(path: &Path) -> String {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    path.strip_prefix(root)
-        .unwrap_or(path)
-        .to_string_lossy()
-        .into_owned()
+    let root = w3c_resources_root();
+    if let Ok(rel) = path.strip_prefix(&root) {
+        return Path::new("w3c-validation/rdf-tests")
+            .join(rel)
+            .to_string_lossy()
+            .into_owned();
+    }
+    path.to_string_lossy().into_owned()
 }
 
 /// Formats a path for CLI invocation relative to the current working directory.
