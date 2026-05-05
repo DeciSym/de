@@ -540,10 +540,6 @@ pub fn query_base_iri(query_path: &Path) -> Option<String> {
         .map(|url| url.to_string())
 }
 
-fn local_path_to_file_uri(path: &Path) -> anyhow::Result<String> {
-    crate::file_graph_uri_for_path(path)
-}
-
 fn build_dataset_execution_key(
     data_files: &[String],
     named_graph_bindings: &[NamedGraphBinding],
@@ -572,7 +568,7 @@ fn build_dataset_execution_key(
     // Adding these mappings keeps query-specified dataset IRIs resolvable during evaluation.
     for file in &query_dataset_files.default_data_files {
         let data_file = normalize_local_path_string(Path::new(file));
-        let graph_iri = local_path_to_file_uri(Path::new(&data_file)).map_err(|e| {
+        let graph_iri = crate::file_graph_uri_for_path(Path::new(&data_file)).map_err(|e| {
             anyhow::anyhow!(
                 "failed to derive graph IRI for default dataset source {data_file}: {e}"
             )
