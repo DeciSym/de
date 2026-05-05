@@ -384,40 +384,103 @@ fn write_query_results<W: Write>(
     Ok(())
 }
 
-fn parse_query_and_extract_dataset_local_files(
+/// Local-file references decoded from a SPARQL query's `FROM` and
+/// `FROM NAMED` clauses. Each entry's `graph_iri` is the IRI exactly as it
+/// appeared in the query (callers that need a canonical IRI re-derive it
+/// themselves), and `data_file` is the percent-decoded local path
+/// (lossy-converted on non-UTF-8 paths). Paths are returned without
+/// canonicalization or symlink resolution — different downstream pipelines
+/// have different opinions on whether to normalize, so this helper stays
+/// out of that decision.
+///
+/// Non-`file://` IRIs are dropped; the helper only surfaces references that
+/// resolve to a local path.
+#[derive(Default, Debug, Clone, PartialEq, Eq)]
+pub struct QueryDatasetFiles {
+    /// `FROM <file://...>` bindings, in query order, deduped by
+    /// `(graph_iri, data_file)`.
+    pub from_default: Vec<NamedGraphBinding>,
+    /// `FROM NAMED <iri>` bindings whose IRI resolves to a local file,
+    /// in query order, deduped by `(graph_iri, data_file)`.
+    pub from_named: Vec<NamedGraphBinding>,
+}
+
+/// Parse `query_text` against `query_path`'s directory base IRI, returning
+/// the parsed query and the local-file references its `FROM`/`FROM NAMED`
+/// clauses pulled in. Exposed for downstream crates
+/// so they don't have to reimplement the dataset
+/// extraction themselves; they can use the returned bindings to feed their
+/// own dpkg/mount pipeline.
+pub fn parse_query_and_extract_dataset_files(
     query_text: &str,
     query_path: &Path,
-) -> anyhow::Result<(spargebra::Query, QueryDatasetLocalFiles)> {
+) -> anyhow::Result<(spargebra::Query, QueryDatasetFiles)> {
     let base_iri = query_base_iri(query_path).unwrap_or_else(|| "http://example.com/".to_string());
     let query = sparql::parse_query(query_text, &base_iri)
         .map_err(|e| anyhow::anyhow!("Invalid SPARQL query {:?}: {e}", query_path))?;
 
-    let mut files = QueryDatasetLocalFiles::default();
+    let mut files = QueryDatasetFiles::default();
     let mut seen_default = HashSet::new();
     let mut seen_named = HashSet::new();
 
     if let Some(dataset) = query.dataset() {
         for iri in &dataset.default {
             if let Some(path) = file_uri_to_local_path(iri.as_str()) {
-                let path = normalize_local_path_string(&path);
-                if seen_default.insert(path.clone()) {
-                    files.default_data_files.push(path);
+                let binding = NamedGraphBinding {
+                    graph_iri: iri.as_str().to_string(),
+                    data_file: path.to_string_lossy().into_owned(),
+                };
+                if seen_default.insert((binding.graph_iri.clone(), binding.data_file.clone())) {
+                    files.from_default.push(binding);
                 }
             }
         }
         if let Some(named) = &dataset.named {
             for iri in named {
                 if let Some(path) = file_uri_to_local_path(iri.as_str()) {
-                    let path = normalize_local_path_string(&path);
                     let binding = NamedGraphBinding {
                         graph_iri: iri.as_str().to_string(),
-                        data_file: path,
+                        data_file: path.to_string_lossy().into_owned(),
                     };
                     if seen_named.insert((binding.graph_iri.clone(), binding.data_file.clone())) {
-                        files.named_graphs.push(binding);
+                        files.from_named.push(binding);
                     }
                 }
             }
+        }
+    }
+
+    Ok((query, files))
+}
+
+fn parse_query_and_extract_dataset_local_files(
+    query_text: &str,
+    query_path: &Path,
+) -> anyhow::Result<(spargebra::Query, QueryDatasetLocalFiles)> {
+    // Apply de's path canonicalization on top of the shared raw-extraction
+    // helper. `parse_query_and_extract_dataset_files` purposefully avoids
+    // canonicalizing — pushing it here keeps the public API neutral while
+    // preserving the canonical-path semantics de's `build_dataset_execution_key`
+    // expects.
+    let (query, raw) = parse_query_and_extract_dataset_files(query_text, query_path)?;
+
+    let mut files = QueryDatasetLocalFiles::default();
+    let mut seen_default = HashSet::new();
+    let mut seen_named = HashSet::new();
+    for binding in raw.from_default {
+        let path = normalize_local_path_string(Path::new(&binding.data_file));
+        if seen_default.insert(path.clone()) {
+            files.default_data_files.push(path);
+        }
+    }
+    for binding in raw.from_named {
+        let path = normalize_local_path_string(Path::new(&binding.data_file));
+        let normalized = NamedGraphBinding {
+            graph_iri: binding.graph_iri,
+            data_file: path,
+        };
+        if seen_named.insert((normalized.graph_iri.clone(), normalized.data_file.clone())) {
+            files.named_graphs.push(normalized);
         }
     }
 
@@ -455,9 +518,7 @@ fn file_uri_to_local_path(uri: &str) -> Option<PathBuf> {
 /// (e.g., the gRPC server's `WHERE` snippets) can fall back to a synthetic
 /// `http://example.com/` base when this returns `None`.
 ///
-/// Exposed for downstream crates (e.g. `decisym-engine-rs`) that want to
-/// match `do_query_with_dataset_with_options`'s parsing behavior in their
-/// own orchestrator.
+/// Exposed for downstream crates
 pub fn query_base_iri(query_path: &Path) -> Option<String> {
     let canonical = query_path.canonicalize().ok()?;
     let parent = canonical.parent()?;
@@ -841,9 +902,7 @@ pub fn parse_named_graph_bindings(
 /// `rdf_nt_path` may point at a non-existent file — in that case only the HDT
 /// paths contribute to the closure.
 ///
-/// Exposed for downstream crates (e.g. `decisym-engine-rs`) that need to mirror
-/// `do_query`'s entailment step on top of their own dataset construction
-/// (mounted DDPs, distributed datasets).
+/// Exposed for downstream crates
 pub fn materialize_entailment_closure_nt(
     hdt_paths: &[String],
     rdf_nt_path: &Path,

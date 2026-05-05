@@ -4,7 +4,7 @@
 //! Integration test entrypoint for the W3C RDF/SPARQL conformance harness.
 //!
 //! The harness implementation lives in the sibling `w3c-validation` workspace
-//! crate so it can be reused by `decisym-engine-rs`. This file only wires up
+//! crate so it can be reused by any downstream crates. This file only wires up
 //! `de`'s own query function as the runner callback and points the harness at
 //! a report path under this crate's `target/`.
 

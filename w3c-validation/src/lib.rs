@@ -4,17 +4,12 @@
 //! Shared W3C RDF/SPARQL conformance harness for `de` and downstream crates.
 //!
 //! This crate vends manifest discovery, case execution, result comparison, and
-//! report emission for the W3C `rdf-tests` upstream snapshot. It used to live
-//! inside `de`'s test target; promoting it to a sibling library lets
-//! `decisym-engine-rs` (and any other crate that wraps a SPARQL engine) reuse
-//! the same harness without copying ~2700 lines of test code.
+//! report emission for the W3C `rdf-tests` upstream snapshot.
 //!
 //! ## Pluggable query runner
 //!
 //! The non-trivial difference between consumers is *which* query function each
-//! one wants to exercise — `de::query::do_query_with_dataset` for `de`, or
-//! `de_priv::query::do_query` (with a `Panoplia` + `Config` setup) for
-//! `decisym-engine-rs`. Everything else is shared. So the entry point takes a
+//! one wants to exercise. Everything else is shared. So the entry point takes a
 //! runner callback:
 //!
 //! ```ignore
