@@ -4,10 +4,12 @@ VERSION ?= 0.0.0-test
 
 init:
 	scripts/download-sample-bench.sh
-	cargo install cargo-deb cargo-machete
+	@command -v cargo-machete >/dev/null 2>&1 || cargo install cargo-machete
+	@command -v cargo-deb >/dev/null 2>&1 || cargo install cargo-deb
 
 lint:
-	cargo install cargo-deb cargo-machete
+	@command -v cargo-machete >/dev/null 2>&1 || cargo install cargo-machete
+	@command -v cargo-deb >/dev/null 2>&1 || cargo install cargo-deb
 	cargo fmt --check
 	cargo machete
 	cargo clippy --workspace --all-targets --no-deps
