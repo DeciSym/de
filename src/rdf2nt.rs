@@ -9,9 +9,11 @@ use oxrdf::TripleRef;
 use oxrdfio::RdfFormat::{self, NTriples};
 use oxrdfio::RdfSerializer;
 use oxrdfio::{RdfParseError, RdfParser};
+use std::collections::BTreeSet;
 use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
+use url::Url;
 
 const IO_BUF: usize = 1 << 20;
 
@@ -58,8 +60,15 @@ pub trait Rdf2Nt: Send + Sync {
 #[derive(Debug, Default)]
 /// Object for returning stats of converted RDF files
 pub struct ConvertResult {
-    pub converted: i32,
+    pub converted: usize,
     pub unhandled: Vec<String>,
+    pub named_graphs: BTreeSet<String>,
+    /// True if any quad in the default graph (`GraphName::DefaultGraph`) was
+    /// observed. Tracked separately because the default graph has no IRI and
+    /// therefore can't live in `named_graphs`. Consumers counting distinct
+    /// graph regions (e.g. to gate a merge-into-single-HDT operation) should
+    /// add `usize::from(has_default_graph_triples)` to `named_graphs.len()`.
+    pub has_default_graph_triples: bool,
 }
 
 /// Rdf2Nt implementation using oxrdf and oxrdfio crates
@@ -97,8 +106,21 @@ impl Rdf2Nt for OxRdfConvert {
                     }
                 }
             };
+            let base_iri = Path::new(file)
+                .canonicalize()
+                .ok()
+                .and_then(|path| Url::from_file_path(path).ok())
+                .map(|url| url.to_string());
             // TODO oxrdfio does offer split_file_for_parallel_parsing() which greatly improves performance, but only available for NT or NQ formats
-            let quads = RdfParser::from_format(rdf_format).for_reader(source_reader);
+            let quads = if let Some(base_iri) = base_iri {
+                match RdfParser::from_format(rdf_format).with_base_iri(&base_iri) {
+                    Ok(parser) => parser.for_reader(source_reader),
+                    Err(_) => RdfParser::from_format(rdf_format).for_reader(source_reader),
+                }
+            } else {
+                RdfParser::from_format(rdf_format).for_reader(source_reader)
+            };
+            let mut warned_named_graph_merge = false;
             for q in quads {
                 let q = match q {
                     Ok(v) => v,
@@ -120,8 +142,14 @@ impl Rdf2Nt for OxRdfConvert {
                         }
                     }
                 };
-                if q.graph_name != DefaultGraph {
-                    warn!("HDT does not support named graphs, merging triples for {file}");
+                if q.graph_name == DefaultGraph {
+                    res.has_default_graph_triples = true;
+                } else {
+                    if !warned_named_graph_merge {
+                        warn!("HDT does not support named graphs, merging triples for {file}");
+                        warned_named_graph_merge = true;
+                    }
+                    res.named_graphs.insert(q.graph_name.to_string());
                 }
                 serializer.serialize_triple(TripleRef::new(
                     q.subject.as_ref(),
@@ -142,10 +170,37 @@ impl Rdf2Nt for OxRdfConvert {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::{OxRdfConvert, Rdf2Nt};
+    use std::fs;
     use std::io::Write;
+    use tempfile::Builder;
 
     const APPLE_TTL: &str = "tests/resources/apple.ttl";
     const APPLE_TRIPLES: usize = 9;
+
+    #[test]
+    fn convert_to_nt_handles_relative_iris_in_paths_with_spaces() -> anyhow::Result<()> {
+        let temp_dir = Builder::new().prefix("rdf2nt with spaces").tempdir()?;
+        let input_path = temp_dir.path().join("input.ttl");
+        fs::write(&input_path, "<s> <p> <o> .\n")?;
+
+        let output = Builder::new().suffix(".nt").tempfile()?;
+        let converter = OxRdfConvert {};
+        let result = converter.convert_to_nt(
+            vec![input_path.to_string_lossy().to_string()],
+            output.as_file(),
+        )?;
+
+        assert_eq!(result.converted, 1);
+        assert!(result.unhandled.is_empty());
+
+        let output_data = fs::read_to_string(output.path())?;
+        assert!(
+            output_data.contains("file:///"),
+            "expected output triples to resolve against a file:/// base IRI"
+        );
+        Ok(())
+    }
 
     fn count_triples_in(nt_file: &tempfile::NamedTempFile) -> usize {
         let reader = BufReader::new(nt_file.reopen().expect("reopen tmp nt"));

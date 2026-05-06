@@ -1,40 +1,34 @@
 use http::{
+    HeaderValue, Method, Request, Response, StatusCode,
     header::{
         ACCEPT, ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METHODS,
         ACCESS_CONTROL_ALLOW_ORIGIN, ACCESS_CONTROL_REQUEST_HEADERS, ACCESS_CONTROL_REQUEST_METHOD,
-        CONTENT_TYPE, LOCATION, ORIGIN,
+        CONTENT_TYPE, ORIGIN,
     },
     uri::PathAndQuery,
-    HeaderValue, Method, Request, Response, StatusCode,
 };
 use log::{debug, warn};
-use oxhttp::{model::Body, Server};
-use oxiri::Iri;
-use oxrdf::{GraphName, NamedNode, NamedOrBlankNode, TripleRef};
-use oxrdfio::{RdfFormat, RdfParser, RdfSerializer};
-use rand::random;
+use oxhttp::{Server, model::Body};
+use oxrdfio::{RdfFormat, RdfSerializer};
 use sparesults::{QueryResultsFormat, QueryResultsSerializer};
-use spareval::{QueryEvaluator, QueryResults, QueryableDataset};
-use spargebra::SparqlParser;
+use spareval::QueryResults;
 use std::{
-    borrow::Cow,
-    cell::RefCell,
-    cmp::min,
+    collections::HashMap,
     fmt,
-    io::{self, BufWriter, Read, Write},
+    io::{self, Read, Write},
     net::ToSocketAddrs,
-    path::Path,
-    rc::Rc,
-    sync::Arc,
+    path::{Path, PathBuf},
+    sync::{Mutex, OnceLock},
     thread::available_parallelism,
     time::Duration,
+    time::SystemTime,
 };
-use std::{collections::HashMap, str::FromStr, sync::RwLock};
+use std::{str::FromStr, sync::mpsc};
 use url::form_urlencoded;
 
 use crate::{
-    service_description::{generate_service_description, EndpointKind},
-    sparql::{hdt_bgp_str_to_term, AggregateHdt},
+    service_description::{EndpointKind, generate_service_description},
+    sparql::AggregateHdt,
 };
 
 type HttpError = (StatusCode, String);
@@ -47,6 +41,105 @@ const YASGUI_JS: &str = include_str!("../templates/yasgui/yasgui.min.js");
 const YASGUI_CSS: &str = include_str!("../templates/yasgui/yasgui.min.css");
 const LOGO: &str = include_str!("../templates/logo.svg");
 
+#[derive(Clone, Eq, PartialEq)]
+struct HdtFileFingerprint {
+    path: PathBuf,
+    modified: SystemTime,
+    len: u64,
+}
+
+#[derive(Clone, Eq, PartialEq)]
+struct StoreFingerprint {
+    files: Vec<HdtFileFingerprint>,
+}
+
+static STORE_SYNC_CACHE: OnceLock<Mutex<HashMap<PathBuf, StoreFingerprint>>> = OnceLock::new();
+
+fn collect_hdt_paths(location: &Path) -> anyhow::Result<Vec<String>> {
+    let mut hdt_paths: Vec<String> = std::fs::read_dir(location)?
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            if !entry.file_type().ok()?.is_file() {
+                return None;
+            }
+            let path = entry.path();
+            let is_hdt = path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("hdt"));
+            if is_hdt {
+                Some(path.to_string_lossy().into_owned())
+            } else {
+                None
+            }
+        })
+        .collect();
+    hdt_paths.sort_unstable();
+    hdt_paths.dedup();
+    Ok(hdt_paths)
+}
+
+fn compute_store_fingerprint(location: &Path) -> Result<StoreFingerprint, HttpError> {
+    let mut files = Vec::new();
+    for entry in std::fs::read_dir(location)
+        .map_err(|e| internal_server_error(format!("error reading data location: {e}")))?
+    {
+        let entry = entry.map_err(|e| {
+            internal_server_error(format!("error while iterating data location: {e}"))
+        })?;
+        let path = entry.path();
+        if !path
+            .extension()
+            .is_some_and(|extension| extension.to_string_lossy().eq_ignore_ascii_case("hdt"))
+        {
+            continue;
+        }
+        let metadata = entry.metadata().map_err(|e| {
+            internal_server_error(format!("error reading HDT metadata for {:?}: {e}", path))
+        })?;
+        let modified = metadata.modified().map_err(|e| {
+            internal_server_error(format!("error reading HDT mtime for {:?}: {e}", path))
+        })?;
+        files.push(HdtFileFingerprint {
+            path,
+            modified,
+            len: metadata.len(),
+        });
+    }
+    files.sort_unstable_by(|left, right| left.path.cmp(&right.path));
+    Ok(StoreFingerprint { files })
+}
+
+fn maybe_sync_store(store: &AggregateHdt, location: &Path) -> Result<(), HttpError> {
+    let canonical_location = location
+        .canonicalize()
+        .map_err(|e| internal_server_error(format!("error resolving data location: {e}")))?;
+    let fingerprint = compute_store_fingerprint(&canonical_location)?;
+
+    let cache = STORE_SYNC_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    {
+        let guard = cache
+            .lock()
+            .map_err(|_| internal_server_error("sync cache lock poisoned"))?;
+        if guard
+            .get(&canonical_location)
+            .is_some_and(|cached| *cached == fingerprint)
+        {
+            return Ok(());
+        }
+    }
+
+    store
+        .sync(canonical_location.clone())
+        .map_err(|e| internal_server_error(format!("error loading data files: {e}")))?;
+
+    let mut guard = cache
+        .lock()
+        .map_err(|_| internal_server_error("sync cache lock poisoned"))?;
+    guard.insert(canonical_location, fingerprint);
+    Ok(())
+}
+
 pub fn serve(
     locations: String,
     bind: &str,
@@ -58,18 +151,7 @@ pub fn serve(
     let union_default_graph = true;
     let cors = false;
 
-    // Find all *.hdt files in the locations directory
-    let hdt_paths: Vec<String> = std::fs::read_dir(&locations)?
-        .filter_map(|entry| {
-            let entry = entry.ok()?;
-            let path = entry.path();
-            if path.extension()? == "hdt" {
-                Some(path.to_string_lossy().into_owned())
-            } else {
-                None
-            }
-        })
-        .collect();
+    let hdt_paths = collect_hdt_paths(Path::new(&locations))?;
 
     eprintln!("Found {} HDT files in {}", hdt_paths.len(), locations);
     for path in &hdt_paths {
@@ -82,9 +164,7 @@ pub fn serve(
             "Warning: No HDT files found in the specified locations: {}",
             locations
         );
-        AggregateHdt {
-            file_paths: Arc::new(RwLock::new(HashMap::new())),
-        }
+        AggregateHdt::empty()
     } else {
         AggregateHdt::new(&hdt_paths)?
     };
@@ -134,7 +214,12 @@ fn cors_middleware(
             if let Some(headers) = request_headers.get(ACCESS_CONTROL_REQUEST_HEADERS) {
                 response = response.header(ACCESS_CONTROL_ALLOW_HEADERS, headers.clone());
             }
-            response.body(Body::empty()).unwrap()
+            response.body(Body::empty()).unwrap_or_else(|e| {
+                error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("failed to build CORS preflight response: {e}"),
+                )
+            })
         } else {
             let mut response = on_request(request);
             if request.headers().get(ORIGIN).is_some() {
@@ -155,54 +240,53 @@ pub fn handle_request(
     // timeout: Option<Duration>,
     locations: String,
 ) -> Result<Response<Body>, HttpError> {
-    println!("{}  {}", request.uri().path(), request.method().as_ref());
-    let _ = store
-        .sync(Path::new(&locations).to_path_buf())
-        .map_err(|e| internal_server_error(format!("error loading data files: {}", e)))?;
+    debug!("{} {}", request.method(), request.uri().path());
     match (request.uri().path(), request.method().as_ref()) {
-        ("/", "HEAD") => Ok(Response::builder()
+        ("/", "HEAD") => Response::builder()
             .header(CONTENT_TYPE, "text/html")
             .body(Body::empty())
-            .unwrap()),
-        ("/", "GET") => Ok(Response::builder()
+            .map_err(internal_server_error),
+        ("/", "GET") => Response::builder()
             .header(CONTENT_TYPE, "text/html")
             .body(HTML_ROOT_PAGE.into())
-            .unwrap()),
-        ("/yasgui.min.css", "HEAD") => Ok(Response::builder()
+            .map_err(internal_server_error),
+        ("/yasgui.min.css", "HEAD") => Response::builder()
             .header(CONTENT_TYPE, "text/css")
             .body(Body::empty())
-            .unwrap()),
-        ("/yasgui.min.css", "GET") => Ok(Response::builder()
+            .map_err(internal_server_error),
+        ("/yasgui.min.css", "GET") => Response::builder()
             .header(CONTENT_TYPE, "text/css")
             .body(YASGUI_CSS.into())
-            .unwrap()),
-        ("/yasgui.min.js", "HEAD") => Ok(Response::builder()
+            .map_err(internal_server_error),
+        ("/yasgui.min.js", "HEAD") => Response::builder()
             .header(CONTENT_TYPE, "application/javascript")
             .body(Body::empty())
-            .unwrap()),
-        ("/yasgui.min.js", "GET") => Ok(Response::builder()
+            .map_err(internal_server_error),
+        ("/yasgui.min.js", "GET") => Response::builder()
             .header(CONTENT_TYPE, "application/javascript")
             .body(YASGUI_JS.into())
-            .unwrap()),
-        ("/logo.svg", "HEAD") => Ok(Response::builder()
+            .map_err(internal_server_error),
+        ("/logo.svg", "HEAD") => Response::builder()
             .header(CONTENT_TYPE, "image/svg+xml")
             .body(Body::empty())
-            .unwrap()),
-        ("/logo.svg", "GET") => Ok(Response::builder()
+            .map_err(internal_server_error),
+        ("/logo.svg", "GET") => Response::builder()
             .header(CONTENT_TYPE, "image/svg+xml")
             .body(LOGO.into())
-            .unwrap()),
+            .map_err(internal_server_error),
         ("/query", "GET") => {
             let query = url_query(request);
             if query.is_empty() {
                 let format = rdf_content_negotiation(request)?;
                 let description =
-                    generate_service_description(format, EndpointKind::Query, union_default_graph);
-                Ok(Response::builder()
+                    generate_service_description(format, EndpointKind::Query, union_default_graph)
+                        .map_err(internal_server_error)?;
+                Response::builder()
                     .header(CONTENT_TYPE, format.media_type())
                     .body(description.into())
-                    .unwrap())
+                    .map_err(internal_server_error)
             } else {
+                maybe_sync_store(store, Path::new(&locations))?;
                 configure_and_evaluate_sparql_query(
                     store,
                     &[url_query(request)],
@@ -214,6 +298,7 @@ pub fn handle_request(
             }
         }
         ("/query", "POST") => {
+            maybe_sync_store(store, Path::new(&locations))?;
             let content_type =
                 content_type(request).ok_or_else(|| bad_request("No Content-Type given"))?;
             if content_type == "application/sparql-query" {
@@ -240,279 +325,15 @@ pub fn handle_request(
                 Err(unsupported_media_type(&content_type))
             }
         }
-        ("/update", "GET") => {
-            // if read_only {
-            //     return Err(the_server_is_read_only());
-            // }
-            let format = rdf_content_negotiation(request)?;
-            let description =
-                generate_service_description(format, EndpointKind::Update, union_default_graph);
-            Ok(Response::builder()
-                .header(CONTENT_TYPE, format.media_type())
-                .body(description.into())
-                .unwrap())
-        }
-        ("/update", "POST") => {
-            // if read_only {
-            //     return Err(the_server_is_read_only());
-            // }
-            let content_type =
-                content_type(request).ok_or_else(|| bad_request("No Content-Type given"))?;
-            if content_type == "application/sparql-update" {
-                let update = limited_string_body(request)?;
-                configure_and_evaluate_sparql_update(
-                    store,
-                    &[url_query(request)],
-                    Some(update),
-                    request,
-                    union_default_graph,
-                )
-            } else if content_type == "application/x-www-form-urlencoded" {
-                let buffer = limited_body(request)?;
-                configure_and_evaluate_sparql_update(
-                    store,
-                    &[url_query(request), &buffer],
-                    None,
-                    request,
-                    union_default_graph,
-                )
-            } else {
-                Err(unsupported_media_type(&content_type))
-            }
-        }
-        (path, "GET") if path.starts_with("/store") => {
-            if let Some(target) = store_target(request)? {
-                assert_that_graph_exists(store, &target)?;
-                let format = rdf_content_negotiation(request)?;
-                let s = &store
-                    .get_snapshot(None)
-                    .map_err(|_| internal_server_error("data temporarily unavailable"))?;
-                // TODO: Implement proper graph retrieval
-                let graph_arc: Arc<str> = Arc::from(GraphName::from(target).to_string());
-                let triples: Vec<_> = s
-                    .internal_quads_for_pattern(None, None, None, Some(Some(&graph_arc)))
-                    .collect();
-                ReadForWrite::build_response(
-                    move |w| {
-                        Ok((
-                            RdfSerializer::from_format(format).for_writer(w),
-                            triples.into_iter(),
-                        ))
-                    },
-                    |(mut serializer, mut triples_iter)| {
-                        Ok(if let Some(triple) = triples_iter.next() {
-                            let triple = triple?;
-                            // Parse the triple parts into an RDF triple
-                            let subject = NamedOrBlankNode::try_from(
-                                hdt_bgp_str_to_term(&triple.subject)
-                                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?,
-                            )
-                            .map_err(|e| {
-                                io::Error::new(io::ErrorKind::InvalidData, format!("{:?}", e))
-                            })?;
-                            let predicate = NamedNode::try_from(
-                                hdt_bgp_str_to_term(&triple.predicate)
-                                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?,
-                            )
-                            .map_err(|e| {
-                                io::Error::new(io::ErrorKind::InvalidData, format!("{:?}", e))
-                            })?;
-                            let object = hdt_bgp_str_to_term(&triple.object)
-                                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-                            let triple = oxrdf::Triple {
-                                subject,
-                                predicate,
-                                object,
-                            };
-                            serializer.serialize_triple(&triple)?;
-                            Some((serializer, triples_iter))
-                        } else {
-                            serializer.finish()?;
-                            None
-                        })
-                    },
-                    format.media_type(),
-                )
-            } else {
-                let format = rdf_content_negotiation(request)?;
-                if !format.supports_datasets() {
-                    return Err(bad_request(format!(
-                        "It is not possible to serialize the full RDF dataset using {format} that does not support named graphs"
-                    )));
-                }
-                let triples = store.collect_all_triples();
-                ReadForWrite::build_response(
-                    move |w| {
-                        Ok((
-                            RdfSerializer::from_format(format).for_writer(w),
-                            triples.into_iter(),
-                        ))
-                    },
-                    |(mut serializer, mut triples_iter)| {
-                        Ok(
-                            if let Some((_graph_name, triple_parts)) = triples_iter.next() {
-                                // Parse the triple parts into an RDF triple
-                                let subject = NamedOrBlankNode::try_from(
-                                    hdt_bgp_str_to_term(&triple_parts[0]).map_err(|e| {
-                                        io::Error::new(io::ErrorKind::InvalidData, e)
-                                    })?,
-                                )
-                                .map_err(|e| {
-                                    io::Error::new(io::ErrorKind::InvalidData, format!("{:?}", e))
-                                })?;
-                                let predicate = NamedNode::try_from(
-                                    hdt_bgp_str_to_term(&triple_parts[1]).map_err(|e| {
-                                        io::Error::new(io::ErrorKind::InvalidData, e)
-                                    })?,
-                                )
-                                .map_err(|e| {
-                                    io::Error::new(io::ErrorKind::InvalidData, format!("{:?}", e))
-                                })?;
-                                let object = hdt_bgp_str_to_term(&triple_parts[2])
-                                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-                                let triple = oxrdf::Triple {
-                                    subject,
-                                    predicate,
-                                    object,
-                                };
-                                serializer.serialize_triple(&triple)?;
-                                Some((serializer, triples_iter))
-                            } else {
-                                serializer.finish()?;
-                                None
-                            },
-                        )
-                    },
-                    format.media_type(),
-                )
-            }
-        }
-        (path, "PUT") if path.starts_with("/store") => {
-            // if read_only {
-            //     return Err(the_server_is_read_only());
-            // }
-            let content_type =
-                content_type(request).ok_or_else(|| bad_request("No Content-Type given"))?;
-            if let Some(target) = store_target(request)? {
-                let format = RdfFormat::from_media_type(&content_type)
-                    .ok_or_else(|| unsupported_media_type(&content_type))?;
-                let p = web_load_graph(store, request, format, &GraphName::from(target.clone()))?;
-                let new = !match &target {
-                    NamedGraphName::NamedNode(target) => {
-                        if store
-                            .contains_graph_name(&target.clone().into_string())
-                            .map_err(internal_server_error)?
-                        {
-                            store
-                                .remove_named_graph(target)
-                                .map_err(internal_server_error)?;
-                            true
-                        } else {
-                            store
-                                .insert_named_graph(target, Path::new(&p))
-                                .map_err(internal_server_error)?;
-                            false
-                        }
-                    }
-                    NamedGraphName::DefaultGraph => return Err(internal_server_error("")),
-                };
-
-                Ok(Response::builder()
-                    .status(if new {
-                        StatusCode::CREATED
-                    } else {
-                        StatusCode::NO_CONTENT
-                    })
-                    .body(Body::empty())
-                    .unwrap())
-            } else {
-                let format = RdfFormat::from_media_type(&content_type)
-                    .ok_or_else(|| unsupported_media_type(&content_type))?;
-                store.clear().map_err(internal_server_error)?;
-                web_load_dataset(store, request, format)?;
-                Ok(Response::builder()
-                    .status(StatusCode::NO_CONTENT)
-                    .body(Body::empty())
-                    .unwrap())
-            }
-        }
-        (path, "DELETE") if path.starts_with("/store") => {
-            // if read_only {
-            //     return Err(the_server_is_read_only());
-            // }
-            if let Some(target) = store_target(request)? {
-                match target {
-                    NamedGraphName::DefaultGraph => todo!(),
-                    NamedGraphName::NamedNode(target) => {
-                        if store
-                            .contains_graph_name(&target.clone().into_string())
-                            .map_err(internal_server_error)?
-                        {
-                            store
-                                .remove_named_graph(&target)
-                                .map_err(internal_server_error)?;
-                        } else {
-                            return Err((
-                                StatusCode::NOT_FOUND,
-                                format!("The graph {target} does not exists",),
-                            ));
-                        }
-                    }
-                }
-            } else {
-                store.clear().map_err(internal_server_error)?;
-            }
-            Ok(Response::builder()
-                .status(StatusCode::NO_CONTENT)
-                .body(Body::empty())
-                .unwrap())
-        }
-        (path, "POST") if path.starts_with("/store") => {
-            // if read_only {
-            //     return Err(the_server_is_read_only());
-            // }
-            let content_type =
-                content_type(request).ok_or_else(|| bad_request("No Content-Type given"))?;
-            if let Some(target) = store_target(request)? {
-                let format = RdfFormat::from_media_type(&content_type)
-                    .ok_or_else(|| unsupported_media_type(&content_type))?;
-                let new = assert_that_graph_exists(store, &target).is_ok();
-                web_load_graph(store, request, format, &GraphName::from(target))?;
-                Ok(Response::builder()
-                    .status(if new {
-                        StatusCode::CREATED
-                    } else {
-                        StatusCode::NO_CONTENT
-                    })
-                    .body(Body::empty())
-                    .unwrap())
-            } else {
-                let format = RdfFormat::from_media_type(&content_type)
-                    .ok_or_else(|| unsupported_media_type(&content_type))?;
-                if format.supports_datasets() {
-                    web_load_dataset(store, request, format)?;
-                    Ok(Response::builder()
-                        .status(StatusCode::NO_CONTENT)
-                        .body(Body::empty())
-                        .unwrap())
-                } else {
-                    let graph =
-                        resolve_with_base(request, &format!("/store/{:x}", random::<u128>()))?;
-                    web_load_graph(store, request, format, &graph.clone().into())?;
-                    Ok(Response::builder()
-                        .status(StatusCode::CREATED)
-                        .header(LOCATION, graph.into_string())
-                        .body(Body::empty())
-                        .unwrap())
-                }
-            }
-        }
-        (path, "HEAD") if path.starts_with("/store") => {
-            if let Some(target) = store_target(request)? {
-                assert_that_graph_exists(store, &target)?;
-            }
-            Ok(Response::builder().body(Body::empty()).unwrap())
-        }
+        ("/update", "GET") => Err(not_implemented(
+            "SPARQL Update is not supported by this server",
+        )),
+        ("/update", "POST") => Err(not_implemented(
+            "SPARQL Update is not supported by this server",
+        )),
+        (path, _method) if is_store_path(path) => Err(not_implemented(
+            "Graph Store Protocol is not supported by this server",
+        )),
         _ => Err((
             StatusCode::NOT_FOUND,
             format!(
@@ -524,38 +345,34 @@ pub fn handle_request(
     }
 }
 
+fn is_store_path(path: &str) -> bool {
+    path == "/store" || path.starts_with("/store/")
+}
+
 fn base_url(request: &Request<Body>) -> String {
     let uri = request.uri();
     if uri.query().is_some() {
         // We remove the query
         let mut parts = uri.clone().into_parts();
-        if let Some(path_and_query) = &mut parts.path_and_query {
-            if path_and_query.query().is_some() {
-                *path_and_query = PathAndQuery::try_from(path_and_query.path()).unwrap();
+        if let Some(path_and_query) = &mut parts.path_and_query
+            && path_and_query.query().is_some()
+        {
+            if let Ok(path_only) = PathAndQuery::try_from(path_and_query.path()) {
+                *path_and_query = path_only;
+            } else {
+                return uri.path().to_string();
             }
         };
-        http::Uri::from_parts(parts).unwrap().to_string()
+        http::Uri::from_parts(parts)
+            .map(|built| built.to_string())
+            .unwrap_or_else(|_| uri.path().to_string())
     } else {
         uri.to_string()
     }
 }
 
-fn resolve_with_base(request: &Request<Body>, url: &str) -> Result<NamedNode, HttpError> {
-    Ok(Iri::parse(base_url(request))
-        .map_err(bad_request)?
-        .resolve(url)
-        .map_err(bad_request)?
-        .into())
-}
-
 fn url_query(request: &Request<Body>) -> &[u8] {
     request.uri().query().unwrap_or_default().as_bytes()
-}
-
-fn url_query_parameter<'a>(request: &'a Request<Body>, param: &str) -> Option<Cow<'a, str>> {
-    form_urlencoded::parse(url_query(request))
-        .find(|(k, _)| k == param)
-        .map(|(_, v)| v)
 }
 
 fn limited_string_body(request: &mut Request<Body>) -> Result<String, HttpError> {
@@ -585,13 +402,178 @@ fn limited_body(request: &mut Request<Body>) -> Result<Vec<u8>, HttpError> {
         body.take(MAX_SPARQL_BODY_SIZE + 1)
             .read_to_end(&mut payload)
             .map_err(internal_server_error)?;
-        if payload.len() > MAX_SPARQL_BODY_SIZE.try_into().unwrap() {
+        let max_len =
+            usize::try_from(MAX_SPARQL_BODY_SIZE).map_err(|_| bad_request("Huge body size"))?;
+        if payload.len() > max_len {
             return Err(bad_request(format!(
                 "SPARQL body payloads are limited to {MAX_SPARQL_BODY_SIZE} bytes"
             )));
         }
         Ok(payload)
     }
+}
+
+const QUERY_STREAM_CHUNK_SIZE: usize = 32 * 1024;
+
+enum QueryStreamItem {
+    Data(Vec<u8>),
+    Error(String),
+}
+
+struct QueryStreamReader {
+    receiver: mpsc::Receiver<QueryStreamItem>,
+    buffer: Vec<u8>,
+    position: usize,
+}
+
+impl QueryStreamReader {
+    fn new(receiver: mpsc::Receiver<QueryStreamItem>) -> Self {
+        Self {
+            receiver,
+            buffer: Vec::new(),
+            position: 0,
+        }
+    }
+
+    fn fill_buffer(&mut self) -> io::Result<bool> {
+        loop {
+            match self.receiver.recv() {
+                Ok(QueryStreamItem::Data(data)) => {
+                    if data.is_empty() {
+                        continue;
+                    }
+                    self.buffer = data;
+                    self.position = 0;
+                    return Ok(true);
+                }
+                Ok(QueryStreamItem::Error(err)) => {
+                    return Err(io::Error::new(io::ErrorKind::InvalidData, err));
+                }
+                Err(_) => return Ok(false),
+            }
+        }
+    }
+}
+
+impl Read for QueryStreamReader {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if self.position >= self.buffer.len() && !self.fill_buffer()? {
+            return Ok(0);
+        }
+        let available = std::cmp::min(buf.len(), self.buffer.len() - self.position);
+        buf[..available].copy_from_slice(&self.buffer[self.position..self.position + available]);
+        self.position += available;
+        if self.position >= self.buffer.len() {
+            self.buffer.clear();
+            self.position = 0;
+        }
+        Ok(available)
+    }
+}
+
+fn send_query_stream_buffer(
+    tx: &mpsc::SyncSender<QueryStreamItem>,
+    buffer: &mut Vec<u8>,
+) -> io::Result<()> {
+    if buffer.is_empty() {
+        return Ok(());
+    }
+    tx.send(QueryStreamItem::Data(std::mem::take(buffer)))
+        .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "client disconnected"))?;
+    Ok(())
+}
+
+struct QueryStreamChunkWriter {
+    tx: mpsc::SyncSender<QueryStreamItem>,
+    buffer: Vec<u8>,
+}
+
+impl QueryStreamChunkWriter {
+    fn new(tx: mpsc::SyncSender<QueryStreamItem>) -> Self {
+        Self {
+            tx,
+            buffer: Vec::new(),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        if !self.buffer.is_empty() {
+            send_query_stream_buffer(&self.tx, &mut self.buffer)?;
+        }
+        Ok(())
+    }
+}
+
+impl Write for QueryStreamChunkWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.buffer.extend_from_slice(buf);
+        if self.buffer.len() >= QUERY_STREAM_CHUNK_SIZE {
+            self.flush()?;
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        QueryStreamChunkWriter::flush(self)
+    }
+}
+
+fn stream_query_solution_results(
+    format: QueryResultsFormat,
+    tx: &mpsc::SyncSender<QueryStreamItem>,
+    solutions: spareval::QuerySolutionIter,
+    variables: Vec<oxrdf::Variable>,
+) -> io::Result<()> {
+    let mut writer = QueryStreamChunkWriter::new(tx.clone());
+    {
+        let mut serializer = QueryResultsSerializer::from_format(format)
+            .serialize_solutions_to_writer(&mut writer, variables)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+
+        for solution in solutions {
+            let solution =
+                solution.map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+            serializer.serialize(&solution).map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("serializing query solution: {e}"),
+                )
+            })?;
+        }
+
+        serializer.finish().map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("finalizing results: {e}"),
+            )
+        })?;
+    }
+    writer.flush()
+}
+
+fn stream_query_graph_results(
+    format: RdfFormat,
+    tx: &mpsc::SyncSender<QueryStreamItem>,
+    triples: spareval::QueryTripleIter,
+) -> io::Result<()> {
+    let mut writer = QueryStreamChunkWriter::new(tx.clone());
+    {
+        let mut serializer = RdfSerializer::from_format(format).for_writer(&mut writer);
+        for triple in triples {
+            let triple =
+                triple.map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+            serializer.serialize_triple(&triple).map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("serializing RDF triple: {e}"),
+                )
+            })?;
+        }
+        serializer.finish().map_err(|e| {
+            io::Error::new(io::ErrorKind::InvalidData, format!("finalizing RDF: {e}"))
+        })?;
+    }
+    writer.flush()
 }
 
 fn configure_and_evaluate_sparql_query(
@@ -639,546 +621,136 @@ fn configure_and_evaluate_sparql_query(
 fn evaluate_sparql_query(
     store: &AggregateHdt,
     query: &str,
-    _use_default_graph_as_union: bool,
-    _default_graph_uris: Vec<String>,
+    use_default_graph_as_union: bool,
+    default_graph_uris: Vec<String>,
     named_graph_uris: Vec<String>,
     request: &Request<Body>,
     // timeout: Option<Duration>,
 ) -> Result<Response<Body>, HttpError> {
     debug!("query: {query}");
-    let stuff = SparqlParser::new()
-        .with_base_iri(base_url(request))
-        .map_err(bad_request)?
-        .parse_query(query)
-        .map_err(bad_request)?;
+    let base = base_url(request);
+    let parsed_query = crate::sparql::parse_query(query, &base)
+        .map_err(|e| bad_request(format!("parse query: {e}")))?;
+    let is_rdf_result = matches!(
+        &parsed_query,
+        spargebra::Query::Construct { .. } | spargebra::Query::Describe { .. }
+    );
 
     // Get snapshot with optional graph filtering
-    // Optimization: Filter graphs BEFORE loading into memory by passing named_graph_uris
-    // to get_snapshot(). This significantly reduces memory usage and load time when
-    // only a subset of graphs are needed for the query.
-    // Note: union_default_graph is always true - default graph is union of all loaded graphs
-    let graph_filter = if !named_graph_uris.is_empty() {
-        Some(named_graph_uris)
-    } else {
-        None
-    };
-    let s = store
-        .get_snapshot(graph_filter)
-        .map_err(|_| internal_server_error("data temporarily unavailable"))?;
-
-    let results = QueryEvaluator::new()
-        .prepare(&stuff)
-        .execute(&s)
-        .map_err(internal_server_error)?;
-    match results {
-        QueryResults::Solutions(solutions) => {
-            let format = query_results_content_negotiation(request)?;
-            // Collect variable names and solutions to avoid lifetime issues
-            let variables = solutions.variables().to_vec();
-            let solutions_vec: Vec<_> = solutions
-                .collect::<Result<_, _>>()
-                .map_err(internal_server_error)?;
-            ReadForWrite::build_response(
-                move |w| {
-                    Ok((
-                        QueryResultsSerializer::from_format(format)
-                            .serialize_solutions_to_writer(w, variables)?,
-                        solutions_vec.into_iter(),
-                    ))
-                },
-                |(mut serializer, mut solutions_iter)| {
-                    Ok(if let Some(solution) = solutions_iter.next() {
-                        serializer.serialize(&solution)?;
-                        Some((serializer, solutions_iter))
-                    } else {
-                        serializer.finish()?;
-                        None
-                    })
-                },
-                format.media_type(),
-            )
-        }
-        QueryResults::Boolean(result) => {
-            let format = query_results_content_negotiation(request)?;
-            let mut body = Vec::new();
-            QueryResultsSerializer::from_format(format)
-                .serialize_boolean_to_writer(&mut body, result)
-                .map_err(internal_server_error)?;
-            Ok(Response::builder()
-                .header(CONTENT_TYPE, format.media_type())
-                .body(body.into())
-                .unwrap())
-        }
-        QueryResults::Graph(triples) => {
-            let format = rdf_content_negotiation(request)?;
-            // Collect triples to avoid lifetime issues
-            let triples: Vec<_> = triples
-                .collect::<Result<_, _>>()
-                .map_err(internal_server_error)?;
-            ReadForWrite::build_response(
-                move |w| {
-                    Ok((
-                        RdfSerializer::from_format(format).for_writer(w),
-                        triples.into_iter(),
-                    ))
-                },
-                |(mut serializer, mut triples_iter)| {
-                    Ok(if let Some(t) = triples_iter.next() {
-                        serializer.serialize_triple(&t)?;
-                        Some((serializer, triples_iter))
-                    } else {
-                        serializer.finish()?;
-                        None
-                    })
-                },
-                format.media_type(),
-            )
-        }
-    }
-}
-
-// spargebra re-exports oxrdf types, so Quad already contains oxrdf types
-// No conversion functions needed!
-
-fn configure_and_evaluate_sparql_update(
-    store: &AggregateHdt,
-    encoded: &[&[u8]],
-    mut update: Option<String>,
-    request: &Request<Body>,
-    default_use_default_graph_as_union: bool,
-) -> Result<Response<Body>, HttpError> {
-    let mut use_default_graph_as_union = false;
-    let mut default_graph_uris = Vec::new();
-    let mut named_graph_uris = Vec::new();
-    for encoded in encoded {
-        for (k, v) in form_urlencoded::parse(encoded) {
-            match k.as_ref() {
-                "update" => {
-                    if update.is_some() {
-                        return Err(bad_request("Multiple update parameters provided"));
-                    }
-                    update = Some(v.into_owned())
-                }
-                "using-graph-uri" => default_graph_uris.push(v.into_owned()),
-                "using-union-graph" => use_default_graph_as_union = true,
-                "using-named-graph-uri" => named_graph_uris.push(v.into_owned()),
-                _ => (),
-            }
-        }
-    }
-    if default_graph_uris.is_empty() && named_graph_uris.is_empty() {
-        use_default_graph_as_union |= default_use_default_graph_as_union;
-    }
-    let update = update.ok_or_else(|| bad_request("You should set the 'update' parameter"))?;
-    evaluate_sparql_update(
-        store,
-        &update,
-        use_default_graph_as_union,
-        default_graph_uris,
-        named_graph_uris,
-        request,
-    )
-}
-
-fn evaluate_sparql_update(
-    store: &AggregateHdt,
-    update: &str,
-    _use_default_graph_as_union: bool,
-    _default_graph_uris: Vec<String>,
-    _named_graph_uris: Vec<String>,
-    request: &Request<Body>,
-) -> Result<Response<Body>, HttpError> {
-    use spargebra::GraphUpdateOperation;
-
-    let update_ops = spargebra::SparqlParser::new()
-        .with_base_iri(base_url(request).as_str())
-        .map_err(|e| bad_request(format!("Invalid base IRI: {}", e)))?
-        .parse_update(update)
-        .map_err(|e| bad_request(format!("Invalid SPARQL update: {}", e)))?;
-    // Validate operations - only allow CREATE and INSERT DATA to new graphs
-    // Reject any operations that modify existing graphs
-    for op in &update_ops.operations {
-        match op {
-            // Allow CREATE - will be a no-op, just for SPARQL compliance
-            GraphUpdateOperation::Create { graph, silent } => {
-                // Check if graph already exists
-                let exists = store
-                    .contains_graph_name(&graph.clone().into_string())
-                    .map_err(internal_server_error)?;
-
-                if exists && !silent {
-                    return Err(content_is_read_only(format!(
-                        "Graph {} already exists.",
-                        graph
-                    )));
-                }
-            }
-
-            // Allow INSERT DATA - but only to new graphs
-            GraphUpdateOperation::InsertData { data } => {
-                use spargebra::term::GraphName as SparqlGraphName;
-                use std::collections::HashSet;
-
-                // Extract all graph names from the quads
-                let mut graphs_used = HashSet::new();
-                for quad in data {
-                    match &quad.graph_name {
-                        SparqlGraphName::NamedNode(graph) => {
-                            graphs_used.insert(graph);
-                        }
-                        SparqlGraphName::DefaultGraph => {
-                            return Err(content_is_read_only(
-                                "INSERT DATA to default graph is not allowed. Only named graphs are supported."
-                            ));
-                        }
-                    }
-                }
-
-                // Check that all target graphs don't already exist
-                for graph in graphs_used {
-                    if store
-                        .contains_graph_name(&graph.clone().into_string())
-                        .map_err(internal_server_error)?
-                    {
-                        return Err(content_is_read_only(format!(
-                            "Graph {} already exists. INSERT DATA is only allowed to new graphs.",
-                            graph
-                        )));
-                    }
-                }
-            }
-
-            // Allow LOAD - but only to new graphs
-            GraphUpdateOperation::Load {
-                destination,
-                source: _,
-                silent,
-            } => {
-                use spargebra::term::GraphName as SparqlGraphName;
-
-                if let SparqlGraphName::NamedNode(graph) = destination {
-                    let exists = store
-                        .contains_graph_name(&graph.clone().into_string())
-                        .map_err(internal_server_error)?;
-
-                    if exists && !silent {
-                        return Err(content_is_read_only(format!(
-                            "Graph {} already exists. LOAD is only allowed to new graphs.",
-                            graph
-                        )));
-                    }
-                }
-                // Note: LOAD to default graph is also rejected for safety
-                else {
-                    return Err(content_is_read_only(
-                        "LOAD to default graph is not allowed. Only named graphs can be created.",
-                    ));
-                }
-            }
-
-            // Reject all operations that modify existing data
-            GraphUpdateOperation::DeleteData { .. } => {
-                return Err(content_is_read_only(
-                    "DELETE DATA is not allowed. Only INSERT DATA to new graphs is permitted.",
-                ));
-            }
-
-            GraphUpdateOperation::DeleteInsert { .. } => {
-                return Err(content_is_read_only(
-                    "DELETE/INSERT operations are not allowed. Only INSERT DATA to new graphs is permitted."
-                ));
-            }
-
-            GraphUpdateOperation::Clear { graph, silent } => {
-                use spargebra::algebra::GraphTarget;
-
-                match graph {
-                    GraphTarget::NamedNode(graph_name) => {
-                        // Allow CLEAR for named graphs (will remove the graph)
-                        let exists = store
-                            .contains_graph_name(&graph_name.clone().into_string())
-                            .map_err(internal_server_error)?;
-
-                        if !exists && !silent {
-                            return Err(bad_request(format!(
-                                "Graph {} does not exist.",
-                                graph_name
-                            )));
-                        }
-                    }
-                    GraphTarget::DefaultGraph => {
-                        return Err(bad_request(
-                            "CLEAR DEFAULT is not supported. Only named graphs can be cleared.",
-                        ));
-                    }
-                    GraphTarget::NamedGraphs => {
-                        return Err(bad_request(
-                            "CLEAR NAMED is not supported. Please specify individual graphs.",
-                        ));
-                    }
-                    GraphTarget::AllGraphs => {
-                        return Err(bad_request(
-                            "CLEAR ALL is not supported. Please specify individual graphs.",
-                        ));
-                    }
-                }
-            }
-
-            GraphUpdateOperation::Drop { graph, silent } => {
-                use spargebra::algebra::GraphTarget;
-
-                match graph {
-                    GraphTarget::NamedNode(graph_name) => {
-                        // Allow DROP for named graphs (will remove the graph)
-                        let exists = store
-                            .contains_graph_name(&graph_name.clone().into_string())
-                            .map_err(internal_server_error)?;
-
-                        if !exists && !silent {
-                            return Err(bad_request(format!(
-                                "Graph {} does not exist.",
-                                graph_name
-                            )));
-                        }
-                    }
-                    GraphTarget::DefaultGraph => {
-                        return Err(bad_request(
-                            "DROP DEFAULT is not supported. Only named graphs can be dropped.",
-                        ));
-                    }
-                    GraphTarget::NamedGraphs => {
-                        return Err(bad_request(
-                            "DROP NAMED is not supported. Please specify individual graphs.",
-                        ));
-                    }
-                    GraphTarget::AllGraphs => {
-                        return Err(bad_request(
-                            "DROP ALL is not supported. Please specify individual graphs.",
-                        ));
-                    }
-                }
-            }
-        }
-    }
-
-    // If validation passes, execute the allowed operations
-    for op in &update_ops.operations {
-        match op {
-            GraphUpdateOperation::Create { graph, silent } => {
-                // CREATE is a no-op - graph will be created on first INSERT DATA
-                // Just verify it doesn't already exist (already checked in validation)
-                let exists = store
-                    .contains_graph_name(&graph.clone().into_string())
-                    .map_err(internal_server_error)?;
-
-                if !exists {
-                    // Success - graph doesn't exist, ready for future INSERT
-                    eprintln!("CREATE GRAPH {} - will be created on first INSERT", graph);
-                } else if !silent {
-                    return Err(content_is_read_only(format!(
-                        "Graph {} already exists",
-                        graph
-                    )));
-                }
-            }
-
-            GraphUpdateOperation::InsertData { data } => {
-                use spargebra::term::GraphName as SparqlGraphName;
-                use std::collections::HashMap;
-
-                // Group quads by graph name
-                let mut quads_by_graph: HashMap<&NamedNode, Vec<&spargebra::term::Quad>> =
-                    HashMap::new();
-                for quad in data {
-                    if let SparqlGraphName::NamedNode(graph) = &quad.graph_name {
-                        quads_by_graph.entry(graph).or_default().push(quad);
-                    }
-                }
-
-                // For each graph, create an NT file and convert to HDT
-                for (graph, quads) in quads_by_graph {
-                    let quad_count = quads.len();
-
-                    // Create temporary NT file
-                    let tmp_nt = tempfile::Builder::new()
-                        .suffix(".nt")
-                        .tempfile()
-                        .map_err(internal_server_error)?;
-
-                    let (nt_file, nt_path) = tmp_nt.keep().map_err(internal_server_error)?;
-                    let mut nt_writer = BufWriter::new(&nt_file);
-
-                    // Write quads as triples to NT file
-                    let mut serializer = RdfSerializer::from_format(RdfFormat::NTriples)
-                        .for_writer(nt_writer.by_ref());
-
-                    for quad in quads {
-                        // spargebra::term::Quad already contains oxrdf types, so we can use them directly
-                        serializer
-                            .serialize_triple(TripleRef::new(
-                                quad.subject.as_ref(),
-                                quad.predicate.as_ref(),
-                                quad.object.as_ref(),
-                            ))
-                            .map_err(internal_server_error)?;
-                    }
-
-                    serializer.finish().map_err(internal_server_error)?;
-                    drop(nt_writer);
-                    drop(nt_file);
-
-                    // Now convert NT to HDT and insert into store
-                    // This will use the existing infrastructure that converts NT -> HDT
-                    store
-                        .insert_named_graph(graph, nt_path.as_path())
-                        .map_err(|e| {
-                            internal_server_error(format!(
-                                "Failed to create graph {}: {}",
-                                graph, e
-                            ))
-                        })?;
-
-                    eprintln!("Created new graph {} with {} triples", graph, quad_count);
-                }
-            }
-
-            GraphUpdateOperation::Load {
-                destination,
-                source: _,
-                silent: _,
-            } => {
-                use spargebra::term::GraphName as SparqlGraphName;
-
-                if let SparqlGraphName::NamedNode(_graph) = destination {
-                    // LOAD operation is not yet implemented
-                    // Would require: URL fetching, format detection, parsing, conversion to HDT
-                    return Err(bad_request(
-                        "LOAD operation is not yet implemented. Please use INSERT DATA or the /store endpoint with PUT to add new graphs."
-                    ));
-                } else {
-                    return Err(bad_request("LOAD to default graph is not allowed"));
-                }
-            }
-
-            GraphUpdateOperation::Clear { graph, silent } => {
-                use spargebra::algebra::GraphTarget;
-
-                if let GraphTarget::NamedNode(graph_name) = graph {
-                    // Check if graph exists
-                    let exists = store
-                        .contains_graph_name(&graph_name.clone().into_string())
-                        .map_err(internal_server_error)?;
-
-                    if exists {
-                        // Remove the graph
-                        store
-                            .remove_named_graph(graph_name)
-                            .map_err(internal_server_error)?;
-                        eprintln!("CLEAR GRAPH {} - graph removed", graph_name);
-                    } else if !silent {
-                        return Err(bad_request(format!("Graph {} does not exist", graph_name)));
-                    }
-                }
-            }
-
-            GraphUpdateOperation::Drop { graph, silent } => {
-                use spargebra::algebra::GraphTarget;
-
-                if let GraphTarget::NamedNode(graph_name) = graph {
-                    // Check if graph exists
-                    let exists = store
-                        .contains_graph_name(&graph_name.clone().into_string())
-                        .map_err(internal_server_error)?;
-
-                    if exists {
-                        // Remove the graph
-                        let removed = store
-                            .remove_named_graph(graph_name)
-                            .map_err(internal_server_error)?;
-
-                        if removed {
-                            eprintln!("DROP GRAPH {} - graph removed", graph_name);
-                        }
-                    } else if !silent {
-                        return Err(bad_request(format!("Graph {} does not exist", graph_name)));
-                    }
-                }
-            }
-
-            _ => {
-                // Should never reach here due to validation above
-                return Err(internal_server_error(
-                    "Unexpected operation passed validation",
-                ));
-            }
-        }
-    }
-
-    Ok(Response::builder()
-        .status(StatusCode::NO_CONTENT)
-        .body(Body::empty())
-        .unwrap())
-}
-
-fn store_target(request: &Request<Body>) -> Result<Option<NamedGraphName>, HttpError> {
-    if request.uri().path() == "/store" {
-        if let Some(graph) = url_query_parameter(request, "graph") {
-            if url_query_parameter(request, "default").is_some() {
-                Err(bad_request(
-                    "Both graph and default parameters should not be set at the same time",
-                ))
-            } else {
-                Ok(Some(NamedGraphName::NamedNode(resolve_with_base(
-                    request, &graph,
-                )?)))
-            }
-        } else if url_query_parameter(request, "default").is_some() {
-            Ok(Some(NamedGraphName::DefaultGraph))
+    // Optimization: Filter graphs BEFORE loading into memory by passing an explicit list.
+    // This significantly reduces memory usage and load time when only a subset of graphs are
+    // needed for the query.
+    let graph_filter = {
+        let mut selected_graphs: Vec<String> = if use_default_graph_as_union {
+            let mut selected = default_graph_uris.clone();
+            selected.extend(named_graph_uris.clone());
+            selected
+        } else if default_graph_uris.is_empty() {
+            named_graph_uris.clone()
         } else {
-            Ok(None)
+            default_graph_uris.clone()
+        };
+
+        selected_graphs.sort_unstable();
+        selected_graphs.dedup();
+
+        if selected_graphs.is_empty() {
+            None
+        } else {
+            Some(selected_graphs)
         }
+    };
+    if let Some(graph_filter_ref) = graph_filter.as_ref() {
+        debug!("using graph filter for query: {:?}", graph_filter_ref);
     } else {
-        Ok(Some(NamedGraphName::NamedNode(resolve_with_base(
-            request, "",
-        )?)))
+        debug!("using default graph filter for query: all graphs");
     }
-}
 
-fn assert_that_graph_exists(
-    store: &AggregateHdt,
-    target: &NamedGraphName,
-) -> Result<(), HttpError> {
-    if match target {
-        NamedGraphName::DefaultGraph => true,
-        NamedGraphName::NamedNode(target) => store
-            .contains_graph_name(&target.clone().into_string())
-            .map_err(internal_server_error)?,
-    } {
-        Ok(())
+    let (tx, rx) = mpsc::sync_channel::<QueryStreamItem>(4);
+    let store = store.clone();
+    let output_media_type = if is_rdf_result {
+        let graph_format = rdf_content_negotiation(request)?;
+        let _ = std::thread::spawn(move || {
+            let tx_result = (|| -> io::Result<()> {
+                let snapshot = store.get_snapshot(graph_filter).map_err(|_| {
+                    io::Error::new(io::ErrorKind::InvalidData, "data temporarily unavailable")
+                })?;
+                let results =
+                    crate::sparql::query_parsed_with_debug_plan(parsed_query, &snapshot, false)
+                        .map_err(|e| {
+                            io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                format!("query execution: {e}"),
+                            )
+                        })?;
+                match results {
+                    QueryResults::Graph(triples) => {
+                        stream_query_graph_results(graph_format, &tx, triples)?
+                    }
+                    QueryResults::Solutions(_) | QueryResults::Boolean(_) => Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "construct/describe expected",
+                    ))?,
+                }
+                Ok(())
+            })();
+            if let Err(err) = tx_result {
+                let _ = tx.send(QueryStreamItem::Error(err.to_string()));
+            }
+        });
+        graph_format.media_type()
     } else {
-        Err((
-            StatusCode::NOT_FOUND,
-            format!(
-                "The graph {} does not exists",
-                GraphName::from(target.clone())
-            ),
-        ))
-    }
-}
+        let solutions_format = query_results_content_negotiation(request)?;
+        let _ = std::thread::spawn(move || {
+            let tx_result = (|| -> io::Result<()> {
+                let snapshot = store.get_snapshot(graph_filter).map_err(|_| {
+                    io::Error::new(io::ErrorKind::InvalidData, "data temporarily unavailable")
+                })?;
+                let results =
+                    crate::sparql::query_parsed_with_debug_plan(parsed_query, &snapshot, false)
+                        .map_err(|e| {
+                            io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                format!("query execution: {e}"),
+                            )
+                        })?;
+                match results {
+                    QueryResults::Solutions(solutions) => {
+                        let variables = solutions.variables().to_vec();
+                        stream_query_solution_results(solutions_format, &tx, solutions, variables)?
+                    }
+                    QueryResults::Boolean(result) => {
+                        let mut body = Vec::new();
+                        QueryResultsSerializer::from_format(solutions_format)
+                            .serialize_boolean_to_writer(&mut body, result)
+                            .map_err(|e| {
+                                io::Error::new(
+                                    io::ErrorKind::InvalidData,
+                                    format!("serializing boolean result: {e}"),
+                                )
+                            })?;
+                        tx.send(QueryStreamItem::Data(body)).map_err(|_| {
+                            io::Error::new(io::ErrorKind::BrokenPipe, "client disconnected")
+                        })?;
+                    }
+                    QueryResults::Graph(_) => Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "select/ask expected",
+                    ))?,
+                }
+                Ok(())
+            })();
+            if let Err(err) = tx_result {
+                let _ = tx.send(QueryStreamItem::Error(err.to_string()));
+            }
+        });
+        solutions_format.media_type()
+    };
 
-#[derive(Eq, PartialEq, Debug, Clone, Hash)]
-enum NamedGraphName {
-    NamedNode(NamedNode),
-    DefaultGraph,
-}
-
-impl From<NamedGraphName> for GraphName {
-    fn from(graph_name: NamedGraphName) -> Self {
-        match graph_name {
-            NamedGraphName::NamedNode(node) => node.into(),
-            NamedGraphName::DefaultGraph => Self::DefaultGraph,
-        }
-    }
+    Response::builder()
+        .header(CONTENT_TYPE, output_media_type)
+        .body(Body::from_read(QueryStreamReader::new(rx)))
+        .map_err(internal_server_error)
 }
 
 fn rdf_content_negotiation(request: &Request<Body>) -> Result<RdfFormat, HttpError> {
@@ -1225,23 +797,21 @@ fn content_negotiation<F: Copy>(
         .unwrap_or_default();
 
     if header.is_empty() {
-        println!(" default {ACCEPT}");
+        debug!("accept header missing, using default content type");
         return Ok(default);
     }
-    println!("{ACCEPT} {header}");
+    debug!("{ACCEPT}: {header}");
     let mut result = None;
     let mut result_score = 0_f32;
     for mut possible in header.split(',') {
         let mut score = 1.;
-        if let Some((possible_type, last_parameter)) = possible.rsplit_once(';') {
-            if let Some((name, value)) = last_parameter.split_once('=') {
-                if name.trim().eq_ignore_ascii_case("q") {
-                    score = f32::from_str(value.trim()).map_err(|_| {
-                        bad_request(format!("Invalid Accept media type score: {value}"))
-                    })?;
-                    possible = possible_type;
-                }
-            }
+        if let Some((possible_type, last_parameter)) = possible.rsplit_once(';')
+            && let Some((name, value)) = last_parameter.split_once('=')
+            && name.trim().eq_ignore_ascii_case("q")
+        {
+            score = f32::from_str(value.trim())
+                .map_err(|_| bad_request(format!("Invalid Accept media type score: {value}")))?;
+            possible = possible_type;
         }
         if score <= result_score {
             continue;
@@ -1285,7 +855,7 @@ fn content_negotiation<F: Copy>(
 
 fn content_type(request: &Request<Body>) -> Option<String> {
     let value = request.headers().get(CONTENT_TYPE)?.to_str().ok()?;
-    eprintln!("request content_type: {value}");
+    debug!("request content_type: {value}");
     Some(
         value
             .split_once(';')
@@ -1293,71 +863,6 @@ fn content_type(request: &Request<Body>) -> Option<String> {
             .trim()
             .to_ascii_lowercase(),
     )
-}
-
-fn web_load_graph(
-    store: &AggregateHdt,
-    request: &mut Request<Body>,
-    format: RdfFormat,
-    to_graph_name: &GraphName,
-) -> Result<String, HttpError> {
-    let base_iri = if let GraphName::NamedNode(graph_name) = to_graph_name {
-        Some(graph_name.as_str())
-    } else {
-        None
-    };
-    let mut parser = RdfParser::from_format(format)
-        .without_named_graphs()
-        .with_default_graph(to_graph_name.clone());
-
-    if let Some(base_iri) = base_iri {
-        parser = parser.with_base_iri(base_iri).map_err(bad_request)?;
-    }
-
-    let quads = parser.for_reader(request.body_mut());
-    let tmp_file = tempfile::Builder::new()
-        .suffix(".nt")
-        .tempfile()
-        .map_err(|_| internal_server_error("error during RDF to HDT conversion"))?;
-    let (f, p) = tmp_file.keep().map_err(|_| internal_server_error(""))?;
-    let mut dest_writer = BufWriter::new(&f);
-
-    let mut serializer =
-        RdfSerializer::from_format(RdfFormat::NTriples).for_writer(dest_writer.by_ref());
-
-    for q in quads.flatten() {
-        serializer
-            .serialize_triple(TripleRef::new(
-                q.subject.as_ref(),
-                q.predicate.as_ref(),
-                q.object.as_ref(),
-            ))
-            .map_err(|_| internal_server_error("error during RDF serialization"))?
-    }
-
-    store
-        .insert_named_graph(
-            &NamedNode::from_str(base_iri.unwrap_or(&format!(
-                "file:///{}",
-                p.as_path().file_name().unwrap().to_str().unwrap()
-            )))
-            .unwrap_or(
-                NamedNode::from_str(&format!("file:///{:x}", random::<u128>()))
-                    .map_err(|_| internal_server_error("error with propsed graph name"))?,
-            ),
-            p.as_path(),
-        )
-        .map_err(|_| internal_server_error("error persisting graph to store"))?;
-
-    Ok(p.as_path().to_str().unwrap().to_string())
-}
-
-fn web_load_dataset(
-    store: &AggregateHdt,
-    request: &mut Request<Body>,
-    format: RdfFormat,
-) -> Result<String, HttpError> {
-    web_load_graph(store, request, format, &GraphName::DefaultGraph)
 }
 
 // fn web_bulk_loader<'a>(store: &'a AggregateHdt, request: &Request<Body>) -> BulkLoader<'a> {
@@ -1382,11 +887,13 @@ fn web_load_dataset(
 
 fn error(status: StatusCode, message: impl fmt::Display) -> Response<Body> {
     eprintln!("ERROR {status:?}: {message}");
-    Response::builder()
-        .status(status)
-        .header(CONTENT_TYPE, "text/plain; charset=utf-8")
-        .body(message.to_string().into())
-        .unwrap()
+    let mut response = Response::new(message.to_string().into());
+    *response.status_mut() = status;
+    response.headers_mut().insert(
+        CONTENT_TYPE,
+        HeaderValue::from_static("text/plain; charset=utf-8"),
+    );
+    response
 }
 
 fn bad_request(message: impl fmt::Display) -> HttpError {
@@ -1394,12 +901,9 @@ fn bad_request(message: impl fmt::Display) -> HttpError {
     (StatusCode::BAD_REQUEST, message.to_string())
 }
 
-fn content_is_read_only(message: impl fmt::Display) -> HttpError {
-    eprintln!("FORBIDDEN: readonly {message}");
-    (
-        StatusCode::FORBIDDEN,
-        format!("Requested data is read-only: {message}"),
-    )
+fn not_implemented(message: impl fmt::Display) -> HttpError {
+    eprintln!("NOT IMPLEMENTED: {message}");
+    (StatusCode::NOT_IMPLEMENTED, message.to_string())
 }
 
 fn unsupported_media_type(content_type: &str) -> HttpError {
@@ -1422,84 +926,6 @@ fn internal_server_error(message: impl fmt::Display) -> HttpError {
 //         LoaderError::InvalidBaseIri { .. } => bad_request(e),
 //     }
 // }
-
-/// Hacky tool to allow implementing read on top of a write loop
-struct ReadForWrite<O, U: (Fn(O) -> io::Result<Option<O>>)> {
-    buffer: Rc<RefCell<Vec<u8>>>,
-    position: usize,
-    add_more_data: U,
-    state: Option<O>,
-}
-
-impl<O: 'static, U: (Fn(O) -> io::Result<Option<O>>) + 'static> ReadForWrite<O, U> {
-    fn build_response(
-        initial_state_builder: impl FnOnce(ReadForWriteWriter) -> io::Result<O>,
-        add_more_data: U,
-        content_type: &'static str,
-    ) -> Result<Response<Body>, HttpError> {
-        let buffer = Rc::new(RefCell::new(Vec::new()));
-        let state = initial_state_builder(ReadForWriteWriter {
-            buffer: Rc::clone(&buffer),
-        })
-        .map_err(internal_server_error)?;
-        Response::builder()
-            .header(CONTENT_TYPE, content_type)
-            .body(Body::from_read(Self {
-                buffer,
-                position: 0,
-                add_more_data,
-                state: Some(state),
-            }))
-            .map_err(internal_server_error)
-    }
-}
-
-impl<O, U: (Fn(O) -> io::Result<Option<O>>)> Read for ReadForWrite<O, U> {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        while self.position == self.buffer.borrow().len() {
-            // We read more data
-            if let Some(state) = self.state.take() {
-                self.buffer.borrow_mut().clear();
-                self.position = 0;
-                self.state = match (self.add_more_data)(state) {
-                    Ok(state) => state,
-                    Err(e) => {
-                        eprintln!("Internal server error while streaming results: {e}");
-                        self.buffer
-                            .borrow_mut()
-                            .write_all(e.to_string().as_bytes())?;
-                        None
-                    }
-                }
-            } else {
-                return Ok(0); // End
-            }
-        }
-        let buffer = self.buffer.borrow();
-        let len = min(buffer.len() - self.position, buf.len());
-        buf[..len].copy_from_slice(&buffer[self.position..self.position + len]);
-        self.position += len;
-        Ok(len)
-    }
-}
-
-struct ReadForWriteWriter {
-    buffer: Rc<RefCell<Vec<u8>>>,
-}
-
-impl Write for ReadForWriteWriter {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.buffer.borrow_mut().write(buf)
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-
-    fn write_all(&mut self, buf: &[u8]) -> io::Result<()> {
-        self.buffer.borrow_mut().write_all(buf)
-    }
-}
 
 #[cfg(target_os = "linux")]
 fn systemd_notify_ready() -> io::Result<()> {

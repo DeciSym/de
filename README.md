@@ -3,153 +3,135 @@
 [![Build](https://github.com/DeciSym/de/actions/workflows/test_build.yml/badge.svg)](https://github.com/DeciSym/de/actions/workflows/test_build.yml)
 [![Documentation](https://docs.rs/de/badge.svg)](https://docs.rs/de/)
 
-# DeciSym Engine
+# DeciSym Engine (`de`)
 
-**DeciSym Engine (`de`)** is a command-line tool for creating, querying, and inspecting RDF data in the [HDT (Header, Dictionary, Triples)](http://www.rdfhdt.org/) format. It enables efficient semantic data workflows using SPARQL and supports a variety of RDF and result serialization formats.
+`de` is a command-line tool for creating, querying, and inspecting RDF
+data in [HDT](http://www.rdfhdt.org/) (Header, Dictionary, Triples) format.
 
-## Features
-
-- Convert RDF data into compact, indexed `.hdt` files
-- Query RDF and HDT files using SPARQL
-- View metadata and statistics for HDT files
-- Supports multiple output formats including CSV, JSON, Turtle, and more
-- Simple CLI interface with verbosity control
+It is intended for workflows where RDF data needs compact storage and
+SPARQL querying over both RDF and HDT inputs.
 
 ## Installation
 
-### Build from source (requires Rust and Cargo):
+Run directly from a local clone (no install required):
 
-```bash
+```sh
 git clone https://github.com/DeciSym/de.git
-cargo install --path ./de/
-# OR
-cargo install --git https://github.com/DeciSym/de
+cd de
+cargo run -- --help
 ```
-### Run with Docker:
-```bash
+
+Install the CLI from crates.io:
+
+```sh
+cargo install de
+```
+
+Install with server command enabled:
+
+```sh
+cargo install --features server de
+```
+
+Install the CLI from a local clone:
+
+```sh
+cargo install --path .
+```
+
+Docker image:
+
+```sh
 docker run --rm decisym/de:latest --help
 ```
-### Download the latest [release](https://github.com/DeciSym/de/releases) version and install the .deb
-```bash
-apt install de_${VERSION}_amd64.deb -y
-```
-## Usage Overview
 
-Available commands:
+## Example
 
-- `create` – Convert RDF data into an HDT file
-- `query` – Execute SPARQL queries on HDT/RDF data
-- `view` – View metadata and statistics for an HDT file
-- `help` – Show command-specific help
+The example below corresponds to the SPARQL 1.1 Query Recommendation:
 
+- §2.1 Triple Patterns:
+  <https://www.w3.org/TR/sparql11-query/#basicpatterns>
 
-### Commands
+From the repository root, create the example input data (`simple.nt`):
 
-#### `create`
-
-Convert RDF data into a `.hdt` file.
-
-```bash
-de create --output-name data.hdt --data example.ttl
+```nt
+<http://example.org/book/book1> <http://purl.org/dc/elements/1.1/title> "SPARQL Tutorial" .
 ```
 
-##### Options:
+Create the query (`simple.rq`):
 
-- `-o, --output-name <OUTPUT_NAME>`: Name of the output HDT file (should end in `.hdt`) **[required]**
-- `-d, --data <DATA>`: One or more RDF source files (e.g., `.ttl`, `.nt`) to include in the HDT
-- `-v, --verbose`: Increase verbosity
-- `-q, --quiet`: Suppress output
-- `-h, --help`: Show help
-
----
-
-#### `query`
-
-Execute a SPARQL query over RDF and/or HDT files.
-
-```bash
-de query --data data.hdt --sparql query.rq --output json
-```
-
-##### Options:
-
-- `-d, --data <DATA>`: One or more RDF or HDT files to query
-- `-s, --sparql <SPARQL>`: Path to SPARQL query file (`.rq`) **[required]**
-- `-o, --output <OUTPUT>`: Output format for results (default: `csv`)
-
-  Supported formats:
-  - `csv`, `tsv`: [SPARQL CSV/TSV](https://www.w3.org/TR/sparql11-results-csv-tsv/)
-  - `json`: [SPARQL Results JSON](https://www.w3.org/TR/sparql11-results-json/)
-  - `xml`: [SPARQL Results XML](https://www.w3.org/TR/rdf-sparql-XMLres/)
-  - `n3`: [Notation3](https://w3c.github.io/N3/spec/)
-  - `nquads`: [N-Quads](https://www.w3.org/TR/n-quads/)
-  - `rdfxml`: [RDF/XML](https://www.w3.org/TR/rdf-syntax-grammar/)
-  - `ntriple`: [N-Triples](https://www.w3.org/TR/n-triples/)
-  - `trig`: [TriG](https://www.w3.org/TR/trig/)
-  - `turtle`: [Turtle](https://www.w3.org/TR/turtle/)
-
-- `-v, --verbose`: Increase verbosity
-- `-q, --quiet`: Suppress output
-- `-h, --help`: Show help
-
-##### Example execution:
-
-```bash
-de create --output-name apple.hdt --data apple.ttl
-de query --data apple.hdt --sparql query-color.rq
-fruit,color
-http://example.org/Apple,Red
-```
-
-ex apple.ttl:
-```
-@prefix ex: <http://example.org/>.
-@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>.
-@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#>.
-
-ex:Apple rdf:type ex:Fruit;
-  rdfs:label "Apple";
-  ex:variety "Red Delicious";
-  ex:hasColor "Red";
-  ex:weight "150 grams";
-  ex:origin "United States";
-  ex:isOrganic true.
-
-ex:Fruit rdf:type rdfs:Class;
-  rdfs:label "Fruit".
-```
-
-ex query-color.rq:
-```
-PREFIX ex: <http://example.org/>
-PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
-
-SELECT ?fruit ?color
-WHERE {
-  ?fruit ex:hasColor ?color 
+```sparql
+SELECT ?title
+WHERE
+{
+  <http://example.org/book/book1> <http://purl.org/dc/elements/1.1/title> ?title .
 }
-
-ORDER BY DESC(?fruit)
-```
----
-
-#### `view`
-
-Print metadata and statistics about an HDT file.
-
-```bash
-de view --data data.hdt
 ```
 
-##### Options:
+Run directly against RDF:
 
-- `-d, --data <DATA>`: One or more HDT files
-- `-v, --verbose`: Increase verbosity
-- `-q, --quiet`: Suppress output
-- `-h, --help`: Show help
+```sh
+cargo run -- query --data simple.nt --sparql simple.rq --output csv
+```
 
----
+Output:
 
-## License
+```csv
+title
+SPARQL Tutorial
+```
 
-This project is licensed under the BSD 3-Clause License - see the [LICENSE](LICENSE) file for details.
+Convert to HDT and run the same query:
+
+```sh
+cargo run -- create --output-name simple.hdt --data simple.nt
+cargo run -- query --data simple.hdt --sparql simple.rq --output csv
+```
+
+Output:
+
+```csv
+title
+SPARQL Tutorial
+```
+
+## Command Reference
+
+Use CLI help (and installed man pages, if available in your
+environment) as the canonical command reference:
+
+```sh
+cargo run -- --help
+cargo run -- <command> --help
+```
+
+If you installed the CLI:
+
+```sh
+de --help
+de <command> --help
+```
+
+Examples:
+
+```sh
+cargo run -- create --help
+cargo run -- query --help
+cargo run -- view --help
+```
+
+## Development
+
+Run core checks:
+
+```sh
+cargo fmt --check
+cargo clippy --all-features --all-targets -- -D warnings
+cargo test --all-features
+```
+
+Run W3C RDF/SPARQL integration tests:
+
+```sh
+cargo test --all-features --test w3c-sparql
+```

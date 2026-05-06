@@ -1,4 +1,4 @@
-use oxrdf::{vocab::rdf, BlankNode, NamedNodeRef, TripleRef};
+use oxrdf::{BlankNode, NamedNodeRef, TripleRef, vocab::rdf};
 use oxrdfio::{RdfFormat, RdfSerializer};
 use sparesults::QueryResultsFormat;
 
@@ -49,7 +49,7 @@ pub fn generate_service_description(
     format: RdfFormat,
     kind: EndpointKind,
     union_default_graph: bool,
-) -> Vec<u8> {
+) -> anyhow::Result<Vec<u8>> {
     let mut graph = Vec::new();
     let root = BlankNode::default();
     graph.push(TripleRef::new(&root, rdf::TYPE, sd::SERVICE));
@@ -111,10 +111,14 @@ pub fn generate_service_description(
     ));
     let mut serializer = RdfSerializer::from_format(format)
         .with_prefix("sd", "http://www.w3.org/ns/sparql-service-description#")
-        .unwrap()
+        .map_err(|e| anyhow::anyhow!("failed to configure serializer prefix: {e}"))?
         .for_writer(Vec::new());
     for t in graph {
-        serializer.serialize_triple(t).unwrap();
+        serializer
+            .serialize_triple(t)
+            .map_err(|e| anyhow::anyhow!("failed to serialize service description triple: {e}"))?;
     }
-    serializer.finish().unwrap()
+    serializer
+        .finish()
+        .map_err(|e| anyhow::anyhow!("failed to finalize service description: {e}"))
 }

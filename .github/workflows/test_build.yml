@@ -66,6 +66,29 @@ jobs:
     - name: Run server integration tests
       run: cargo test --test test-server --features server
 
+  w3c-conformance:
+    name: W3C SPARQL/RDF conformance
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: recursive
+    - uses: actions-rust-lang/setup-rust-toolchain@v1
+      with:
+        toolchain: ${{ github.event.schedule == '' && 'stable' || 'nightly' }}
+        cache: false
+    - uses: Swatinem/rust-cache@v2
+      with:
+        shared-key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+    # Exercises `de`'s `do_query_with_dataset` against the upstream W3C suite
+    # via the shared `w3c-validation` workspace crate. Pinned as its own job
+    # (rather than buried in `make test`) so failures here surface a named
+    # red/green signal in the CI run summary.
+    - name: Run W3C conformance suite
+      run: cargo test --test w3c-sparql --all-features
+
   docker-test:
     name: docker image test
     runs-on: ubuntu-latest
@@ -81,9 +104,5 @@ jobs:
     - uses: Swatinem/rust-cache@v2
       with:
         shared-key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-    - name: Install MUSL tools
-      run: |
-        sudo apt-get update
-        sudo apt-get install musl-tools -y
     - name: Run Docker test
       run: make docker.test
