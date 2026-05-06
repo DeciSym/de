@@ -157,6 +157,57 @@ fn read_nt_hdt_safe(path: &Path) -> anyhow::Result<hdt::Hdt> {
         .map_err(|e| anyhow::anyhow!("Error converting combined RDF to HDT: {e}"))
 }
 
+/// Convert an N-Triples file at `nt` into an HDT file at `dest`.
+///
+/// The upstream `hdt` crate's `read_nt` can panic on certain malformed
+/// inputs (the W3C suite has cases shaped like
+/// `bits_per_entry == 0`); this helper wraps the call in `catch_unwind`
+/// and reports the panic payload as an `anyhow::Error` instead of
+/// unwinding into the caller. Stale `<dest>.index.*` cache sidecars are
+/// removed before write (handled inside [`write_hdt_to_path`]).
+///
+/// When `prewarm` is true, the resulting HDT is immediately opened
+/// through [`hdt::HdtAny::open_with_threshold`] — the same dispatch the
+/// query path uses — so the wavelet-tree cache (`<dest>.index.v1-1`)
+/// gets built at conversion time rather than at the first query. Leave
+/// it `false` when the next consumer is `AggregateHdt::new`/`get_snapshot`,
+/// which already opens via the same dispatch and would just rebuild the
+/// cache redundantly.
+pub fn nt_file_to_hdt(nt: &Path, dest: &Path, prewarm: bool) -> anyhow::Result<()> {
+    let hdt_conversion =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| hdt::Hdt::read_nt(nt)));
+    let hdt = match hdt_conversion {
+        Ok(Ok(h)) => h,
+        Ok(Err(e)) => {
+            return Err(anyhow::anyhow!(
+                "error converting NT file {:?} to HDT: {e}",
+                nt
+            ));
+        }
+        Err(panic_payload) => {
+            let panic_msg = if let Some(s) = panic_payload.downcast_ref::<&str>() {
+                *s
+            } else if let Some(s) = panic_payload.downcast_ref::<String>() {
+                s.as_str()
+            } else {
+                "unknown panic while reading RDF"
+            };
+            return Err(anyhow::anyhow!(
+                "panic converting NT file {:?} to HDT: {panic_msg}",
+                nt
+            ));
+        }
+    };
+
+    write_hdt_to_path(&hdt, dest)?;
+
+    if prewarm {
+        hdt::HdtAny::open_with_threshold(dest, None)
+            .map_err(|e| anyhow::anyhow!("failed to pre-warm HDT cache for {dest:?}: {e}"))?;
+    }
+    Ok(())
+}
+
 fn ensure_nt_line_boundary(out_file: &NamedTempFile) -> anyhow::Result<()> {
     let out_len = out_file
         .as_file()

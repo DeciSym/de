@@ -743,57 +743,10 @@ async fn handle_files(
 
         debug!("Running RDF2HDT");
 
-        let converted_rdf_path = match source_for_hdt.to_str() {
-            Some(path) => path,
-            None => {
-                return Err(anyhow::anyhow!(
-                    "Temporary RDF path is not valid UTF-8: {:?}",
-                    source_for_hdt
-                ));
-            }
-        };
-        let hdt_conversion = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            hdt::Hdt::read_nt(Path::new(converted_rdf_path))
-        }));
-
-        match hdt_conversion {
-            Ok(Ok(hdt_conv)) => {
-                let mut buf = BufWriter::new(&named_tempfile);
-                match hdt_conv.write(&mut buf) {
-                    Ok(_) => {}
-                    Err(e) => {
-                        return Err(anyhow::anyhow!("failed to write converted HDT file: {e}"));
-                    }
-                }
-                buf.flush().map_err(|e| {
-                    anyhow::anyhow!(
-                        "failed to flush converted HDT tempfile {:?}: {e}",
-                        named_tempfile.path()
-                    )
-                })?;
-                drop(buf);
-            }
-            Ok(Err(e)) => {
-                return Err(anyhow::anyhow!(
-                    "error converting plain RDF file {:?} to HDT: {e}",
-                    rdf_tempfile.path()
-                ));
-            }
-            Err(panic_err) => {
-                let panic_msg = if let Some(msg) = panic_err.downcast_ref::<&str>() {
-                    *msg
-                } else if let Some(msg) = panic_err.downcast_ref::<String>() {
-                    msg.as_str()
-                } else {
-                    "unknown panic while reading RDF"
-                };
-                return Err(anyhow::anyhow!(
-                    "panic converting plain RDF file {:?} to HDT: {}",
-                    rdf_tempfile.path(),
-                    panic_msg
-                ));
-            }
-        }
+        // Shared, panic-guarded NT→HDT conversion. AggregateHdt::new opens
+        // through `HdtAny::open_with_threshold` later in the query path, so
+        // skip prewarm here — opening the cache twice would be wasted work.
+        create::nt_file_to_hdt(&source_for_hdt, named_tempfile.path(), false)?;
         let (_, persisted_hdt_path) = named_tempfile
             .keep()
             .map_err(|e| anyhow::anyhow!("failed to persist converted HDT tempfile: {e}"))?;
@@ -1133,10 +1086,10 @@ mod tests {
         )
         .await
         .expect_err("handle_files should fail when RDF -> HDT conversion fails");
+        let msg = err.to_string();
         assert!(
-            err.to_string().contains("converting plain RDF file")
-                || err.to_string().contains("Error converting file(s) to NT"),
-            "Expected file conversion or HDT conversion failure"
+            msg.contains("converting NT file") || msg.contains("Error converting file(s) to NT"),
+            "expected NT-conversion or NT→HDT failure, got: {msg}"
         );
     }
 
