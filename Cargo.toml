@@ -32,7 +32,7 @@ clap-verbosity-flag = { version = "3.0", default-features = false, features = ["
 env_logger = { version = "0.11", default-features = false }
 exitcode = "1.1"
 flate2 = "1"
-hdt = { version = "0.5.0", default-features = false, features = ["nt", "sparql", "cache"] }
+hdt = { version = "0.5.0", default-features = false, features = ["nt", "cache"] }
 http = { version = "1.4", optional = true }
 log = "0.4"
 oxhttp = { version = "0.3", optional=true }
@@ -80,5 +80,5 @@ spareval = { git = "https://github.com/DeciSym/oxigraph.git", rev = "41f06ccc286
 sparopt = { git = "https://github.com/DeciSym/oxigraph.git", rev = "41f06ccc28650ebed22cc8354964972f3a817006" }
 spargebra = { git = "https://github.com/DeciSym/oxigraph.git", rev = "41f06ccc28650ebed22cc8354964972f3a817006" }
 lasso = { git = "https://github.com/DeciSym/lasso.git", rev = "8fbbb1a229b7f1d49920233cdf01177a5bef180c" }
-hdt = { git = "https://github.com/DeciSym/hdt.git", rev = "77fed96f900ef975c9cf1ea55d88bed9c2f6365d" }
+hdt = { git = "https://github.com/DeciSym/hdt.git", rev = "2ea5ddce5e8e153a352201d89e163dd9e77bf8ae" }
 
