@@ -3,8 +3,8 @@
 //
 //! Query-result parsing and equivalence logic for W3C harness cases.
 
+use super::ParsedQueryResults;
 use super::manifest::{objects_of, single_object};
-use super::*;
 use oxrdf::Term;
 use oxrdfio::{RdfFormat, RdfParser};
 use sparesults::{QueryResultsFormat, QueryResultsParser, ReaderQueryResultsParserOutput};
@@ -55,10 +55,8 @@ fn graph_pattern_uses_reduced(pattern: &spargebra::algebra::GraphPattern) -> boo
         GraphPattern::Reduced { .. } => true,
         GraphPattern::Join { left, right }
         | GraphPattern::Union { left, right }
-        | GraphPattern::Minus { left, right } => {
-            graph_pattern_uses_reduced(left) || graph_pattern_uses_reduced(right)
-        }
-        GraphPattern::LeftJoin { left, right, .. } => {
+        | GraphPattern::Minus { left, right }
+        | GraphPattern::LeftJoin { left, right, .. } => {
             graph_pattern_uses_reduced(left) || graph_pattern_uses_reduced(right)
         }
         GraphPattern::Filter { inner, .. }
@@ -82,10 +80,8 @@ fn graph_pattern_uses_order_by(pattern: &spargebra::algebra::GraphPattern) -> bo
         GraphPattern::OrderBy { .. } => true,
         GraphPattern::Join { left, right }
         | GraphPattern::Union { left, right }
-        | GraphPattern::Minus { left, right } => {
-            graph_pattern_uses_order_by(left) || graph_pattern_uses_order_by(right)
-        }
-        GraphPattern::LeftJoin { left, right, .. } => {
+        | GraphPattern::Minus { left, right }
+        | GraphPattern::LeftJoin { left, right, .. } => {
             graph_pattern_uses_order_by(left) || graph_pattern_uses_order_by(right)
         }
         GraphPattern::Filter { inner, .. }
@@ -589,6 +585,7 @@ fn solutions_bnode_isomorphic(
     let mut e2a = HashMap::<String, String>::new();
     let mut a2e = HashMap::<String, String>::new();
 
+    #[allow(clippy::items_after_statements)]
     fn backtrack(
         idx: usize,
         expected_rows: &[Vec<CellValue>],
@@ -699,7 +696,7 @@ pub(super) fn parse_query_results_rdf(
         graph.insert(quad.as_ref());
     }
 
-    for t in graph.iter() {
+    for t in &graph {
         if t.predicate.as_str() == RS_BOOLEAN
             && let Term::Literal(lit) = Term::from(t.object)
         {
@@ -708,7 +705,7 @@ pub(super) fn parse_query_results_rdf(
     }
 
     let mut variables = Vec::<String>::new();
-    for t in graph.iter() {
+    for t in &graph {
         if t.predicate.as_str() == RS_RESULT_VARIABLE
             && let Term::Literal(lit) = Term::from(t.object)
         {
@@ -716,12 +713,12 @@ pub(super) fn parse_query_results_rdf(
         }
     }
     if variables.is_empty() {
-        variables.push("".to_string());
+        variables.push(String::new());
         variables.clear();
     }
 
     let mut rows = Vec::<(Option<u64>, Vec<String>)>::new();
-    for t in graph.iter() {
+    for t in &graph {
         if t.predicate.as_str() != RS_SOLUTION {
             continue;
         }

@@ -1,6 +1,13 @@
 // Copyright (c) 2025, Decisym, LLC
 // Licensed under the BSD 3-Clause License (see LICENSE file in the project root).
 
+#![allow(
+    clippy::uninlined_format_args,
+    clippy::single_char_pattern,
+    clippy::needless_raw_string_hashes,
+    clippy::wildcard_imports
+)]
+
 mod integration {
     use de::*;
     use std::{fs::OpenOptions, io::BufWriter, path::Path, process::Output};

@@ -1,6 +1,8 @@
 // Copyright (c) 2025, Decisym, LLC
 // Licensed under the BSD 3-Clause License (see LICENSE file in the project root).
 
+#![allow(clippy::missing_errors_doc, clippy::missing_panics_doc)]
+
 use std::path::Path;
 
 pub mod create;

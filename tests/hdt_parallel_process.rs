@@ -16,11 +16,11 @@ use std::{
 fn remove_hdt_cache_files(hdt_path: &Path) -> anyhow::Result<()> {
     let parent = hdt_path
         .parent()
-        .ok_or_else(|| anyhow::anyhow!("HDT path has no parent: {:?}", hdt_path))?;
+        .ok_or_else(|| anyhow::anyhow!("HDT path has no parent: {}", hdt_path.display()))?;
     let file_name = hdt_path
         .file_name()
         .and_then(|n| n.to_str())
-        .ok_or_else(|| anyhow::anyhow!("invalid HDT file name: {:?}", hdt_path))?;
+        .ok_or_else(|| anyhow::anyhow!("invalid HDT file name: {}", hdt_path.display()))?;
 
     for entry in fs::read_dir(parent)? {
         let entry = entry?;
@@ -81,9 +81,9 @@ async fn test_parallel_processes_query_same_hdt_without_cache_races() -> anyhow:
             let output = child.wait_with_output()?;
             assert!(
                 output.status.success(),
-                "parallel de process failed.\nstatus: {:?}\nstderr:\n{}",
-                output.status,
-                String::from_utf8_lossy(&output.stderr)
+                "parallel de process failed.\nstatus: {status:?}\nstderr:\n{stderr}",
+                status = output.status,
+                stderr = String::from_utf8_lossy(&output.stderr)
             );
             let stdout = String::from_utf8_lossy(&output.stdout);
             assert!(

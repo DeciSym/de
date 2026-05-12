@@ -1,6 +1,13 @@
 // Copyright (c) 2025, Decisym, LLC
 // Licensed under the BSD 3-Clause License (see LICENSE file in the project root).
 
+#![allow(
+    clippy::uninlined_format_args,
+    clippy::unnecessary_wraps,
+    clippy::needless_raw_string_hashes,
+    clippy::single_char_pattern
+)]
+
 #[cfg(feature = "server")]
 mod server_tests {
     use de::sparql::AggregateHdt;
@@ -150,7 +157,7 @@ mod server_tests {
             &mut request,
             &store,
             true,
-            tmp_dir.path().to_string_lossy().to_string(),
+            &tmp_dir.path().to_string_lossy(),
         ))?;
 
         assert_eq!(response.status(), StatusCode::OK);
@@ -184,7 +191,7 @@ mod server_tests {
             &mut request,
             &store,
             true,
-            tmp_dir.path().to_string_lossy().to_string(),
+            &tmp_dir.path().to_string_lossy(),
         ))?;
         let body_text = read_body(response)?;
         assert!(parse_boolean_json_result(&body_text)?);
@@ -204,7 +211,7 @@ mod server_tests {
             &mut request,
             &store,
             true,
-            tmp_dir.path().to_string_lossy().to_string(),
+            &tmp_dir.path().to_string_lossy(),
         ))?;
         let body_text = read_body(response)?;
         assert!(!parse_boolean_json_result(&body_text)?);
@@ -229,7 +236,7 @@ mod server_tests {
             &mut request,
             &store,
             true,
-            tmp_dir.path().to_string_lossy().to_string(),
+            &tmp_dir.path().to_string_lossy(),
         ))?;
 
         assert_eq!(response.status(), StatusCode::OK);
@@ -272,7 +279,7 @@ mod server_tests {
             &mut request,
             &store,
             true,
-            tmp_dir.path().to_string_lossy().to_string(),
+            &tmp_dir.path().to_string_lossy(),
         ))?;
 
         assert_eq!(response.status(), StatusCode::OK);
@@ -298,7 +305,7 @@ mod server_tests {
             &mut request,
             &store,
             true,
-            tmp_dir.path().to_string_lossy().to_string(),
+            &tmp_dir.path().to_string_lossy(),
         ))?;
 
         assert_eq!(response.status(), StatusCode::OK);
@@ -331,7 +338,7 @@ mod server_tests {
             &mut request,
             &store,
             true,
-            tmp_dir.path().to_string_lossy().to_string(),
+            &tmp_dir.path().to_string_lossy(),
         );
         assert!(result.is_err());
         let (status, msg) = result.unwrap_err();
@@ -366,7 +373,7 @@ mod server_tests {
             &mut request,
             &store,
             true,
-            tmp_dir.path().to_string_lossy().to_string(),
+            &tmp_dir.path().to_string_lossy(),
         );
         assert!(result.is_err());
         let (status, msg) = result.unwrap_err();
@@ -406,7 +413,7 @@ mod server_tests {
             &mut request,
             &store,
             true,
-            tmp_dir.path().to_string_lossy().to_string(),
+            &tmp_dir.path().to_string_lossy(),
         );
         assert!(result.is_err());
         let (status, msg) = result.unwrap_err();
@@ -430,12 +437,8 @@ mod server_tests {
         }
         let mut request = request_builder.body(body).unwrap();
 
-        let result = de::serve::handle_request(
-            &mut request,
-            store,
-            true,
-            tmp_dir.path().to_string_lossy().to_string(),
-        );
+        let result =
+            de::serve::handle_request(&mut request, store, true, &tmp_dir.path().to_string_lossy());
         assert!(result.is_err());
         let (status, message) = result.unwrap_err();
         assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
@@ -521,7 +524,7 @@ mod server_tests {
             &mut request,
             &store,
             true,
-            tmp_dir.path().to_string_lossy().to_string(),
+            &tmp_dir.path().to_string_lossy(),
         );
         assert!(result.is_err());
         let (status, _message) = result.unwrap_err();
@@ -549,7 +552,7 @@ mod server_tests {
             &mut request,
             &store,
             true,
-            tmp_dir.path().to_string_lossy().to_string(),
+            &tmp_dir.path().to_string_lossy(),
         );
         assert!(result.is_err());
         let (status, msg) = result.unwrap_err();

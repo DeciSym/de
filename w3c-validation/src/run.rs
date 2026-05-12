@@ -6,6 +6,8 @@
 //! This module runs per-case logic (syntax, query evaluation, entailment) and
 //! invokes the same dataset query path used by the CLI.
 
+#![allow(clippy::wildcard_imports)]
+
 use super::{compare, manifest, report, *};
 use futures::future::BoxFuture;
 use oxrdf::{Dataset, Term, graph::CanonicalizationAlgorithm};
@@ -64,6 +66,7 @@ where
 /// Executes one query evaluation case and compares actual output with the expected artifact.
 ///
 /// Comparison strategy is selected from [`W3cQueryCase::compare_kind`].
+#[allow(clippy::too_many_lines)]
 async fn run_query_evaluation_case<F>(test: &W3cQueryCase, runner: &F) -> CaseStatus
 where
     F: for<'a> Fn(W3cRunInputs<'a>) -> BoxFuture<'a, anyhow::Result<()>>,
@@ -302,9 +305,9 @@ fn run_entailment_case(
     reasoner.reason();
 
     if expected.is_none() {
-        let recognize_datatypes = !recognized_datatypes.is_empty();
+        let datatypes_recognized = !recognized_datatypes.is_empty();
         let inconsistent = reasoner.errors().iter().any(|error| {
-            if !recognize_datatypes && error.rule().starts_with("rdfs-datatype") {
+            if !datatypes_recognized && error.rule().starts_with("rdfs-datatype") {
                 return false;
             }
             true
@@ -365,6 +368,7 @@ fn dataset_to_triples(dataset: &Dataset) -> Vec<oxrdf::Triple> {
 ///
 /// This comparison allows blank-node isomorphism and semantic equality for
 /// selected literal classes used by entailment tests.
+#[allow(clippy::too_many_lines)]
 fn triples_are_entailed(expected: &[oxrdf::Triple], actual: &[oxrdf::Triple]) -> bool {
     fn semantically_equal_literals(a: &oxrdf::Literal, b: &oxrdf::Literal) -> bool {
         let xsd_string = "http://www.w3.org/2001/XMLSchema#string";

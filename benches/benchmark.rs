@@ -1,5 +1,5 @@
 use criterion::{Criterion, criterion_group, criterion_main};
-use de::*;
+use de::{create, query};
 #[cfg(target_os = "linux")]
 use pprof::criterion::{Output, PProfProfiler};
 use std::{
@@ -47,14 +47,14 @@ fn query(c: &mut Criterion) {
         .expect("failed to build tokio runtime");
     let mut create_group = c.benchmark_group("create_hdt_from_ttl_file");
     create_group.sample_size(10);
-    create_group.measurement_time(Duration::from_secs(120));
+    create_group.measurement_time(Duration::from_mins(2));
     create_group.bench_function("create_hdt", |b| {
         b.iter(|| {
             runtime.block_on(async {
                 create::do_create(&test_hdt_path, std::slice::from_ref(&source_rdf))
                     .await
                     .expect("failed to create HDT from benchmark fixture");
-            })
+            });
         });
     });
     create_group.finish();
@@ -82,7 +82,7 @@ fn query(c: &mut Criterion) {
                 )
                 .await
                 .expect("failed to query HDT benchmark fixture");
-            })
+            });
         });
     });
     hdt_group.finish();
@@ -104,7 +104,7 @@ fn query(c: &mut Criterion) {
                 )
                 .await
                 .expect("failed to query RDF benchmark fixture");
-            })
+            });
         });
     });
     rdf_group.finish();

@@ -1,6 +1,8 @@
 // Copyright (c) 2026, Decisym, LLC
 // Licensed under the BSD 3-Clause License (see LICENSE file in the project root).
-//
+
+#![allow(clippy::missing_errors_doc, clippy::missing_panics_doc)]
+
 //! Shared W3C RDF/SPARQL conformance harness for `de` and downstream crates.
 //!
 //! This crate vends manifest discovery, case execution, result comparison, and
@@ -137,6 +139,7 @@ const W3C_MANIFEST_PATHS: [&str; 3] = [
 /// `CARGO_MANIFEST_DIR` resolves to `<de>/w3c-validation` at build time of
 /// this crate, so the default join already lands on a canonical path with no
 /// `..` segments — no canonicalize-then-fallback needed.
+#[must_use]
 pub fn w3c_resources_root() -> PathBuf {
     if let Ok(custom) = std::env::var("DE_W3C_RESOURCES_DIR") {
         return PathBuf::from(custom);

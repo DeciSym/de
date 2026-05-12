@@ -44,8 +44,8 @@ fn format_path_for(file: &Path) -> PathBuf {
     }
 }
 
-/// Trait for different RDF libraries to implement for converting a list of files into NTriple RDF
-/// returns stats on converted data via ConvertResult.
+/// Trait for different RDF libraries to implement for converting a list of files into `NTriple` RDF
+/// returns stats on converted data via `ConvertResult`.
 ///
 /// `Send + Sync` bounds let `Arc<dyn Rdf2Nt>` live across await points inside
 /// the async `files_to_rdf` dispatcher.
@@ -71,7 +71,7 @@ pub struct ConvertResult {
     pub has_default_graph_triples: bool,
 }
 
-/// Rdf2Nt implementation using oxrdf and oxrdfio crates
+/// `Rdf2Nt` implementation using oxrdf and oxrdfio crates
 pub struct OxRdfConvert {}
 
 impl Rdf2Nt for OxRdfConvert {
@@ -85,7 +85,7 @@ impl Rdf2Nt for OxRdfConvert {
         for file in &file_paths {
             let path = Path::new(file);
             let source_reader = open_rdf_reader(path)
-                .map_err(|e| anyhow::anyhow!("Error opening file {:?}: {:?}", file, e))?;
+                .map_err(|e| anyhow::anyhow!("Error opening file {file:?}: {e:?}"))?;
 
             debug!("converting {} to nt format", &file);
 
@@ -97,14 +97,11 @@ impl Rdf2Nt for OxRdfConvert {
             let rdf_format = if fmt_ext.is_some_and(|e| e.eq_ignore_ascii_case("owl")) {
                 // OWL files should be in XML format: https://www.w3.org/TR/owl-xmlsyntax/
                 RdfFormat::RdfXml
+            } else if let Some(format) = fmt_ext.and_then(RdfFormat::from_extension) {
+                format
             } else {
-                match fmt_ext.and_then(RdfFormat::from_extension) {
-                    Some(format) => format,
-                    None => {
-                        res.unhandled.push(file.to_string());
-                        continue;
-                    }
-                }
+                res.unhandled.push(file.clone());
+                continue;
             };
             let base_iri = Path::new(file)
                 .canonicalize()
@@ -131,15 +128,14 @@ impl Rdf2Nt for OxRdfConvert {
                     Err(RdfParseError::Syntax(syn_err)) => {
                         if rdf_format == RdfFormat::RdfXml {
                             // XML file extensions are not guaranteed to be RdfXML
-                            res.unhandled.push(file.to_string());
+                            res.unhandled.push(file.clone());
                             break;
-                        } else {
-                            // based on file extension, should have been able to parse
-                            error!("syntax error for RDF file {file}: {syn_err}");
-                            return Err(anyhow::anyhow!(
-                                "syntax error for RDF file {file}: {syn_err}"
-                            ));
                         }
+                        // based on file extension, should have been able to parse
+                        error!("syntax error for RDF file {file}: {syn_err}");
+                        return Err(anyhow::anyhow!(
+                            "syntax error for RDF file {file}: {syn_err}"
+                        ));
                     }
                 };
                 if q.graph_name == DefaultGraph {
@@ -155,7 +151,7 @@ impl Rdf2Nt for OxRdfConvert {
                     q.subject.as_ref(),
                     q.predicate.as_ref(),
                     q.object.as_ref(),
-                ))?
+                ))?;
             }
 
             serializer.finish()?;

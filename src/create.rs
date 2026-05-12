@@ -7,7 +7,7 @@ use crate::rdf2nt::ConvertResult;
 use crate::rdf2nt::OxRdfConvert;
 use crate::rdf2nt::Rdf2Nt;
 use anyhow::Context;
-use log::*;
+use log::{debug, error};
 use oxrdf::NamedNode;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write, copy};
@@ -60,7 +60,7 @@ pub async fn do_create_with_options(
         .suffix(".nt")
         .append(true)
         .tempfile()
-        .map_err(|e| anyhow::anyhow!("Error creating temporary file: {:?}", e))?;
+        .map_err(|e| anyhow::anyhow!("Error creating temporary file: {e:?}"))?;
 
     let rdf_result = files_to_rdf(
         data,
@@ -180,8 +180,8 @@ pub fn nt_file_to_hdt(nt: &Path, dest: &Path, prewarm: bool) -> anyhow::Result<(
         Ok(Ok(h)) => h,
         Ok(Err(e)) => {
             return Err(anyhow::anyhow!(
-                "error converting NT file {:?} to HDT: {e}",
-                nt
+                "error converting NT file {} to HDT: {e}",
+                nt.display()
             ));
         }
         Err(panic_payload) => {
@@ -193,8 +193,8 @@ pub fn nt_file_to_hdt(nt: &Path, dest: &Path, prewarm: bool) -> anyhow::Result<(
                 "unknown panic while reading RDF"
             };
             return Err(anyhow::anyhow!(
-                "panic converting NT file {:?} to HDT: {panic_msg}",
-                nt
+                "panic converting NT file {} to HDT: {panic_msg}",
+                nt.display()
             ));
         }
     };
@@ -202,8 +202,9 @@ pub fn nt_file_to_hdt(nt: &Path, dest: &Path, prewarm: bool) -> anyhow::Result<(
     write_hdt_to_path(&hdt, dest)?;
 
     if prewarm {
-        hdt::HdtAny::open_with_threshold(dest, None)
-            .map_err(|e| anyhow::anyhow!("failed to pre-warm HDT cache for {dest:?}: {e}"))?;
+        hdt::HdtAny::open_with_threshold(dest, None).map_err(|e| {
+            anyhow::anyhow!("failed to pre-warm HDT cache for {}: {e}", dest.display())
+        })?;
     }
     Ok(())
 }
@@ -237,8 +238,8 @@ fn ensure_nt_line_boundary(out_file: &NamedTempFile) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Converts a list of RDF files to NTriple RDF
-/// returns the name of the file containing combined NTriple RDF, the names of any unhandled files,
+/// Converts a list of RDF files to `NTriple` RDF
+/// returns the name of the file containing combined `NTriple` RDF, the names of any unhandled files,
 /// and any files that should be preserved as blobs.
 ///
 /// `file_id_fn` is invoked exactly once per file that matches an enricher, so
@@ -247,6 +248,7 @@ fn ensure_nt_line_boundary(out_file: &NamedTempFile) -> anyhow::Result<()> {
 /// is non-empty; `files_to_rdf` returns `Err` upfront on the inconsistent
 /// combination rather than letting an enricher dispatch run into a missing
 /// id-generator at the bottom of the loop.
+#[allow(clippy::too_many_lines)]
 pub async fn files_to_rdf(
     data: &[String],
     out_file: &mut NamedTempFile,
@@ -292,7 +294,7 @@ pub async fn files_to_rdf(
     let mut unrecognized_files = vec![];
     let mut enriched_sources: Vec<String> = vec![];
 
-    for file in data.iter() {
+    for file in data {
         let path = Path::new(&file);
         if !path.exists() {
             unrecognized_files.push(file.clone());
@@ -340,7 +342,10 @@ pub async fn files_to_rdf(
             }
         }
         // Check for triples, this is the preferred RDF format and no additional conversion is required
-        else if file.ends_with(".nt") {
+        else if Path::new(file)
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("nt"))
+        {
             debug!("Adding RDF triples to graph");
             nt_files.push(file.clone());
         } else {
@@ -348,14 +353,14 @@ pub async fn files_to_rdf(
         }
     }
 
-    let conv_res = if !files_to_convert.is_empty() {
+    let conv_res = if files_to_convert.is_empty() {
+        ConvertResult::default()
+    } else {
         let r = converter
             .convert_to_nt(files_to_convert, out_file.as_file())
             .map_err(|e| anyhow::anyhow!("Error converting file(s) to NT: {e}"))?;
         unrecognized_files.extend(r.unhandled.iter().cloned());
         r
-    } else {
-        ConvertResult::default()
     };
 
     let have_enriched_output = !enriched_sources.is_empty();
@@ -380,9 +385,8 @@ pub async fn files_to_rdf(
             regions.push("<default graph>".to_string());
         }
         return Err(anyhow::anyhow!(
-            "multiple graphs detected during create ({:?}). HDT output is single-graph. \
-Use --allow-merge-named-graphs to explicitly merge these graphs into the output graph.",
-            regions
+            "multiple graphs detected during create ({regions:?}). HDT output is single-graph. \
+Use --allow-merge-named-graphs to explicitly merge these graphs into the output graph."
         ));
     }
 
@@ -391,7 +395,7 @@ Use --allow-merge-named-graphs to explicitly merge these graphs into the output 
         for nt_file in nt_files {
             ensure_nt_line_boundary(out_file)?;
             let source = File::open(&nt_file)
-                .map_err(|e| anyhow::anyhow!("Error opening file {:?}: {:?}", nt_file, e))?;
+                .map_err(|e| anyhow::anyhow!("Error opening file {nt_file:?}: {e:?}"))?;
             let mut source_reader = BufReader::new(source);
 
             copy(&mut source_reader, out_file)
@@ -1056,7 +1060,7 @@ mod tests {
             "error should name the conflicting extension: {msg}"
         );
         assert!(
-            msg.contains("0") && msg.contains("1"),
+            msg.contains('0') && msg.contains('1'),
             "error should point at both enricher positions: {msg}"
         );
     }

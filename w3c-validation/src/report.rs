@@ -3,7 +3,7 @@
 //
 //! Report formatting and path helpers for the W3C harness run.
 
-use super::*;
+use super::{CaseStatus, PathBuf, w3c_resources_root};
 use std::{collections::BTreeMap, fmt::Write as _, path::Path};
 
 pub(super) fn write_report(
@@ -42,17 +42,16 @@ pub(super) fn write_report(
     writeln!(&mut out, "W3C rdf-tests status report").ok();
     writeln!(&mut out, "suite_root: w3c-validation/rdf-tests").ok();
     writeln!(&mut out, "total: {}", rows.len()).ok();
-    writeln!(&mut out, "pass: {}", total_pass).ok();
-    writeln!(&mut out, "fail: {}", total_fail).ok();
-    writeln!(&mut out, "skip: {}", total_skip).ok();
-    writeln!(&mut out, "unsupported: {}", total_unsupported).ok();
+    writeln!(&mut out, "pass: {total_pass}").ok();
+    writeln!(&mut out, "fail: {total_fail}").ok();
+    writeln!(&mut out, "skip: {total_skip}").ok();
+    writeln!(&mut out, "unsupported: {total_unsupported}").ok();
     writeln!(&mut out).ok();
     writeln!(&mut out, "by_type:").ok();
     for (test_type, (pass, fail, skip, unsupported)) in &by_type {
         writeln!(
             &mut out,
-            "  {} => pass: {}, fail: {}, skip: {}, unsupported: {}",
-            test_type, pass, fail, skip, unsupported
+            "  {test_type} => pass: {pass}, fail: {fail}, skip: {skip}, unsupported: {unsupported}"
         )
         .ok();
     }
@@ -61,21 +60,15 @@ pub(super) fn write_report(
     for (id, test_type, manifest, status) in rows {
         match status {
             CaseStatus::Pass => {
-                writeln!(&mut out, "PASS\t{}\t{}\t{}", test_type, id, manifest).ok();
+                writeln!(&mut out, "PASS\t{test_type}\t{id}\t{manifest}").ok();
             }
             CaseStatus::Fail(reason) => {
-                writeln!(
-                    &mut out,
-                    "FAIL\t{}\t{}\t{}\t{}",
-                    test_type, id, manifest, reason
-                )
-                .ok();
+                writeln!(&mut out, "FAIL\t{test_type}\t{id}\t{manifest}\t{reason}").ok();
             }
             CaseStatus::Unsupported(reason) => {
                 writeln!(
                     &mut out,
-                    "UNSUPPORTED\t{}\t{}\t{}\t{}",
-                    test_type, id, manifest, reason
+                    "UNSUPPORTED\t{test_type}\t{id}\t{manifest}\t{reason}"
                 )
                 .ok();
             }

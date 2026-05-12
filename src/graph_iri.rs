@@ -36,8 +36,9 @@ impl GraphIri {
     /// conversion to a file URI.
     fn from_file_path(path: &Path) -> anyhow::Result<Self> {
         let absolute = absolute_path(path)?;
-        let uri = Url::from_file_path(&absolute)
-            .map_err(|_| anyhow::anyhow!("Failed to convert path {:?} to file URI", absolute))?;
+        let uri = Url::from_file_path(&absolute).map_err(|()| {
+            anyhow::anyhow!("Failed to convert path {} to file URI", absolute.display())
+        })?;
         Self::parse(uri.as_str(), "invalid file graph IRI")
     }
 
@@ -102,7 +103,7 @@ fn canonicalize_existing_path(path: &Path, kind: &str) -> anyhow::Result<PathBuf
         return Err(anyhow::anyhow!("{kind} does not exist: {}", path.display()));
     }
     path.canonicalize()
-        .map_err(|e| anyhow::anyhow!("Failed to canonicalize file path {:?}: {e}", path))
+        .map_err(|e| anyhow::anyhow!("Failed to canonicalize file path {}: {e}", path.display()))
 }
 
 /// Returns the deterministic file graph IRI for a path.
@@ -156,10 +157,9 @@ pub(crate) fn insert_graph_mapping(
     if let Some(existing) = file_paths.get(&graph_name) {
         if existing != &canonical_path {
             return Err(anyhow::anyhow!(
-                "{duplicate_label} {} maps to multiple files: {:?} and {:?}",
-                graph_name,
-                existing,
-                canonical_path
+                "{duplicate_label} {graph_name} maps to multiple files: {} and {}",
+                existing.display(),
+                canonical_path.display()
             ));
         }
         return Ok(());

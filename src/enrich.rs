@@ -56,7 +56,8 @@ impl EnrichError {
 
     /// Wrap a boxed error without `Send + Sync` bounds into the `Other` variant.
     /// Used when calling helpers that return `Box<dyn std::error::Error>`.
-    pub fn from_boxed(e: Box<dyn std::error::Error>) -> Self {
+    #[must_use]
+    pub fn from_boxed(e: &dyn std::error::Error) -> Self {
         EnrichError::Other(e.to_string().into())
     }
 }

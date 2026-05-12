@@ -4,7 +4,7 @@
 use crate::create;
 use crate::rdf2nt::OxRdfConvert;
 use crate::sparql;
-use log::*;
+use log::{debug, error, warn};
 use oxrdf::{NamedNode, NamedOrBlankNode, Term, Triple};
 use oxrdfio::RdfFormat;
 use oxrdfio::RdfParser;
@@ -114,7 +114,7 @@ impl QueryDirCleanup {
 impl Drop for QueryDirCleanup {
     fn drop(&mut self) {
         if let Some(dirs) = self.dirs.take() {
-            for dir in dirs.iter() {
+            for dir in &dirs {
                 if let Err(e) = std::fs::remove_dir_all(dir) {
                     error!("Failed to remove directory {dir:?}: {e:?}");
                 }
@@ -183,8 +183,7 @@ pub async fn do_query_with_dataset_with_options<W: Write>(
         if !path.exists() {
             error!("query file {rq:?} could not be found on local machine");
             return Err(anyhow::anyhow!(
-                "query file {:?} could not be found on local machine",
-                rq
+                "query file {rq:?} could not be found on local machine"
             ));
         }
     }
@@ -272,7 +271,7 @@ pub async fn do_query_with_dataset_with_options<W: Write>(
             idx
         };
         let prepared = &prepared_datasets[dataset_idx];
-        run_query_against_dataset(parsed_query, &prepared.snapshot, out, writer, options)?;
+        run_query_against_dataset(&parsed_query, &prepared.snapshot, out, writer, options)?;
     }
     writer.flush()?;
 
@@ -282,7 +281,7 @@ pub async fn do_query_with_dataset_with_options<W: Write>(
 /// Evaluate a parsed SPARQL query against any [`QueryableDataset`] and serialize the
 /// results to `writer` using the requested output format.
 pub fn run_query_against_dataset<'a, W, D>(
-    parsed: Query,
+    parsed: &Query,
     dataset: D,
     out: &DeOutput,
     writer: &mut BufWriter<W>,
@@ -376,11 +375,11 @@ fn write_query_results<W: Write>(
             let mut serializer = RdfSerializer::from_format(result_format).for_writer(&mut *writer);
             for triple in query_triple_iter {
                 let triple = triple?;
-                serializer.serialize_triple(&triple)?
+                serializer.serialize_triple(&triple)?;
             }
             serializer.finish()?;
         }
-    };
+    }
     Ok(())
 }
 
@@ -425,12 +424,12 @@ pub fn parse_query_and_extract_dataset_files(
     // and decide on their own fallback rather than going through this helper.
     let base_iri = query_base_iri(query_path).ok_or_else(|| {
         anyhow::anyhow!(
-            "could not derive base IRI for query at {:?}: canonicalize failed",
-            query_path
+            "could not derive base IRI for query at {}: canonicalize failed",
+            query_path.display()
         )
     })?;
     let query = sparql::parse_query(query_text, &base_iri)
-        .map_err(|e| anyhow::anyhow!("Invalid SPARQL query {:?}: {e}", query_path))?;
+        .map_err(|e| anyhow::anyhow!("Invalid SPARQL query {}: {e}", query_path.display()))?;
 
     let mut files = QueryDatasetFiles::default();
     let mut seen_default = HashSet::new();
@@ -532,6 +531,7 @@ fn file_uri_to_local_path(uri: &str) -> Option<PathBuf> {
 /// `http://example.com/` base when this returns `None`.
 ///
 /// Exposed for downstream crates
+#[must_use]
 pub fn query_base_iri(query_path: &Path) -> Option<String> {
     let canonical = query_path.canonicalize().ok()?;
     let parent = canonical.parent()?;
@@ -631,9 +631,7 @@ async fn prepare_source_hdt_path(
         1 => hdt_paths[0].clone(),
         _ => {
             return Err(anyhow::anyhow!(
-                "multiple prepared HDT paths for source {:?}: {:?}",
-                source_file,
-                hdt_paths
+                "multiple prepared HDT paths for source {source_file:?}: {hdt_paths:?}"
             ));
         }
     };
@@ -642,6 +640,7 @@ async fn prepare_source_hdt_path(
     Ok(resolved_hdt_path)
 }
 
+#[allow(clippy::too_many_lines)]
 async fn handle_files(
     files: Vec<String>,
     entailment_mode: EntailmentMode,
@@ -656,14 +655,19 @@ async fn handle_files(
         .suffix(".nt")
         .append(true)
         .tempfile_in(t_path)
-        .map_err(|e| anyhow::anyhow!("Failed to create temporary RDF file in {:?}: {e}", t_path))?;
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to create temporary RDF file in {}: {e}",
+                t_path.display()
+            )
+        })?;
 
     let mut files_to_convert = vec![];
     for f in &files {
         if is_hdt_file_path(f) {
-            hdt_path_vec.push(f.to_string())
+            hdt_path_vec.push(f.clone());
         } else {
-            files_to_convert.push(f.to_string());
+            files_to_convert.push(f.clone());
         }
     }
 
@@ -686,12 +690,12 @@ async fn handle_files(
         Err(e) => return Err(anyhow::anyhow!("error processing files to RDF {e}")),
     };
 
-    for file in result.unknown_files.iter() {
+    for file in &result.unknown_files {
         if !Path::new(file).exists() {
             return Err(anyhow::anyhow!("unable to locate local file {file}"));
         }
         if is_hdt_file_path(file) {
-            hdt_path_vec.push(file.to_string())
+            hdt_path_vec.push(file.clone());
         }
         // should be able to query plain rdf files directly
         else {
@@ -701,8 +705,8 @@ async fn handle_files(
 
     let meta = std::fs::metadata(rdf_tempfile.path()).map_err(|e| {
         anyhow::anyhow!(
-            "Error getting metadata for temporary RDF file {:?}: {e}",
-            rdf_tempfile.path()
+            "Error getting metadata for temporary RDF file {}: {e}",
+            rdf_tempfile.path().display()
         )
     })?;
 
@@ -738,7 +742,10 @@ async fn handle_files(
             .append(true)
             .tempfile_in(t_path)
             .map_err(|e| {
-                anyhow::anyhow!("Failed to create temporary HDT file in {:?}: {e}", t_path)
+                anyhow::anyhow!(
+                    "Failed to create temporary HDT file in {}: {e}",
+                    t_path.display()
+                )
             })?;
 
         debug!("Running RDF2HDT");
@@ -756,7 +763,7 @@ async fn handle_files(
     }
 
     if hdt_path_vec.is_empty() {
-        error!("no files to query")
+        error!("no files to query");
     }
     Ok(PreparedQueryInputs {
         cleanup_dirs: dir_path_vec,
@@ -768,8 +775,8 @@ fn query_work_dir_tempdir() -> anyhow::Result<tempfile::TempDir> {
     fn ensure_utf8_tempdir(dir: tempfile::TempDir) -> anyhow::Result<tempfile::TempDir> {
         if dir.path().to_str().is_none() {
             return Err(anyhow::anyhow!(
-                "Error creating temporary working dir: UTF-8 path required, got {:?}",
-                dir.path()
+                "Error creating temporary working dir: UTF-8 path required, got {}",
+                dir.path().display()
             ));
         }
         Ok(dir)
@@ -783,13 +790,13 @@ fn query_work_dir_tempdir() -> anyhow::Result<tempfile::TempDir> {
             .clone();
         if let Some(root) = maybe_root {
             let dir = tempfile::tempdir_in(root)
-                .map_err(|e| anyhow::anyhow!("Error creating temporary working dir: {:?}", e))?;
+                .map_err(|e| anyhow::anyhow!("Error creating temporary working dir: {e:?}"))?;
             return ensure_utf8_tempdir(dir);
         }
     }
 
     let dir =
-        tempdir().map_err(|e| anyhow::anyhow!("Error creating temporary working dir: {:?}", e))?;
+        tempdir().map_err(|e| anyhow::anyhow!("Error creating temporary working dir: {e:?}"))?;
     ensure_utf8_tempdir(dir)
 }
 
@@ -949,13 +956,10 @@ fn hdt_raw_triple_to_oxrdf(s: &str, p: &str, o: &str) -> anyhow::Result<Triple> 
             ));
         }
     };
-    let predicate = match predicate_term {
-        Term::NamedNode(node) => node,
-        _ => {
-            return Err(anyhow::anyhow!(
-                "invalid non-IRI predicate in HDT triple: {p:?}"
-            ));
-        }
+    let Term::NamedNode(predicate) = predicate_term else {
+        return Err(anyhow::anyhow!(
+            "invalid non-IRI predicate in HDT triple: {p:?}"
+        ));
     };
 
     Ok(Triple::new(subject, predicate, object_term))
@@ -1017,7 +1021,7 @@ mod tests {
 
     fn dir_entries(path: &Path) -> anyhow::Result<HashSet<String>> {
         Ok(fs::read_dir(path)?
-            .filter_map(|entry| entry.ok())
+            .filter_map(Result::ok)
             .filter(|entry| entry.file_type().is_ok_and(|f| f.is_dir()))
             .map(|entry| entry.file_name().to_string_lossy().into_owned())
             .collect())
@@ -1078,7 +1082,7 @@ mod tests {
         match fs::write(&invalid_nt, "invalid triple line") {
             Ok(()) => {}
             Err(e) => panic!("failed to write invalid dataset: {e}"),
-        };
+        }
 
         let err = handle_files(
             vec![invalid_nt.to_string_lossy().to_string()],
@@ -1096,9 +1100,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn test_handle_files_rejects_non_utf8_tmpdir_without_panic() {
-        let _tmpdir_lock = lock_tmpdir_sync();
         use std::os::unix::ffi::OsStringExt;
         use std::process::id;
+        let _tmpdir_lock = lock_tmpdir_sync();
 
         let invalid_tmp = {
             let mut name = b"de-non-utf8-tmp-".to_vec();
@@ -1386,7 +1390,7 @@ mod tests {
         fs::write(&data_path, "<http://ex/s> <http://ex/p> <http://ex/o> .\n")?;
 
         let data_uri = Url::from_file_path(&data_path)
-            .map_err(|_| anyhow::anyhow!("failed to build file URI for test dataset"))?
+            .map_err(|()| anyhow::anyhow!("failed to build file URI for test dataset"))?
             .to_string();
 
         let query_path = work_dir.path().join("query.rq");
@@ -1425,7 +1429,7 @@ mod tests {
         fs::write(&data_path, "<http://ex/s> <http://ex/p> <http://ex/o> .\n")?;
 
         let data_uri = Url::from_file_path(&data_path)
-            .map_err(|_| anyhow::anyhow!("failed to build file URI for test dataset"))?
+            .map_err(|()| anyhow::anyhow!("failed to build file URI for test dataset"))?
             .to_string();
 
         let query_path = work_dir.path().join("query.rq");
@@ -1451,7 +1455,7 @@ mod tests {
         }
 
         let rendered = String::from_utf8(output)?;
-        assert!(rendered.starts_with("s"), "unexpected output: {rendered}");
+        assert!(rendered.starts_with('s'), "unexpected output: {rendered}");
         Ok(())
     }
 
@@ -1464,7 +1468,7 @@ mod tests {
             "<http://example.org/s> <http://example.org/p> <http://example.org/o> .\n",
         )?;
         let uri = Url::from_file_path(&path_with_space)
-            .map_err(|_| anyhow::anyhow!("failed to build file URI"))?
+            .map_err(|()| anyhow::anyhow!("failed to build file URI"))?
             .to_string();
 
         let resolved = file_uri_to_local_path(&uri)

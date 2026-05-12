@@ -42,7 +42,7 @@ fn dataset_subject(header: &Header) -> Option<Id> {
 
 fn read_header_only(path: &Path) -> anyhow::Result<Header> {
     Header::read_from_hdt_path(path)
-        .map_err(|e| anyhow::anyhow!("error reading HDT header {:?}: {e}", path))
+        .map_err(|e| anyhow::anyhow!("error reading HDT header {}: {e}", path.display()))
 }
 
 /// Reads the `de` graph IRI metadata from an HDT file header.

@@ -17,7 +17,7 @@ use w3c_validation::{W3cRunInputs, run_w3c_rdf_tests_and_emit_report};
 /// a closure) is used here so the higher-ranked `for<'a> Fn(...)` bound the
 /// harness requires falls out naturally — closures get coerced to a single
 /// concrete lifetime and would fail to satisfy the HRTB.
-fn run_query<'a>(args: W3cRunInputs<'a>) -> BoxFuture<'a, anyhow::Result<()>> {
+fn run_query(args: W3cRunInputs<'_>) -> BoxFuture<'_, anyhow::Result<()>> {
     Box::pin(async move {
         let mut writer = BufWriter::new(args.writer);
         de::query::do_query_with_dataset(

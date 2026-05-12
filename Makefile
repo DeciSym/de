@@ -14,6 +14,7 @@ lint:
 	cargo machete
 	cargo clippy --workspace --all-targets --no-deps
 	cargo clippy --workspace --all-targets --all-features --no-deps
+	cargo clippy --workspace --all-targets --all-features -- -D warnings -W clippy::pedantic
 
 test: init
 	cargo test --all-features

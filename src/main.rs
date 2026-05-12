@@ -1,8 +1,10 @@
 // Copyright (c) 2025, Decisym, LLC
 // Licensed under the BSD 3-Clause License (see LICENSE file in the project root).
 
+#![allow(clippy::missing_errors_doc, clippy::missing_panics_doc)]
+
 use clap::{Parser, Subcommand};
-use de::*;
+use de::{create, query, view};
 use log::error;
 use std::io::{BufWriter, Write, stdout};
 
@@ -50,7 +52,7 @@ enum Commands {
         #[clap(long, default_value_t = false)]
         /// Print query plan JSON to stderr for each query
         debug_query_plan: bool,
-        /// Output to return the query results as using https://docs.rs/oxigraph/0.4.3/oxigraph/sparql/results/enum.QueryResultsFormat.html and https://crates.io/crates/oxrdfio
+        /// Output to return the query results as using <https://docs.rs/oxigraph/0.4.3/oxigraph/sparql/results/enum.QueryResultsFormat.html> and <https://crates.io/crates/oxrdfio>
         #[clap(short, long, default_value_t, value_enum)]
         output: query::DeOutput,
     },
@@ -87,7 +89,7 @@ async fn main() {
     let result = run_command(&cli.command, &mut stdout_writer).await;
     let flush_result = flush_stdout_writer(&mut stdout_writer);
     match result {
-        Ok(_) => {
+        Ok(()) => {
             if let Err(error) = flush_result {
                 error!("Error flushing standard output: {error:?}");
                 std::process::exit(exitcode::UNAVAILABLE);

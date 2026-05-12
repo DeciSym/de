@@ -68,6 +68,7 @@ pub struct PatternQuad {
 }
 
 impl AggregateHdt {
+    #[must_use]
     pub fn empty() -> Self {
         Self {
             file_paths: Arc::new(RwLock::new(HashMap::new())),
@@ -173,7 +174,7 @@ impl AggregateHdt {
             .map(
                 |(graph_name, path)| -> anyhow::Result<(String, hdt::HdtAny)> {
                     let hdt = hdt::HdtAny::open_with_threshold(path, None).map_err(|e| {
-                        anyhow::anyhow!("Failed to load HDT from {:?}: {}", path, e)
+                        anyhow::anyhow!("Failed to load HDT from {}: {e}", path.display())
                     })?;
                     Ok((graph_name.clone(), hdt))
                 },
@@ -218,12 +219,12 @@ impl AggregateHdt {
         Ok(guard.get(graph_name).cloned())
     }
 
-    /// Sync the AggregateHdt with the current HDT files in the specified location.
+    /// Sync the `AggregateHdt` with the current HDT files in the specified location.
     /// This method refreshes mappings by re-scanning HDT files in the location.
     ///
-    /// Returns a tuple of (added_count, removed_count).
+    /// Returns a tuple of (`added_count`, `removed_count`).
     #[cfg(feature = "server")]
-    pub fn sync(&self, location: std::path::PathBuf) -> Result<(usize, usize), anyhow::Error> {
+    pub fn sync(&self, location: &std::path::Path) -> Result<(usize, usize), anyhow::Error> {
         use std::collections::HashSet;
 
         if self.default_graphs.is_some() || self.named_graphs.is_some() {
@@ -233,12 +234,15 @@ impl AggregateHdt {
         }
 
         let canonical_location = location.canonicalize().map_err(|e| {
-            anyhow::anyhow!("Failed to canonicalize sync location {:?}: {e}", location)
+            anyhow::anyhow!(
+                "Failed to canonicalize sync location {}: {e}",
+                location.display()
+            )
         })?;
         if !canonical_location.is_dir() {
             return Err(anyhow::anyhow!(
-                "Sync location is not a directory: {:?}",
-                location
+                "Sync location is not a directory: {}",
+                location.display()
             ));
         }
 
@@ -306,7 +310,8 @@ pub fn hdt_bgp_str_to_term(s: &str) -> Result<Term, Error> {
     }
 }
 
-/// Convert triple string formats from OxRDF to HDT.
+/// Convert triple string formats from `OxRDF` to HDT.
+#[must_use]
 pub fn term_to_hdt_bgp_str(term: Term) -> String {
     match term {
         Term::NamedNode(named_node) => named_node.into_string(),
@@ -400,23 +405,17 @@ where
     use hdt::triples::{ObjectIter, PredicateIter, PredicateObjectIter, SubjectIter};
 
     let pattern: [Option<(Arc<str>, usize)>; 3] = [
-        subject.as_ref().map(|term| {
-            (
-                term.clone(),
-                hdt.dict.string_to_id(term.as_ref(), IdKind::Subject),
-            )
+        subject.map(|term| {
+            let id = hdt.dict.string_to_id(term.as_ref(), IdKind::Subject);
+            (term, id)
         }),
-        predicate.as_ref().map(|term| {
-            (
-                term.clone(),
-                hdt.dict.string_to_id(term.as_ref(), IdKind::Predicate),
-            )
+        predicate.map(|term| {
+            let id = hdt.dict.string_to_id(term.as_ref(), IdKind::Predicate);
+            (term, id)
         }),
-        object.as_ref().map(|term| {
-            (
-                term.clone(),
-                hdt.dict.string_to_id(term.as_ref(), IdKind::Object),
-            )
+        object.map(|term| {
+            let id = hdt.dict.string_to_id(term.as_ref(), IdKind::Object);
+            (term, id)
         }),
     ];
 
@@ -491,7 +490,7 @@ where
     }
 }
 
-impl<'a> StreamingInternalQuadIter<'a> {
+impl StreamingInternalQuadIter<'_> {
     fn ensure_current_iter(&mut self) -> bool {
         while self.current_iter.is_none() && self.current_graph < self.graphs.len() {
             let (graph_name, hdt) = self.graphs[self.current_graph];
@@ -541,7 +540,7 @@ impl<'a> StreamingInternalQuadIter<'a> {
     }
 }
 
-impl<'a> Iterator for StreamingInternalQuadIter<'a> {
+impl Iterator for StreamingInternalQuadIter<'_> {
     type Item = Result<InternalQuad<Arc<str>>, Error>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -570,7 +569,7 @@ impl<'a> QueryableDataset<'a> for &'a AggregateHdtSnapshot {
         object: Option<&Arc<str>>,
         graph_name: Option<Option<&Arc<str>>>,
     ) -> impl Iterator<Item = Result<InternalQuad<Self::InternalTerm>, Error>> + use<'a> {
-        let graph_name_owned = graph_name.map(|inner| inner.cloned());
+        let graph_name_owned = graph_name.map(|inner: Option<&Arc<str>>| inner.cloned());
         let emit_default_graph = matches!(graph_name_owned, Some(None));
 
         // Optimization: Pre-filter graphs to reduce unnecessary work
@@ -671,7 +670,7 @@ pub fn parse_query(q: &str, base_iri: &str) -> Result<Query, QueryEvaluationErro
 }
 
 pub fn query_parsed_with_debug_plan<'a, D>(
-    parsed: Query,
+    parsed: &Query,
     dataset: D,
     debug_plan: bool,
 ) -> Result<spareval::QueryResults<'a>, QueryEvaluationError>
@@ -692,7 +691,7 @@ where
 {
     let base = base_iri.unwrap_or_else(|| "http://example.com/".to_string());
     let parsed = parse_query(q, &base)?;
-    evaluate_query_with_debug_plan(parsed, dataset, debug_plan)
+    evaluate_query_with_debug_plan(&parsed, dataset, debug_plan)
 }
 
 pub fn query_select_tsv_with_debug_plan<'a, D>(
@@ -756,7 +755,7 @@ pub fn quads_for_pattern_strings(
 }
 
 fn evaluate_query_with_debug_plan<'a, D>(
-    parsed: Query,
+    parsed: &Query,
     dataset: D,
     debug_plan: bool,
 ) -> Result<spareval::QueryResults<'a>, QueryEvaluationError>
@@ -767,7 +766,7 @@ where
     // used to pass W3C suites in this repository and avoids optimizer-specific regressions.
     let evaluator = QueryEvaluator::new().without_optimizations();
     if debug_plan {
-        let (results, explanation) = evaluator.prepare(&parsed).explain(dataset);
+        let (results, explanation) = evaluator.prepare(parsed).explain(dataset);
         let mut json = Vec::new();
         explanation
             .write_in_json(&mut json)
@@ -775,7 +774,7 @@ where
         eprintln!("{}", String::from_utf8_lossy(&json));
         results
     } else {
-        evaluator.prepare(&parsed).execute(dataset)
+        evaluator.prepare(parsed).execute(dataset)
     }
 }
 
@@ -906,7 +905,7 @@ mod tests {
         ])?;
         let snapshot = store
             .get_snapshot(None)
-            .map_err(|err| anyhow::anyhow!("{}", err))?;
+            .map_err(|err| anyhow::anyhow!("{err}"))?;
 
         let graph_names: Vec<String> = (&snapshot)
             .internal_named_graphs()
@@ -948,13 +947,13 @@ mod tests {
         let initial_hdt_str = initial_hdt.to_string_lossy().into_owned();
         let store = AggregateHdt::new(std::slice::from_ref(&initial_hdt_str))
             .expect("Failed to create AggregateHDT");
-        let (added, removed) = store.sync(sync_dir.clone())?;
+        let (added, removed) = store.sync(&sync_dir)?;
         assert_eq!(added, 1);
         assert_eq!(removed, 0);
 
         let snapshot = store
             .get_snapshot(None)
-            .map_err(|err| anyhow::anyhow!("{}", err))?;
+            .map_err(|err| anyhow::anyhow!("{err}"))?;
         let graph_names: Vec<String> = (&snapshot)
             .internal_named_graphs()
             .map(|graph| graph.map(|name| name.to_string()))
@@ -990,17 +989,15 @@ mod tests {
         let cwd = std::env::current_dir()?;
         let relative_sync_dir = sync_dir.strip_prefix(&cwd).map_err(|_| {
             anyhow::anyhow!(
-                "test sync directory {:?} should be under current directory {:?}",
-                sync_dir,
-                cwd
+                "test sync directory {sync_dir:?} should be under current directory {cwd:?}"
             )
         })?;
 
-        let (added_first, removed_first) = store.sync(relative_sync_dir.to_path_buf())?;
+        let (added_first, removed_first) = store.sync(relative_sync_dir)?;
         assert_eq!(added_first, 0);
         assert_eq!(removed_first, 0);
 
-        let (added_second, removed_second) = store.sync(relative_sync_dir.to_path_buf())?;
+        let (added_second, removed_second) = store.sync(relative_sync_dir)?;
         assert_eq!(added_second, 0);
         assert_eq!(removed_second, 0);
 
@@ -1027,7 +1024,7 @@ mod tests {
         )?;
 
         let err = store
-            .sync(std::env::current_dir()?)
+            .sync(&std::env::current_dir()?)
             .expect_err("sync should reject datasets with explicit graph memberships");
         assert!(
             err.to_string().contains("filesystem-discovered datasets"),
@@ -1080,7 +1077,7 @@ mod tests {
 
         let store = AggregateHdt::new(&[hdt_a.to_string_lossy().into_owned()])?;
         let err = store
-            .sync(sync_dir.clone())
+            .sync(&sync_dir)
             .expect_err("sync should fail on duplicate graph IRI metadata");
         assert!(
             err.to_string().contains("duplicate graph IRI"),
@@ -1136,9 +1133,8 @@ mod tests {
         }));
         assert!(result.is_ok(), "query must not panic with invalid base IRI");
         let result = result.expect("query panicked");
-        let err = match result {
-            Ok(_) => panic!("query should return error for invalid base IRI"),
-            Err(err) => err,
+        let Err(err) = result else {
+            panic!("query should return error for invalid base IRI");
         };
         if let QueryEvaluationError::Unexpected(err) = err {
             assert!(

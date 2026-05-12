@@ -34,7 +34,7 @@ use crate::{
 type HttpError = (StatusCode, String);
 
 const MAX_SPARQL_BODY_SIZE: u64 = 1024 * 1024 * 128; // 128MB
-const HTTP_TIMEOUT: Duration = Duration::from_secs(60);
+const HTTP_TIMEOUT: Duration = Duration::from_mins(1);
 const HTML_ROOT_PAGE: &str = include_str!("../templates/query.html");
 #[expect(clippy::large_include_file)]
 const YASGUI_JS: &str = include_str!("../templates/yasgui/yasgui.min.js");
@@ -95,10 +95,16 @@ fn compute_store_fingerprint(location: &Path) -> Result<StoreFingerprint, HttpEr
             continue;
         }
         let metadata = entry.metadata().map_err(|e| {
-            internal_server_error(format!("error reading HDT metadata for {:?}: {e}", path))
+            internal_server_error(format!(
+                "error reading HDT metadata for {}: {e}",
+                path.display()
+            ))
         })?;
         let modified = metadata.modified().map_err(|e| {
-            internal_server_error(format!("error reading HDT mtime for {:?}: {e}", path))
+            internal_server_error(format!(
+                "error reading HDT mtime for {}: {e}",
+                path.display()
+            ))
         })?;
         files.push(HdtFileFingerprint {
             path,
@@ -130,7 +136,7 @@ fn maybe_sync_store(store: &AggregateHdt, location: &Path) -> Result<(), HttpErr
     }
 
     store
-        .sync(canonical_location.clone())
+        .sync(&canonical_location)
         .map_err(|e| internal_server_error(format!("error loading data files: {e}")))?;
 
     let mut guard = cache
@@ -155,15 +161,12 @@ pub fn serve(
 
     eprintln!("Found {} HDT files in {}", hdt_paths.len(), locations);
     for path in &hdt_paths {
-        eprintln!("  - {}", path);
+        eprintln!("  - {path}");
     }
 
     // Create the AggregateHdt store from the found HDT files
     let store = if hdt_paths.is_empty() {
-        warn!(
-            "Warning: No HDT files found in the specified locations: {}",
-            locations
-        );
+        warn!("Warning: No HDT files found in the specified locations: {locations}");
         AggregateHdt::empty()
     } else {
         AggregateHdt::new(&hdt_paths)?
@@ -172,12 +175,12 @@ pub fn serve(
     // let timeout = timeout_s.map(Duration::from_secs);
     let mut server = if cors {
         Server::new(cors_middleware(move |request| {
-            handle_request(request, &store, union_default_graph, locations.to_owned())
+            handle_request(request, &store, union_default_graph, &locations)
                 .unwrap_or_else(|(status, message)| error(status, message))
         }))
     } else {
         Server::new(move |request| {
-            handle_request(request, &store, union_default_graph, locations.to_owned())
+            handle_request(request, &store, union_default_graph, &locations)
                 .unwrap_or_else(|(status, message)| error(status, message))
         })
     }
@@ -238,7 +241,7 @@ pub fn handle_request(
     // read_only: bool,
     union_default_graph: bool,
     // timeout: Option<Duration>,
-    locations: String,
+    locations: &str,
 ) -> Result<Response<Body>, HttpError> {
     debug!("{} {}", request.method(), request.uri().path());
     match (request.uri().path(), request.method().as_ref()) {
@@ -286,7 +289,7 @@ pub fn handle_request(
                     .body(description.into())
                     .map_err(internal_server_error)
             } else {
-                maybe_sync_store(store, Path::new(&locations))?;
+                maybe_sync_store(store, Path::new(locations))?;
                 configure_and_evaluate_sparql_query(
                     store,
                     &[url_query(request)],
@@ -298,7 +301,7 @@ pub fn handle_request(
             }
         }
         ("/query", "POST") => {
-            maybe_sync_store(store, Path::new(&locations))?;
+            maybe_sync_store(store, Path::new(locations))?;
             let content_type =
                 content_type(request).ok_or_else(|| bad_request("No Content-Type given"))?;
             if content_type == "application/sparql-query" {
@@ -325,10 +328,7 @@ pub fn handle_request(
                 Err(unsupported_media_type(&content_type))
             }
         }
-        ("/update", "GET") => Err(not_implemented(
-            "SPARQL Update is not supported by this server",
-        )),
-        ("/update", "POST") => Err(not_implemented(
+        ("/update", "GET" | "POST") => Err(not_implemented(
             "SPARQL Update is not supported by this server",
         )),
         (path, _method) if is_store_path(path) => Err(not_implemented(
@@ -362,10 +362,9 @@ fn base_url(request: &Request<Body>) -> String {
             } else {
                 return uri.path().to_string();
             }
-        };
+        }
         http::Uri::from_parts(parts)
-            .map(|built| built.to_string())
-            .unwrap_or_else(|_| uri.path().to_string())
+            .map_or_else(|_| uri.path().to_string(), |built| built.to_string())
     } else {
         uri.to_string()
     }
@@ -594,7 +593,7 @@ fn configure_and_evaluate_sparql_query(
                     if query.is_some() {
                         return Err(bad_request("Multiple query parameters provided"));
                     }
-                    query = Some(v.into_owned())
+                    query = Some(v.into_owned());
                 }
                 "default-graph-uri" => default_graph_uris.push(v.into_owned()),
                 "union-default-graph" => use_default_graph_as_union = true,
@@ -611,19 +610,20 @@ fn configure_and_evaluate_sparql_query(
         store,
         &query,
         use_default_graph_as_union,
-        default_graph_uris,
-        named_graph_uris,
+        &default_graph_uris,
+        &named_graph_uris,
         request,
         // timeout,
     )
 }
 
+#[allow(clippy::too_many_lines)]
 fn evaluate_sparql_query(
     store: &AggregateHdt,
     query: &str,
     use_default_graph_as_union: bool,
-    default_graph_uris: Vec<String>,
-    named_graph_uris: Vec<String>,
+    default_graph_uris: &[String],
+    named_graph_uris: &[String],
     request: &Request<Body>,
     // timeout: Option<Duration>,
 ) -> Result<Response<Body>, HttpError> {
@@ -642,13 +642,13 @@ fn evaluate_sparql_query(
     // needed for the query.
     let graph_filter = {
         let mut selected_graphs: Vec<String> = if use_default_graph_as_union {
-            let mut selected = default_graph_uris.clone();
-            selected.extend(named_graph_uris.clone());
+            let mut selected = default_graph_uris.to_vec();
+            selected.extend_from_slice(named_graph_uris);
             selected
         } else if default_graph_uris.is_empty() {
-            named_graph_uris.clone()
+            named_graph_uris.to_vec()
         } else {
-            default_graph_uris.clone()
+            default_graph_uris.to_vec()
         };
 
         selected_graphs.sort_unstable();
@@ -661,7 +661,7 @@ fn evaluate_sparql_query(
         }
     };
     if let Some(graph_filter_ref) = graph_filter.as_ref() {
-        debug!("using graph filter for query: {:?}", graph_filter_ref);
+        debug!("using graph filter for query: {graph_filter_ref:?}");
     } else {
         debug!("using default graph filter for query: all graphs");
     }
@@ -676,7 +676,7 @@ fn evaluate_sparql_query(
                     io::Error::new(io::ErrorKind::InvalidData, "data temporarily unavailable")
                 })?;
                 let results =
-                    crate::sparql::query_parsed_with_debug_plan(parsed_query, &snapshot, false)
+                    crate::sparql::query_parsed_with_debug_plan(&parsed_query, &snapshot, false)
                         .map_err(|e| {
                             io::Error::new(
                                 io::ErrorKind::InvalidData,
@@ -685,7 +685,7 @@ fn evaluate_sparql_query(
                         })?;
                 match results {
                     QueryResults::Graph(triples) => {
-                        stream_query_graph_results(graph_format, &tx, triples)?
+                        stream_query_graph_results(graph_format, &tx, triples)?;
                     }
                     QueryResults::Solutions(_) | QueryResults::Boolean(_) => Err(io::Error::new(
                         io::ErrorKind::InvalidData,
@@ -707,7 +707,7 @@ fn evaluate_sparql_query(
                     io::Error::new(io::ErrorKind::InvalidData, "data temporarily unavailable")
                 })?;
                 let results =
-                    crate::sparql::query_parsed_with_debug_plan(parsed_query, &snapshot, false)
+                    crate::sparql::query_parsed_with_debug_plan(&parsed_query, &snapshot, false)
                         .map_err(|e| {
                             io::Error::new(
                                 io::ErrorKind::InvalidData,
@@ -717,7 +717,7 @@ fn evaluate_sparql_query(
                 match results {
                     QueryResults::Solutions(solutions) => {
                         let variables = solutions.variables().to_vec();
-                        stream_query_solution_results(solutions_format, &tx, solutions, variables)?
+                        stream_query_solution_results(solutions_format, &tx, solutions, variables)?;
                     }
                     QueryResults::Boolean(result) => {
                         let mut body = Vec::new();

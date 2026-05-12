@@ -3,6 +3,8 @@
 //
 //! Manifest discovery and case construction for the W3C RDF/SPARQL harness.
 
+#![allow(clippy::wildcard_imports)]
+
 use super::*;
 use de::query::DeOutput;
 use oxrdf::{NamedNode, Term, vocab::rdf};
@@ -63,7 +65,7 @@ fn collect_cases_from_manifest(
     let manifest_entries = manifest_entry_subjects(&graph);
     let enforce_manifest_entries = !manifest_entries.is_empty();
 
-    for triple in graph.iter() {
+    for triple in &graph {
         let subject = Term::from(triple.subject);
         if triple.predicate.as_str() == MF_INCLUDE {
             add_included_manifests(
@@ -115,7 +117,7 @@ fn collect_cases_from_manifest(
 /// If non-empty, only listed subjects are considered executable tests.
 fn manifest_entry_subjects(graph: &oxrdf::Graph) -> HashSet<String> {
     let mut entries = HashSet::new();
-    for triple in graph.iter() {
+    for triple in graph {
         if triple.predicate.as_str() != rdf::TYPE.as_str() {
             continue;
         }
@@ -142,6 +144,7 @@ fn manifest_entry_subjects(graph: &oxrdf::Graph) -> HashSet<String> {
 }
 
 /// Maps a manifest test type IRI plus case subject into an executable case payload.
+#[allow(clippy::too_many_lines, clippy::match_same_arms)]
 fn build_case_kind(
     manifest_path: &Path,
     manifest_base: &Path,
@@ -819,8 +822,7 @@ fn map_expected_result(path: &Path) -> anyhow::Result<(DeOutput, CompareKind)> {
         "rdf" | "xml" => Ok((DeOutput::RDFXML, CompareKind::Rdf(RdfFormat::RdfXml))),
         "trig" => Ok((DeOutput::TRIG, CompareKind::Rdf(RdfFormat::TriG))),
         _ => Err(anyhow::anyhow!(
-            "unsupported expected result extension {:?}",
-            ext
+            "unsupported expected result extension {ext:?}"
         )),
     }
 }
@@ -839,7 +841,7 @@ pub(super) fn rdf_format_from_path(path: &Path) -> anyhow::Result<RdfFormat> {
         "trig" => Ok(RdfFormat::TriG),
         "rdf" | "xml" => Ok(RdfFormat::RdfXml),
         "n3" => Ok(RdfFormat::N3),
-        _ => Err(anyhow::anyhow!("unsupported RDF extension {:?}", ext)),
+        _ => Err(anyhow::anyhow!("unsupported RDF extension {ext:?}")),
     }
 }
 
@@ -875,7 +877,7 @@ fn parse_manifest_graph(path: &Path, format: RdfFormat) -> anyhow::Result<oxrdf:
 pub(super) fn manifest_file_uri(path: &Path) -> String {
     de::file_graph_uri_for_path(path).unwrap_or_else(|_| {
         let path = path.to_string_lossy();
-        format!("file://{}", path)
+        format!("file://{path}")
     })
 }
 
@@ -914,7 +916,7 @@ fn term_to_path(manifest_path: &Path, manifest_base: &Path, term: &Term) -> Opti
                 None
             }
         }
-        _ => None,
+        Term::Literal(_) => None,
     }
 }
 
