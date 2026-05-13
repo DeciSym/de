@@ -1,0 +1,9 @@
+[advisories]
+ignore = [
+    # paste 1.0.15 — unmaintained; transitive via hdt -> qwt.
+    # Revisit when qwt drops the dependency or hdt switches off qwt.
+    "RUSTSEC-2024-0436",
+    # bincode 1.3.3 + 2.0.1 — unmaintained; transitive via hdt (and hdt -> qwt).
+    # Revisit when hdt migrates to a maintained serialization crate.
+    "RUSTSEC-2025-0141",
+]
