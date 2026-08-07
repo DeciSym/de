@@ -129,6 +129,7 @@ pub async fn do_query<W: Write>(
     entailment_mode: EntailmentMode,
     out: &DeOutput,
     writer: &mut BufWriter<W>,
+    memory_only: bool,
 ) -> anyhow::Result<()> {
     do_query_with_dataset_with_options(
         data_files,
@@ -138,6 +139,7 @@ pub async fn do_query<W: Write>(
         QueryExecutionOptions::default(),
         out,
         writer,
+        memory_only,
     )
     .await
 }
@@ -151,6 +153,7 @@ pub async fn do_query_with_dataset<W: Write>(
     entailment_mode: EntailmentMode,
     out: &DeOutput,
     writer: &mut BufWriter<W>,
+    memory_only: bool,
 ) -> anyhow::Result<()> {
     do_query_with_dataset_with_options(
         data_files,
@@ -160,6 +163,7 @@ pub async fn do_query_with_dataset<W: Write>(
         QueryExecutionOptions::default(),
         out,
         writer,
+        memory_only,
     )
     .await
 }
@@ -174,6 +178,7 @@ pub async fn do_query_with_dataset_with_options<W: Write>(
     options: QueryExecutionOptions,
     out: &DeOutput,
     writer: &mut BufWriter<W>,
+    memory_only: bool,
 ) -> anyhow::Result<()> {
     debug!("Executing querying ...");
 
@@ -256,8 +261,12 @@ pub async fn do_query_with_dataset_with_options<W: Write>(
             named_hdt_graphs.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
             named_hdt_graphs.dedup();
 
-            let dataset = sparql::AggregateHdt::new_with_mappings(&hdt_path_vec, &named_hdt_graphs)
-                .map_err(|e| anyhow::anyhow!("error initializting HDT files: {e}"))?;
+            let dataset = sparql::AggregateHdt::new_with_mappings(
+                &hdt_path_vec,
+                &named_hdt_graphs,
+                memory_only,
+            )
+            .map_err(|e| anyhow::anyhow!("error initializting HDT files: {e}"))?;
             let snapshot = dataset
                 .get_snapshot(None)
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -1056,6 +1065,7 @@ mod tests {
             EntailmentMode::Off,
             &DeOutput::CSV,
             &mut writer,
+            false,
         )
         .await;
         assert!(res.is_err());
@@ -1182,6 +1192,7 @@ mod tests {
                 EntailmentMode::Off,
                 &DeOutput::CSV,
                 &mut writer,
+                false,
             )
             .await?;
         }
@@ -1229,6 +1240,7 @@ mod tests {
                 EntailmentMode::Off,
                 &DeOutput::CSV,
                 &mut writer,
+                false,
             )
             .await?;
         }
@@ -1242,6 +1254,7 @@ mod tests {
                 EntailmentMode::OwlRl,
                 &DeOutput::CSV,
                 &mut writer,
+                false,
             )
             .await?;
         }
@@ -1310,6 +1323,7 @@ mod tests {
             EntailmentMode::Off,
             &DeOutput::CSV,
             &mut writer,
+            false,
         )
         .await;
         assert!(result.is_err());
@@ -1348,6 +1362,7 @@ mod tests {
                 EntailmentMode::Off,
                 &DeOutput::CSV,
                 &mut writer,
+                false,
             )
             .await?;
         }
@@ -1408,6 +1423,7 @@ mod tests {
                 EntailmentMode::Off,
                 &DeOutput::CSV,
                 &mut writer,
+                false,
             )
             .await?;
         }
@@ -1450,6 +1466,7 @@ mod tests {
                 EntailmentMode::Off,
                 &DeOutput::CSV,
                 &mut writer,
+                false,
             )
             .await?;
         }

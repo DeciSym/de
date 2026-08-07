@@ -55,6 +55,9 @@ enum Commands {
         /// Output to return the query results as using <https://docs.rs/oxigraph/0.4.3/oxigraph/sparql/results/enum.QueryResultsFormat.html> and <https://crates.io/crates/oxrdfio>
         #[clap(short, long, default_value_t, value_enum)]
         output: query::DeOutput,
+        #[clap(long, default_value_t = false)]
+        /// DO NOT MERGE: execute queries against in-memory HDT graphs, no mem-mapped files
+        memory_only: bool,
     },
     /// Start a server to listen for /sparql, /update and /store API's. HDT's are read-only
     /// per spec, so new graphs (i.e. files) can be uploaded, but existing graphs can NOT be
@@ -115,6 +118,7 @@ async fn run_command<W: Write>(
             entailment,
             debug_query_plan,
             output,
+            memory_only
         } => {
             let named_graph_bindings = query::parse_named_graph_bindings(named_graph)?;
             query::do_query_with_dataset_with_options(
@@ -127,6 +131,7 @@ async fn run_command<W: Write>(
                 },
                 output,
                 stdout_writer,
+                *memory_only
             )
             .await
         }

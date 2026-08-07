@@ -147,6 +147,7 @@ mod integration {
             query::EntailmentMode::Off,
             &query::DeOutput::CSV,
             &mut writer,
+            false,
         )
         .await;
         assert!(res.is_ok());
@@ -192,6 +193,7 @@ http://example.org/Banana"#
             query::EntailmentMode::Off,
             &query::DeOutput::CSV,
             &mut writer,
+            false,
         )
         .await;
         assert!(res.is_ok());
@@ -236,6 +238,7 @@ http://example.org/Banana"#
             query::EntailmentMode::Off,
             &query::DeOutput::CSV,
             &mut writer,
+            false,
         )
         .await;
         assert!(res.is_ok());
@@ -254,6 +257,7 @@ http://example.org/Pineapple,yellow"#
             query::EntailmentMode::Off,
             &query::DeOutput::TSV,
             &mut writer2,
+            false,
         )
         .await;
         assert!(res.is_ok());
@@ -271,6 +275,7 @@ http://example.org/Pineapple,yellow"#
             query::EntailmentMode::Off,
             &query::DeOutput::JSON,
             &mut writer3,
+            false,
         )
         .await;
         assert!(res.is_ok());
@@ -288,6 +293,7 @@ http://example.org/Pineapple,yellow"#
             query::EntailmentMode::Off,
             &query::DeOutput::XML,
             &mut writer4,
+            false,
         )
         .await;
         assert!(res.is_ok());
@@ -306,6 +312,7 @@ http://example.org/Pineapple,yellow"#
             query::EntailmentMode::Off,
             &query::DeOutput::NTRIPLE,
             &mut writer5,
+            false,
         )
         .await;
         assert!(res.is_err());
@@ -417,6 +424,7 @@ http://example.org/Pineapple,yellow"#
             query::EntailmentMode::Off,
             &query::DeOutput::CSV,
             &mut writer,
+            false,
         )
         .await;
         assert!(res.is_ok());
@@ -447,6 +455,7 @@ http://example.org/Banana"#
             query::EntailmentMode::Off,
             &query::DeOutput::CSV,
             &mut writer,
+            false,
         )
         .await;
         assert!(res.is_ok());
@@ -497,6 +506,7 @@ http://example.org/Banana"#
             query::EntailmentMode::Off,
             &query::DeOutput::CSV,
             &mut writer,
+            false,
         )
         .await;
         assert!(res.is_ok());

@@ -79,6 +79,7 @@ fn query(c: &mut Criterion) {
                     query::EntailmentMode::Off,
                     &query::DeOutput::CSV,
                     &mut hdt_writer,
+                    false,
                 )
                 .await
                 .expect("failed to query HDT benchmark fixture");
@@ -101,6 +102,7 @@ fn query(c: &mut Criterion) {
                     query::EntailmentMode::Off,
                     &query::DeOutput::CSV,
                     &mut rdf_writer,
+                    false,
                 )
                 .await
                 .expect("failed to query RDF benchmark fixture");

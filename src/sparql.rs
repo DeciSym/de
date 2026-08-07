@@ -46,6 +46,8 @@ pub struct AggregateHdt {
     default_graphs: Option<HashSet<String>>,
     // Optional explicit named graph membership. If None, all loaded graphs are named.
     named_graphs: Option<HashSet<String>>,
+
+    memory_only: bool,
 }
 
 pub struct AggregateHdtSnapshot {
@@ -74,6 +76,7 @@ impl AggregateHdt {
             file_paths: Arc::new(RwLock::new(HashMap::new())),
             default_graphs: None,
             named_graphs: None,
+            memory_only: false,
         }
     }
 
@@ -88,12 +91,14 @@ impl AggregateHdt {
             file_paths: Arc::new(RwLock::new(file_paths)),
             default_graphs: None,
             named_graphs: None,
+            memory_only: false,
         })
     }
 
     pub fn new_with_mappings(
         default_paths: &[String],
         named_graphs: &[(String, String)],
+        memory_only: bool,
     ) -> anyhow::Result<Self> {
         let mut file_paths: HashMap<String, std::path::PathBuf> = HashMap::new();
         let mut default_graphs: HashSet<String> = HashSet::new();
@@ -115,6 +120,7 @@ impl AggregateHdt {
             file_paths: Arc::new(RwLock::new(file_paths)),
             default_graphs: Some(default_graphs),
             named_graphs: Some(named_graph_set),
+            memory_only,
         })
     }
 
@@ -173,10 +179,18 @@ impl AggregateHdt {
             .par_iter()
             .map(
                 |(graph_name, path)| -> anyhow::Result<(String, hdt::HdtAny)> {
-                    let hdt = hdt::HdtAny::open_with_threshold(path, None).map_err(|e| {
-                        anyhow::anyhow!("Failed to load HDT from {}: {e}", path.display())
-                    })?;
-                    Ok((graph_name.clone(), hdt))
+                    if !self.memory_only {
+                        let hdt = hdt::HdtAny::open_with_threshold(path, None).map_err(|e| {
+                            anyhow::anyhow!("Failed to load HDT from {}: {e}", path.display())
+                        })?;
+                        Ok((graph_name.clone(), hdt))
+                    } else {
+                        let hdt = hdt::HdtAny::open_with_threshold(path, Some(usize::MAX))
+                            .map_err(|e| {
+                                anyhow::anyhow!("Failed to load HDT from {}: {e}", path.display())
+                            })?;
+                        Ok((graph_name.clone(), hdt))
+                    }
                 },
             )
             .collect::<anyhow::Result<Vec<_>>>()?
@@ -764,7 +778,7 @@ where
 {
     // Keep optimizer disabled for all execution paths: this matches current upstream patch behavior
     // used to pass W3C suites in this repository and avoids optimizer-specific regressions.
-    let evaluator = QueryEvaluator::new().without_optimizations();
+    let evaluator = QueryEvaluator::new();
     if debug_plan {
         let (results, explanation) = evaluator.prepare(parsed).explain(dataset);
         let mut json = Vec::new();

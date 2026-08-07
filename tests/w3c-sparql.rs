@@ -27,6 +27,7 @@ fn run_query(args: W3cRunInputs<'_>) -> BoxFuture<'_, anyhow::Result<()>> {
             args.entailment,
             args.out,
             &mut writer,
+            false,
         )
         .await
     })
