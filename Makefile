@@ -25,7 +25,7 @@ bench: init
 	cargo bench
 
 build:
-	cargo build --features=server
+	cargo build --features=server,mcp
 
 clean:
 	cargo clean
@@ -47,8 +47,8 @@ docker.test: docker
 	query --data /data/superhero.ttl --sparql /data/hero-height.rq -q | tr -d '\r'| diff - tests/goldens/superhero-query.csv
 
 release: init
-	cargo build --release --features=server
-	cargo deb --deb-version ${VERSION} --features=server
+	cargo build --release --features=server,mcp
+	cargo deb --deb-version ${VERSION} --features=server,mcp
 
 serve: docker
 	docker run -it --rm -v ${PWD}/tests/resources:/data -p 7878:7878 ${HUB}/de:${TAG} serve -l /data --bind 0.0.0.0:7878 -vvv

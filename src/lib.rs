@@ -9,6 +9,8 @@ pub mod create;
 pub mod enrich;
 mod graph_iri;
 pub mod hdt_meta;
+#[cfg(feature = "server")]
+pub mod mcp;
 pub mod query;
 pub mod rdf2nt;
 #[cfg(feature = "server")]

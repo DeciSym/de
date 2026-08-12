@@ -69,6 +69,10 @@ enum Commands {
         /// Host and port to listen to
         #[arg(short, long, default_value = "localhost:7878", value_hint = clap::ValueHint::Hostname)]
         bind: String,
+        /// Serve an MCP (Model Context Protocol) endpoint at /mcp instead of the SPARQL HTTP API.
+        /// Exposes the `query_sparql` and `upload_rdf` tools over the data in --location.
+        #[arg(long, action)]
+        mcp: bool,
     },
     /// Use to view info about an HDT file
     View {
@@ -148,7 +152,18 @@ async fn run_command<W: Write>(
         .map(|_| ()),
         Commands::View { data } => view::view_hdt(data, stdout_writer),
         #[cfg(feature = "server")]
-        Commands::Serve { location, bind } => de::serve::serve(location.to_owned(), bind),
+        Commands::Serve {
+            location,
+            bind,
+            mcp,
+        } => {
+            if *mcp {
+                return de::mcp::McpService::new(location.to_owned())
+                    .serve(bind)
+                    .await;
+            }
+            de::serve::serve(location.to_owned(), bind)
+        }
     }
 }
 

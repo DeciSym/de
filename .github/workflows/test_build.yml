@@ -66,6 +66,27 @@ jobs:
     - name: Run server integration tests
       run: cargo test --test test-server --features server
 
+  mcp-test:
+    name: mcp test
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: recursive
+    - uses: actions-rust-lang/setup-rust-toolchain@v1
+      with:
+        toolchain: ${{ github.event.schedule == '' && 'stable' || 'nightly' }}
+        cache: false
+    - uses: Swatinem/rust-cache@v2
+      with:
+        shared-key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+    # Covers the MCP tool surface plus a live `de serve --mcp` initialize /
+    # tools/list / tools/call handshake over the Streamable HTTP transport.
+    - name: Run MCP integration tests
+      run: cargo test --test test-mcp --features mcp
+
   w3c-conformance:
     name: W3C SPARQL/RDF conformance
     runs-on: ubuntu-latest

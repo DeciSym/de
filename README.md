@@ -33,6 +33,12 @@ Install with server command enabled:
 cargo install --features server de
 ```
 
+Install with the MCP server enabled as well (`mcp` implies `server`):
+
+```sh
+cargo install --features mcp de
+```
+
 Install the CLI from a local clone:
 
 ```sh
@@ -94,6 +100,39 @@ Output:
 title
 SPARQL Tutorial
 ```
+
+## MCP Server
+
+With the `mcp` feature enabled, `serve` can expose the data directory to
+[Model Context Protocol](https://modelcontextprotocol.io) clients instead of
+serving the SPARQL HTTP API:
+
+```sh
+cargo run --features mcp -- serve --location ./data --bind localhost:7878 --mcp
+```
+
+The Streamable HTTP transport is mounted at `/mcp` (so, above,
+`http://localhost:7878/mcp`) and offers two tools:
+
+- `query_sparql` — run a SPARQL query over the RDF/HDT files in `--location`,
+  or over a comma-separated subset of them, and return SPARQL 1.1 JSON
+  results. File names are resolved inside the data directory; paths that
+  escape it are rejected.
+- `upload_rdf` — write Turtle content into the data directory's `uploads/`
+  subdirectory, where subsequent queries pick it up.
+
+The same service is available to downstream crates as a library:
+
+```rust
+use de::mcp::McpService;
+
+async fn serve_mcp(data_dir: String) -> anyhow::Result<()> {
+    McpService::new(data_dir).serve("localhost:7878").await
+}
+```
+
+Use `McpService::with_server_info` to report the embedding application's own
+name and version to clients during MCP initialization.
 
 ## Command Reference
 
