@@ -22,7 +22,8 @@
 //! # }
 //! ```
 
+pub mod prompts;
 pub mod server;
 pub mod tools;
 
-pub use server::{MCP_ENDPOINT_PATH, McpServerInfo, McpService};
+pub use server::{DEFAULT_MAX_REQUEST_BODY_BYTES, MCP_ENDPOINT_PATH, McpServerInfo, McpService};

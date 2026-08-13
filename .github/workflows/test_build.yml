@@ -85,7 +85,7 @@ jobs:
     # Covers the MCP tool surface plus a live `de serve --mcp` initialize /
     # tools/list / tools/call handshake over the Streamable HTTP transport.
     - name: Run MCP integration tests
-      run: cargo test --test test-mcp --features mcp
+      run: cargo test --test test-mcp --features server
 
   w3c-conformance:
     name: W3C SPARQL/RDF conformance

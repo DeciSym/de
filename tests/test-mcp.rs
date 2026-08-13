@@ -5,7 +5,8 @@
 
 mod mcp_tests {
     use de::mcp::tools::{
-        QuerySparqlRequest, UploadRdfRequest, query_sparql, scan_data_directory, upload_rdf,
+        ListDataFilesRequest, QueryResultFormat, QuerySparqlRequest, UploadRdfRequest,
+        list_data_files, query_sparql, scan_data_directory, upload_rdf,
     };
     use sparesults::{QueryResultsFormat, QueryResultsParser, ReaderQueryResultsParserOutput};
     use std::io::{ErrorKind, Read as _, Write as _};
@@ -36,10 +37,14 @@ mod mcp_tests {
         dir.path().to_string_lossy().into_owned()
     }
 
+    fn file_list(files: &[&str]) -> Vec<String> {
+        files.iter().map(|file| (*file).to_string()).collect()
+    }
+
     /// Collect the `?title` bindings out of a SPARQL 1.1 JSON result document.
-    fn titles(results_json: &str) -> anyhow::Result<Vec<String>> {
+    fn titles(results: &serde_json::Value) -> anyhow::Result<Vec<String>> {
         let parsed = QueryResultsParser::from_format(QueryResultsFormat::Json)
-            .for_reader(std::io::Cursor::new(results_json.as_bytes()))?;
+            .for_reader(std::io::Cursor::new(results.to_string().into_bytes()))?;
         let ReaderQueryResultsParserOutput::Solutions(solutions) = parsed else {
             return Err(anyhow::anyhow!(
                 "expected solution bindings, got a boolean result"
@@ -58,6 +63,21 @@ mod mcp_tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn list_data_files_reports_the_queryable_files() -> anyhow::Result<()> {
+        let dir = setup_data_dir()?;
+        let data_dir = data_dir_arg(&dir);
+
+        let listing = list_data_files(ListDataFilesRequest {}, data_dir.clone())
+            .await
+            .map_err(anyhow::Error::msg)?;
+
+        // `notes.txt` is not RDF, so the scan must leave it out.
+        assert_eq!(listing.files, vec!["book1.nt".to_string()]);
+        assert_eq!(listing.data_dir, data_dir);
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn query_sparql_queries_every_scanned_file() -> anyhow::Result<()> {
         let dir = setup_data_dir()?;
         std::fs::write(
@@ -65,7 +85,7 @@ mod mcp_tests {
             format!("{BOOK2_IRI} {DC_TITLE} \"The Semantic Web\" .\n"),
         )?;
 
-        let results = query_sparql(
+        let response = query_sparql(
             QuerySparqlRequest {
                 query: TITLE_QUERY.to_string(),
                 files: None,
@@ -75,8 +95,13 @@ mod mcp_tests {
         .await
         .map_err(anyhow::Error::msg)?;
 
+        assert_eq!(response.format, QueryResultFormat::SparqlResultsJson);
         assert_eq!(
-            titles(&results)?,
+            response.files_queried,
+            vec!["book1.nt".to_string(), "book2.nt".to_string()]
+        );
+        assert_eq!(
+            titles(&response.results.expect("SELECT returns results"))?,
             vec![
                 "\"SPARQL Tutorial\"".to_string(),
                 "\"The Semantic Web\"".to_string()
@@ -93,17 +118,47 @@ mod mcp_tests {
             format!("{BOOK2_IRI} {DC_TITLE} \"The Semantic Web\" .\n"),
         )?;
 
-        let results = query_sparql(
+        let response = query_sparql(
             QuerySparqlRequest {
                 query: TITLE_QUERY.to_string(),
-                files: Some(" book2.nt ".to_string()),
+                files: Some(file_list(&[" book2.nt "])),
             },
             data_dir_arg(&dir),
         )
         .await
         .map_err(anyhow::Error::msg)?;
 
-        assert_eq!(titles(&results)?, vec!["\"The Semantic Web\"".to_string()]);
+        assert_eq!(response.files_queried, vec!["book2.nt".to_string()]);
+        assert_eq!(
+            titles(&response.results.expect("SELECT returns results"))?,
+            vec!["\"The Semantic Web\"".to_string()]
+        );
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn query_sparql_reports_graph_results_as_n_triples() -> anyhow::Result<()> {
+        let dir = setup_data_dir()?;
+
+        // CONSTRUCT has no SPARQL-results-JSON serialization, so `de` falls
+        // back to N-Triples and the response must say so.
+        let response = query_sparql(
+            QuerySparqlRequest {
+                query: "CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o . }".to_string(),
+                files: None,
+            },
+            data_dir_arg(&dir),
+        )
+        .await
+        .map_err(anyhow::Error::msg)?;
+
+        assert_eq!(response.format, QueryResultFormat::NTriples);
+        assert!(response.results.is_none());
+        let graph = response.graph.expect("CONSTRUCT returns a graph");
+        assert!(
+            graph.contains("SPARQL Tutorial"),
+            "unexpected graph payload: {graph}"
+        );
         Ok(())
     }
 
@@ -129,7 +184,7 @@ mod mcp_tests {
         let no_selection = query_sparql(
             QuerySparqlRequest {
                 query: TITLE_QUERY.to_string(),
-                files: Some(" , ".to_string()),
+                files: Some(file_list(&["  "])),
             },
             data_dir.clone(),
         )
@@ -144,7 +199,7 @@ mod mcp_tests {
         let escape = query_sparql(
             QuerySparqlRequest {
                 query: TITLE_QUERY.to_string(),
-                files: Some("../outside.nt".to_string()),
+                files: Some(file_list(&["../outside.nt"])),
             },
             data_dir,
         )
@@ -180,10 +235,11 @@ mod mcp_tests {
     async fn upload_rdf_lands_in_uploads_and_becomes_queryable() -> anyhow::Result<()> {
         let dir = setup_data_dir()?;
         let data_dir = data_dir_arg(&dir);
+        let content = format!("{BOOK2_IRI} {DC_TITLE} \"The Semantic Web\" .\n");
 
-        let message = upload_rdf(
+        let upload = upload_rdf(
             UploadRdfRequest {
-                rdf_content: format!("{BOOK2_IRI} {DC_TITLE} \"The Semantic Web\" .\n"),
+                rdf_content: content.clone(),
                 graph_uri: Some("http://example.org/graphs/books".to_string()),
             },
             data_dir.clone(),
@@ -191,26 +247,24 @@ mod mcp_tests {
         .await
         .map_err(anyhow::Error::msg)?;
 
-        let relative = message
-            .rsplit_once(": ")
-            .map(|(_, path)| path.to_string())
-            .ok_or_else(|| anyhow::anyhow!("no path in upload response: {message}"))?;
         assert!(
-            relative.starts_with("uploads/graph_books_")
-                && Path::new(&relative).extension() == Some("ttl".as_ref()),
-            "unexpected upload path: {relative}"
+            upload.path.starts_with("uploads/graph_books_")
+                && Path::new(&upload.path).extension() == Some("ttl".as_ref()),
+            "unexpected upload path: {}",
+            upload.path
         );
-        assert!(dir.path().join(&relative).is_file());
+        assert_eq!(upload.bytes_written, content.len() as u64);
+        assert!(dir.path().join(&upload.path).is_file());
 
         // The upload is picked up by the scan, so a follow-up query sees it.
         assert_eq!(
             scan_data_directory(&data_dir)
                 .await
                 .map_err(anyhow::Error::msg)?,
-            vec!["book1.nt".to_string(), relative.clone()]
+            vec!["book1.nt".to_string(), upload.path.clone()]
         );
 
-        let results = query_sparql(
+        let response = query_sparql(
             QuerySparqlRequest {
                 query: TITLE_QUERY.to_string(),
                 files: None,
@@ -220,7 +274,7 @@ mod mcp_tests {
         .await
         .map_err(anyhow::Error::msg)?;
         assert_eq!(
-            titles(&results)?,
+            titles(&response.results.expect("SELECT returns results"))?,
             vec![
                 "\"SPARQL Tutorial\"".to_string(),
                 "\"The Semantic Web\"".to_string()
@@ -371,6 +425,16 @@ mod mcp_tests {
             .ok_or_else(|| anyhow::anyhow!("no mcp-session-id header in response:\n{response}"))
     }
 
+    /// Pull the JSON-RPC payload out of the SSE frame so assertions can run
+    /// against parsed values rather than substrings of the wire format.
+    fn sse_payload(response: &str) -> anyhow::Result<serde_json::Value> {
+        let frame = response
+            .lines()
+            .find_map(|line| line.strip_prefix("data: {"))
+            .ok_or_else(|| anyhow::anyhow!("no JSON-RPC data frame in response:\n{response}"))?;
+        Ok(serde_json::from_str(&format!("{{{frame}"))?)
+    }
+
     #[test]
     fn serve_mcp_answers_the_full_initialize_and_tool_call_handshake() -> anyhow::Result<()> {
         let dir = setup_data_dir()?;
@@ -385,11 +449,20 @@ mod mcp_tests {
             initialize.starts_with("HTTP/1.1 200"),
             "initialize failed:\n{initialize}"
         );
-        assert!(
-            initialize.contains("decisym-engine"),
-            "initialize did not report the server identity:\n{initialize}"
-        );
         let session = session_id(&initialize)?;
+
+        let init_result = &sse_payload(&initialize)?["result"];
+        assert_eq!(init_result["serverInfo"]["name"], "decisym-engine");
+        // The instructions field is the server's only whole-dataset channel;
+        // a generic restatement of the description wastes it.
+        let instructions = init_result["instructions"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("no instructions in initialize result"))?;
+        assert!(
+            instructions.contains("list_data_files") && instructions.contains("read-only"),
+            "instructions do not orient the client:\n{instructions}"
+        );
+        assert!(init_result["capabilities"]["prompts"].is_object());
 
         post_mcp(
             &server.address,
@@ -397,27 +470,74 @@ mod mcp_tests {
             r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
         )?;
 
-        let tools = post_mcp(
+        let tools_response = post_mcp(
             &server.address,
             Some(&session),
             r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#,
         )?;
+        let tools = sse_payload(&tools_response)?["result"]["tools"]
+            .as_array()
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("tools/list returned no array:\n{tools_response}"))?;
+        let named = |name: &str| -> Option<serde_json::Value> {
+            tools.iter().find(|t| t["name"] == name).cloned()
+        };
+
+        let query = named("query_sparql").ok_or_else(|| anyhow::anyhow!("no query_sparql tool"))?;
+        assert_eq!(query["title"], "Run SPARQL query");
+        assert_eq!(query["annotations"]["readOnlyHint"], true);
+        assert!(query["outputSchema"].is_object());
+        // A one-line description is the common under-description failure; this
+        // one has to carry when-to-use and when-not-to.
+        let description = query["description"].as_str().unwrap_or_default();
         assert!(
-            tools.contains("query_sparql") && tools.contains("upload_rdf"),
-            "tools/list is missing a tool:\n{tools}"
+            description.len() > 300
+                && description.contains("read-only")
+                && description.contains("upload_rdf"),
+            "query_sparql is under-described:\n{description}"
+        );
+
+        let upload = named("upload_rdf").ok_or_else(|| anyhow::anyhow!("no upload_rdf tool"))?;
+        assert_eq!(upload["annotations"]["readOnlyHint"], false);
+        assert_eq!(upload["annotations"]["destructiveHint"], false);
+
+        let list = named("list_data_files").ok_or_else(|| anyhow::anyhow!("no list tool"))?;
+        assert_eq!(list["annotations"]["readOnlyHint"], true);
+
+        let prompts_response = post_mcp(
+            &server.address,
+            Some(&session),
+            r#"{"jsonrpc":"2.0","id":3,"method":"prompts/list","params":{}}"#,
+        )?;
+        let prompts = sse_payload(&prompts_response)?["result"]["prompts"]
+            .as_array()
+            .cloned()
+            .ok_or_else(|| {
+                anyhow::anyhow!("prompts/list returned no array:\n{prompts_response}")
+            })?;
+        let prompt_names: Vec<&str> = prompts.iter().filter_map(|p| p["name"].as_str()).collect();
+        assert!(
+            prompt_names.contains(&"explore_dataset")
+                && prompt_names.contains(&"describe_resource"),
+            "unexpected prompts: {prompt_names:?}"
         );
 
         let call = post_mcp(
             &server.address,
             Some(&session),
             &format!(
-                r#"{{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{{"name":"query_sparql","arguments":{{"query":"{TITLE_QUERY}"}}}}}}"#
+                r#"{{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{{"name":"query_sparql","arguments":{{"query":"{TITLE_QUERY}"}}}}}}"#
             ),
         )?;
-        assert!(
-            call.contains("SPARQL Tutorial"),
-            "query_sparql did not return the expected binding:\n{call}"
+        // Structured content means the caller gets parsed bindings, not a
+        // JSON document smuggled inside a text block.
+        let structured = &sse_payload(&call)?["result"]["structuredContent"];
+        assert_eq!(structured["format"], "sparql-results-json");
+        assert_eq!(
+            structured["results"]["results"]["bindings"][0]["title"]["value"],
+            "SPARQL Tutorial"
         );
+        assert_eq!(structured["files_queried"][0], "book1.nt");
         Ok(())
     }
 }

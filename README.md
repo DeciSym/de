@@ -33,12 +33,6 @@ Install with server command enabled:
 cargo install --features server de
 ```
 
-Install with the MCP server enabled as well (`mcp` implies `server`):
-
-```sh
-cargo install --features mcp de
-```
-
 Install the CLI from a local clone:
 
 ```sh
@@ -108,20 +102,38 @@ With the `mcp` feature enabled, `serve` can expose the data directory to
 serving the SPARQL HTTP API:
 
 ```sh
-cargo run --features mcp -- serve --location ./data --bind localhost:7878 --mcp
+cargo run --features server -- serve --location ./data --bind localhost:7878 --mcp
 ```
 
 The Streamable HTTP transport is mounted at `/mcp` (so, above,
-`http://localhost:7878/mcp`) and offers two tools:
+`http://localhost:7878/mcp`).
 
-- `query_sparql` — run a SPARQL query over the RDF/HDT files in `--location`,
-  or over a comma-separated subset of them, and return SPARQL 1.1 JSON
-  results. File names are resolved inside the data directory; paths that
-  escape it are rejected.
-- `upload_rdf` — write Turtle content into the data directory's `uploads/`
-  subdirectory, where subsequent queries pick it up.
+### Tools
 
-The same service is available to downstream crates as a library:
+Every tool returns MCP structured content validated against a published
+output schema, and carries the behavior hints (`readOnlyHint`,
+`destructiveHint`, `idempotentHint`) clients use to decide what may run
+without asking.
+
+- `list_data_files` — report the data directory and the RDF files in it, as
+  the relative paths `query_sparql` accepts. Read-only.
+- `query_sparql` — run a SPARQL 1.1 query over the whole dataset, or over the
+  files named in `files`. SELECT and ASK come back as SPARQL 1.1 Results JSON
+  in `results`, CONSTRUCT and DESCRIBE as N-Triples in `graph`, discriminated
+  by `format`. File names resolve inside the data directory; absolute paths
+  and `..` are rejected. Read-only — SPARQL UPDATE is not supported.
+- `upload_rdf` — write Turtle into the data directory's `uploads/`
+  subdirectory, where the next query picks it up. Additive: existing files are
+  never edited or replaced.
+
+### Prompts
+
+- `explore_dataset` — survey an unfamiliar dataset: enumerate its files, then
+  probe the classes and predicates actually present.
+- `describe_resource` — retrieve every statement about one IRI, in both
+  directions.
+
+### As a library
 
 ```rust
 use de::mcp::McpService;
@@ -131,8 +143,15 @@ async fn serve_mcp(data_dir: String) -> anyhow::Result<()> {
 }
 ```
 
-Use `McpService::with_server_info` to report the embedding application's own
-name and version to clients during MCP initialization.
+- `with_server_info` reports the embedding application's own name, version,
+  and dataset instructions to clients during MCP initialization.
+- `with_allowed_hosts` sets the `Host` header allow-list. The transport
+  rejects unlisted hosts to blunt DNS rebinding, and `serve` can only infer
+  the authority from a named bind address — a wildcard bind such as
+  `0.0.0.0:1337` accepts loopback only until you name the externally
+  reachable hostnames here.
+- `with_max_request_body_bytes` caps inbound request bodies (32 MiB by
+  default, sized for inline Turtle uploads).
 
 ## Command Reference
 
