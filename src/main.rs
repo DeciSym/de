@@ -69,10 +69,14 @@ enum Commands {
         /// Host and port to listen to
         #[arg(short, long, default_value = "localhost:7878", value_hint = clap::ValueHint::Hostname)]
         bind: String,
-        /// Serve an MCP (Model Context Protocol) endpoint at /mcp instead of the SPARQL HTTP API.
-        /// Exposes the `query_sparql` and `upload_rdf` tools over the data in --location.
-        #[arg(long, action)]
-        mcp: bool,
+        /// Serve MCP (Model Context Protocol) instead of the SPARQL HTTP API, exposing the
+        /// `list_data_files`, `query_sparql` and `upload_rdf` tools over the data in --location.
+        ///
+        /// `--mcp` serves Streamable HTTP at /mcp on --bind. `--mcp stdio` speaks JSON-RPC on
+        /// stdin/stdout instead, for clients that launch the server as a subprocess; --bind is
+        /// unused in that mode.
+        #[arg(long, value_enum, num_args = 0..=1, default_missing_value = "http")]
+        mcp: Option<McpTransport>,
     },
     /// Use to view info about an HDT file
     View {
@@ -80,6 +84,17 @@ enum Commands {
         /// Path to HDT files
         data: Vec<String>,
     },
+}
+
+/// Transport `de serve --mcp` speaks.
+#[cfg(feature = "server")]
+#[derive(clap::ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum McpTransport {
+    /// Streamable HTTP, mounted at /mcp on --bind.
+    #[default]
+    Http,
+    /// JSON-RPC over stdin/stdout, for clients that launch the server as a subprocess.
+    Stdio,
 }
 
 #[tokio::main]
@@ -156,14 +171,19 @@ async fn run_command<W: Write>(
             location,
             bind,
             mcp,
-        } => {
-            if *mcp {
-                return de::mcp::McpService::new(location.to_owned())
+        } => match mcp {
+            Some(McpTransport::Http) => {
+                de::mcp::McpService::new(location.to_owned())
                     .serve(bind)
-                    .await;
+                    .await
             }
-            de::serve::serve(location.to_owned(), bind)
-        }
+            Some(McpTransport::Stdio) => {
+                de::mcp::McpService::new(location.to_owned())
+                    .serve_stdio()
+                    .await
+            }
+            None => de::serve::serve(location.to_owned(), bind),
+        },
     }
 }
 

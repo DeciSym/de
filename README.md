@@ -108,6 +108,21 @@ cargo run --features server -- serve --location ./data --bind localhost:7878 --m
 The Streamable HTTP transport is mounted at `/mcp` (so, above,
 `http://localhost:7878/mcp`).
 
+### Transports
+
+`--mcp` serves Streamable HTTP on `--bind`. `--mcp stdio` speaks
+newline-delimited JSON-RPC on stdin/stdout instead, for clients that launch
+the server as a subprocess rather than connecting to a URL:
+
+```sh
+de serve --mcp stdio --location ./data
+```
+
+Use stdio for local desktop clients — several accept only HTTPS for remote
+endpoints, which rules out a plain-HTTP localhost URL. `--bind` is unused in
+this mode, and nothing may write to stdout while it runs: stdout is the
+protocol channel, and diagnostics go to stderr.
+
 ### Tools
 
 Every tool returns MCP structured content validated against a published

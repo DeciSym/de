@@ -184,6 +184,41 @@ impl McpService {
         self.serve(&format!("0.0.0.0:{port}")).await
     }
 
+    /// Serve MCP over stdio, speaking newline-delimited JSON-RPC on this
+    /// process's standard input and output.
+    ///
+    /// This is the transport local MCP clients launch a server subprocess
+    /// with — Claude Desktop among them, which accepts only HTTPS for remote
+    /// endpoints and so cannot reach the plain-HTTP transport at all.
+    ///
+    /// Runs until the client closes stdin.
+    ///
+    /// # Stdout is the protocol channel
+    ///
+    /// Nothing else may write to stdout for the lifetime of the call —
+    /// a stray `println!` corrupts the JSON-RPC stream and the client drops
+    /// the connection. Diagnostics belong on stderr, which the client
+    /// captures to its own logs.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the initialization handshake fails or the
+    /// transport breaks while running.
+    pub async fn serve_stdio(self) -> anyhow::Result<()> {
+        log::info!("Data directory: {}", self.data_dir);
+        log::info!("Serving MCP over stdio");
+
+        // The free function rather than `ServiceExt::serve`, whose name this
+        // type's own `serve` shadows.
+        rmcp::serve_server(self, rmcp::transport::stdio())
+            .await
+            .context("MCP stdio handshake failed")?
+            .waiting()
+            .await
+            .context("MCP stdio server failed")?;
+        Ok(())
+    }
+
     /// Start the MCP server bound to `bind` (a `host:port` pair), serving the
     /// Streamable HTTP transport at [`MCP_ENDPOINT_PATH`].
     ///

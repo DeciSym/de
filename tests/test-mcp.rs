@@ -313,6 +313,84 @@ mod mcp_tests {
         );
     }
 
+    /// Drive `de serve --mcp stdio` the way a client that launches the server
+    /// as a subprocess does: newline-delimited JSON-RPC in on stdin, the same
+    /// out on stdout. Claude Desktop takes this path because it accepts only
+    /// HTTPS for remote endpoints and so cannot reach the HTTP transport.
+    #[test]
+    fn serve_mcp_stdio_answers_over_pipes() -> anyhow::Result<()> {
+        let dir = setup_data_dir()?;
+
+        let mut child = Command::new(env!("CARGO_BIN_EXE_de"))
+            .args([
+                "serve",
+                "--mcp",
+                "stdio",
+                "--location",
+                &dir.path().to_string_lossy(),
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()?;
+
+        let requests = [
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"pipe-test","version":"1.0.0"}}}"#.to_string(),
+            r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#.to_string(),
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#.to_string(),
+            format!(
+                r#"{{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{{"name":"query_sparql","arguments":{{"query":"{TITLE_QUERY}"}}}}}}"#
+            ),
+        ];
+        {
+            let mut stdin = child.stdin.take().expect("piped stdin");
+            for request in &requests {
+                writeln!(stdin, "{request}")?;
+            }
+            // Dropping stdin closes it, which is how the client signals
+            // shutdown — the server drains what it has, then exits.
+        }
+
+        let output = child.wait_with_output()?;
+        let mut replies = std::collections::HashMap::new();
+        for line in String::from_utf8_lossy(&output.stdout).lines() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let message: serde_json::Value = serde_json::from_str(line)
+                .map_err(|e| anyhow::anyhow!("non-JSON line on stdout: {line}: {e}"))?;
+            if let Some(id) = message["id"].as_u64() {
+                replies.insert(id, message);
+            }
+        }
+
+        let initialize = replies
+            .get(&1)
+            .ok_or_else(|| anyhow::anyhow!("no initialize reply"))?;
+        assert_eq!(initialize["result"]["serverInfo"]["name"], "decisym-engine");
+
+        let tools = replies
+            .get(&2)
+            .ok_or_else(|| anyhow::anyhow!("no tools/list reply"))?["result"]["tools"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
+        assert!(
+            names.contains(&"list_data_files") && names.contains(&"query_sparql"),
+            "unexpected tools over stdio: {names:?}"
+        );
+
+        let call = replies
+            .get(&3)
+            .ok_or_else(|| anyhow::anyhow!("no tools/call reply"))?;
+        assert_eq!(
+            call["result"]["structuredContent"]["results"]["results"]["bindings"][0]["title"]["value"],
+            "SPARQL Tutorial"
+        );
+        Ok(())
+    }
+
     /// Kills the spawned `de serve --mcp` process when the test ends, however
     /// it ends.
     struct ServerProcess {
