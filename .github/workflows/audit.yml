@@ -1,9 +1,11 @@
 name: Security Audit
 
+# No `schedule:` here on purpose -- see the note in test_build.yml. The weekly
+# audit is driven by nightly.yml, which calls this workflow.
 on:
   push:
-  schedule:
-    - cron: '0 0 * * SAT'
+  workflow_dispatch:
+  workflow_call:
 
 jobs:
   audit:

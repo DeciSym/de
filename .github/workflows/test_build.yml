@@ -1,10 +1,29 @@
 name: Build and Test
 
-on: 
-  schedule:
-    - cron: '0 0 * * SAT'
+# NOTE: deliberately no `schedule:` trigger here. GitHub auto-disables
+# scheduled workflows in public repos after ~60 days of repository inactivity,
+# and that disables *every* trigger on the workflow, not just the cron -- which
+# is exactly how branch/PR CI went silent between 2026-08 and 2026-09. Keeping
+# this file cron-free means the merge-gating checks can never be switched off
+# behind our backs. The weekly nightly-toolchain run lives in nightly.yml and
+# calls back into this workflow via `workflow_call`.
+on:
   push:
-
+  workflow_dispatch:
+    inputs:
+      toolchain:
+        description: Rust toolchain to build and test with
+        type: choice
+        options:
+          - stable
+          - nightly
+        default: stable
+  workflow_call:
+    inputs:
+      toolchain:
+        description: Rust toolchain to build and test with
+        type: string
+        default: stable
 
 env:
   CARGO_TERM_COLOR: always
@@ -19,7 +38,7 @@ jobs:
 
     - uses: actions-rust-lang/setup-rust-toolchain@v1
       with:
-        toolchain: ${{ github.event.schedule == '' && 'stable' || 'nightly' }}
+        toolchain: ${{ inputs.toolchain || 'stable' }}
         cache: false
 
     - uses: Swatinem/rust-cache@v2
@@ -38,7 +57,7 @@ jobs:
         submodules: recursive
     - uses: actions-rust-lang/setup-rust-toolchain@v1
       with:
-        toolchain: ${{ github.event.schedule == '' && 'stable' || 'nightly' }}
+        toolchain: ${{ inputs.toolchain || 'stable' }}
         cache: false
     - uses: Swatinem/rust-cache@v2
       with:
@@ -57,7 +76,7 @@ jobs:
         submodules: recursive
     - uses: actions-rust-lang/setup-rust-toolchain@v1
       with:
-        toolchain: ${{ github.event.schedule == '' && 'stable' || 'nightly' }}
+        toolchain: ${{ inputs.toolchain || 'stable' }}
         cache: false
     - uses: Swatinem/rust-cache@v2
       with:
@@ -76,7 +95,7 @@ jobs:
         submodules: recursive
     - uses: actions-rust-lang/setup-rust-toolchain@v1
       with:
-        toolchain: ${{ github.event.schedule == '' && 'stable' || 'nightly' }}
+        toolchain: ${{ inputs.toolchain || 'stable' }}
         cache: false
     - uses: Swatinem/rust-cache@v2
       with:
@@ -99,7 +118,7 @@ jobs:
         submodules: recursive
     - uses: actions-rust-lang/setup-rust-toolchain@v1
       with:
-        toolchain: ${{ github.event.schedule == '' && 'stable' || 'nightly' }}
+        toolchain: ${{ inputs.toolchain || 'stable' }}
         cache: false
     - uses: Swatinem/rust-cache@v2
       with:

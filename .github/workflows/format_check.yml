@@ -1,6 +1,8 @@
 name: Rustfmt Check
 
-on: [push]
+on:
+  push:
+  workflow_dispatch:
 
 jobs:
   formatting:
