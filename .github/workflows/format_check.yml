@@ -1,13 +1,15 @@
 name: Rustfmt Check
 
-on: [push]
+on:
+  push:
+  workflow_dispatch:
 
 jobs:
   formatting:
     name: cargo fmt
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
       # Ensure rustfmt is installed and setup problem matcher

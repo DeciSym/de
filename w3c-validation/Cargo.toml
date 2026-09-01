@@ -13,6 +13,6 @@ de = { path = "..", default-features = false }
 futures = "0.3"
 oxrdf = "0.3"
 oxrdfio = "0.2"
-reasonable = "0.4.0"
+reasonable = "0.4.4"
 sparesults = "0.3"
 spargebra = "0.4"

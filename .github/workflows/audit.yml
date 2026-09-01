@@ -1,15 +1,17 @@
 name: Security Audit
 
+# No `schedule:` here on purpose -- see the note in test_build.yml. The weekly
+# audit is driven by nightly.yml, which calls this workflow.
 on:
   push:
-  schedule:
-    - cron: '0 0 * * SAT'
+  workflow_dispatch:
+  workflow_call:
 
 jobs:
   audit:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
       - uses: rustsec/audit-check@v2.0.0

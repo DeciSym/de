@@ -1,0 +1,23 @@
+name: Nightly
+
+# This is the only workflow in the repo that carries a `schedule:` trigger, and
+# it holds no logic of its own -- it just re-runs the real workflows against the
+# nightly toolchain. GitHub auto-disables scheduled workflows in public repos
+# after ~60 days of repository inactivity, and that kills every trigger on the
+# workflow, not just the cron. Quarantining the cron here means the worst case
+# is losing the weekly canary; push CI and the merge-gating checks in
+# test_build.yml / format_check.yml keep running regardless.
+on:
+  schedule:
+    - cron: '0 0 * * SAT'
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    name: nightly toolchain
+    uses: ./.github/workflows/test_build.yml
+    with:
+      toolchain: nightly
+
+  audit:
+    uses: ./.github/workflows/audit.yml
