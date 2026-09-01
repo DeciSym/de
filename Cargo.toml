@@ -32,7 +32,7 @@ clap-verbosity-flag = { version = "3.0", default-features = false, features = ["
 env_logger = { version = "0.11", default-features = false }
 exitcode = "1.1"
 flate2 = "1"
-hdt = { version = "0.5.0", default-features = false, features = ["nt", "cache"] }
+hdt = { version = "0.7.3", default-features = false, features = ["nt", "cache"] }
 http = { version = "1.4", optional = true }
 log = "0.4"
 oxhttp = { version = "0.3", optional=true }
@@ -75,9 +75,12 @@ default = []
 server = ["dep:oxhttp", "dep:http"]
 
 [patch.crates-io]
-spareval = { git = "https://github.com/DeciSym/oxigraph.git", rev = "41f06ccc28650ebed22cc8354964972f3a817006" }
-sparopt = { git = "https://github.com/DeciSym/oxigraph.git", rev = "41f06ccc28650ebed22cc8354964972f3a817006" }
-spargebra = { git = "https://github.com/DeciSym/oxigraph.git", rev = "41f06ccc28650ebed22cc8354964972f3a817006" }
+spareval = { git = "https://github.com/DeciSym/oxigraph.git", rev = "ed7335a2bc224c4fd71b7e6dfe7ce93a96485115" }
+sparopt = { git = "https://github.com/DeciSym/oxigraph.git", rev = "ed7335a2bc224c4fd71b7e6dfe7ce93a96485115" }
+spargebra = { git = "https://github.com/DeciSym/oxigraph.git", rev = "ed7335a2bc224c4fd71b7e6dfe7ce93a96485115" }
+sparesults = { git = "https://github.com/DeciSym/oxigraph.git", rev = "ed7335a2bc224c4fd71b7e6dfe7ce93a96485115" }
+oxrdfxml = { git = "https://github.com/DeciSym/oxigraph.git", rev = "ed7335a2bc224c4fd71b7e6dfe7ce93a96485115" }
 lasso = { git = "https://github.com/DeciSym/lasso.git", rev = "8fbbb1a229b7f1d49920233cdf01177a5bef180c" }
-hdt = { git = "https://github.com/DeciSym/hdt.git", rev = "976106b513b90d69750f9c6e41120ea4dff801f9" }
+reasonable = { git = "https://github.com/DeciSym/reasonable.git", rev = "c961cfc1c45a09b218d8910c387b8c5c4ef3df03" }
+hdt = { git = "https://github.com/DeciSym/hdt.git", rev = "919c725fd5f0e42662f9e3824e3f96d86baa8bb4" }
 
