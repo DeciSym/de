@@ -112,13 +112,7 @@ pub async fn do_create_with_options(
 /// for a freshly-overwritten HDT.
 pub fn write_hdt_to_path(hdt: &hdt::Hdt, path: &Path) -> anyhow::Result<()> {
     if let (Some(parent), Some(file_name)) = (
-        path.parent().and_then(|p| {
-            if p.as_os_str().is_empty() {
-                None
-            } else {
-                Some(p)
-            }
-        }),
+        path.parent().filter(|&p| !p.as_os_str().is_empty()),
         path.file_name().and_then(|n| n.to_str()),
     ) {
         let stale_prefix = format!("{file_name}.index.");

@@ -87,7 +87,7 @@ impl Rdf2Nt for OxRdfConvert {
             let source_reader = open_rdf_reader(path)
                 .map_err(|e| anyhow::anyhow!("Error opening file {file:?}: {e:?}"))?;
 
-            debug!("converting {} to nt format", &file);
+            debug!("converting {file} to nt format");
 
             let mut serializer =
                 RdfSerializer::from_format(NTriples).for_writer(dest_writer.by_ref());
