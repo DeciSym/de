@@ -13,6 +13,9 @@ repository = "https://github.com/DeciSym/de"
 default-run = "de"
 keywords = ["hdt", "rdf", "semantic-web", "triple-store", "sparql"]
 categories = ["command-line-utilities"]
+# The trainmarks benchmark submodule is a separate repo of fixtures and
+# harnesses for other engines; it has no place in the published crate.
+exclude = ["benches/trainmarks"]
 
 [[bin]]
 name = "de"
@@ -20,7 +23,7 @@ path = "src/main.rs"
 bench = false
 
 [[bench]]
-name = "benchmark"
+name = "trainmarks"
 harness = false
 
 [dependencies]

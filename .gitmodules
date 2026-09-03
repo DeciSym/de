@@ -4,3 +4,6 @@
 [submodule "w3c-validation/rdf-tests"]
 	path = w3c-validation/rdf-tests
 	url = https://github.com/w3c/rdf-tests
+[submodule "benches/trainmarks"]
+	path = benches/trainmarks
+	url = https://github.com/DeciSym/trainmarks.git

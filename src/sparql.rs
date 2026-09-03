@@ -762,9 +762,11 @@ fn evaluate_query_with_debug_plan<'a, D>(
 where
     D: QueryableDataset<'a>,
 {
-    // Keep optimizer disabled for all execution paths: this matches current upstream patch behavior
-    // used to pass W3C suites in this repository and avoids optimizer-specific regressions.
-    let evaluator = QueryEvaluator::new().without_optimizations();
+    // NOTE: previously this ran .without_optimizations() in order to pass W3C suites, but is no
+    // longer needed with current spareval revision. With optimizations, query responses are
+    // significantly reduced.
+    // TODO: monitor for optimizer-specific regressions, perhaps introducing toggle
+    let evaluator = QueryEvaluator::new();
     if debug_plan {
         let (results, explanation) = evaluator.prepare(parsed).explain(dataset);
         let mut json = Vec::new();

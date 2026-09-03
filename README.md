@@ -135,3 +135,49 @@ Run W3C RDF/SPARQL integration tests:
 ```sh
 cargo test --all-features --test w3c-sparql
 ```
+
+## Benchmarks
+
+The `trainmarks` criterion suite covers `create` and `query` over the synthetic
+e-commerce graph from [trainmarks](https://github.com/DeciSym/trainmarks),
+checked out as a submodule at `benches/trainmarks`. It exists to catch
+performance regressions at a realistic dataset size, not to compare `de`
+against other engines.
+
+It measures four things: building an HDT from N-Triples, building one from
+Turtle (the only path that runs the RDF parser), the five queries against a
+prebuilt HDT, and one query given a Turtle file directly, which `de` converts
+to a temporary package before evaluating.
+
+`make bench` first checks out the submodule and generates the fixtures the
+suite reads:
+
+```sh
+make bench
+```
+
+The dataset scale is `BENCH_SCALE` — `medium` (~100K triples), `large` (~1M,
+the default) or `xlarge` (~10M):
+
+```sh
+BENCH_SCALE=medium make bench
+```
+
+`make bench` passes the scale through to the suite as `DE_BENCH_SCALE`, which
+is also what to set when driving `cargo bench` directly. The fixtures and the
+benchmark must agree on it, since the scale is part of every benchmark id
+(`trainmarks_query/large/q3_join_3_entities`) and criterion compares each run
+against the stored baseline for that id:
+
+```sh
+make bench-init                          # once, to lay down the fixtures
+DE_BENCH_SCALE=large cargo bench --bench trainmarks
+DE_BENCH_SCALE=large cargo bench --bench trainmarks -- q3_join_3_entities
+```
+
+Without the fixtures the suite prints how to get them and measures nothing, so
+`cargo bench` still works on a fresh clone.
+
+The queries are trainmarks' own `q1`–`q5`, shared verbatim with the other
+engines in that report. `q6_delete_insert` is omitted: it is a SPARQL Update,
+and HDT packages are immutable.

@@ -1,6 +1,9 @@
 HUB ?= decisym
 TAG ?= latest
 VERSION ?= 0.0.0-test
+# Dataset scale for the trainmarks benchmarks: medium (~100K triples),
+# large (~1M) or xlarge (~10M). Must match DE_BENCH_SCALE at bench time.
+BENCH_SCALE ?= large
 
 init:
 	scripts/download-sample-bench.sh
@@ -21,8 +24,15 @@ test: init
 
 presubmit: lint test
 
-bench: init
-	cargo bench
+# Check out the trainmarks submodule and generate the N-Triples and Turtle
+# fixtures the trainmarks bench target reads. Split out from `init` because
+# they are ~150 MB at the default scale and only the benchmarks need them.
+bench-init: init
+	git submodule update --init benches/trainmarks
+	python3 scripts/gen-trainmarks-data.py $(BENCH_SCALE)
+
+bench: bench-init
+	DE_BENCH_SCALE=$(BENCH_SCALE) cargo bench
 
 build:
 	cargo build --features=server
