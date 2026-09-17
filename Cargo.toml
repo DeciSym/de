@@ -14,9 +14,9 @@ default-run = "de"
 keywords = ["hdt", "rdf", "semantic-web", "triple-store", "sparql"]
 categories = ["command-line-utilities"]
 # Benchmark fixtures: the trainmarks submodule is a separate repo of fixtures
-# and harnesses for other engines, and the WatDiv directory holds downloaded
-# datasets. None of it belongs in the published crate.
-exclude = ["benches/trainmarks", "benches/watdiv"]
+# and harnesses for other engines, and the WatDiv and BSBM directories hold
+# downloaded/generated datasets. None of it belongs in the published crate.
+exclude = ["benches/trainmarks", "benches/watdiv", "benches/bsbm"]
 
 [[bin]]
 name = "de"
@@ -29,6 +29,10 @@ harness = false
 
 [[bench]]
 name = "watdiv"
+harness = false
+
+[[bench]]
+name = "bsbm"
 harness = false
 
 [dependencies]

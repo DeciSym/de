@@ -1,24 +1,27 @@
 // Copyright (c) 2025, Decisym, LLC
 // Licensed under the BSD 3-Clause License (see LICENSE file in the project root).
 
-//! `WatDiv` query benchmarks through `de::query::do_query`.
+//! `WatDiv` query benchmarks over an HDT package.
 //!
-//! The workload is the one Comunica runs for its own HDT engine
-//! (`performance/benchmark-watdiv-hdt`): a published `dataset.hdt` and twenty
-//! query templates with five parameterised instances each. One iteration
-//! answers all five instances of a template with a single `do_query` call,
-//! which is what `de query` does with the five as `--sparql` files: open the
-//! package, parse the queries, evaluate them and serialise the results, here
-//! into a sink.
+//! This is the Rust equivalent of Comunica's `performance/benchmark-watdiv-hdt`.
+//! Comunica drives `WatDiv` through jbr, which stands up a SPARQL endpoint and
+//! measures it over HTTP; `de` has no such indirection, so the workload — the
+//! same published `dataset.hdt` and the same twenty templates with five
+//! instances each — is measured in process instead.
 //!
-//! Opening and parsing are therefore on the measured path. That is noise
-//! against the complex templates (C3 takes seconds), but most of the lightest:
-//! on a laptop, S7 takes about half a millisecond this way, against tens of
-//! microseconds to evaluate. The light templates track the fixed cost of a query more than
-//! evaluation; the complex ones track evaluation, and C3 in particular tracks
-//! join order.
+//! It is measured two ways:
 //!
-//! The twenty templates come in four families:
+//! * `watdiv_do_query/<scale>` answers each template's five instances with one
+//!   `de::query::do_query` call, as `de query` would: open the package, parse
+//!   the queries, evaluate them and serialise the results. This is the group CI
+//!   compares across commits, because every commit since the target was added
+//!   can run it.
+//! * `watdiv_query/<scale>` times planning, evaluation and serialisation alone,
+//!   over a package opened and queries parsed beforehand, and
+//!   `watdiv_open/<scale>` times opening alone. These use APIs this branch adds.
+//!
+//! The twenty templates come in four families, and they are worth keeping
+//! separate because they stress different things:
 //!
 //! * `C1`–`C3` — complex: long star-and-path mixtures, the ones where join
 //!   order decides whether the query takes a millisecond or a second.
@@ -35,15 +38,18 @@
 //! (~10M triples). Comunica runs both, as `benchmark-watdiv-hdt` and
 //! `benchmark-watdiv-hdt-100`.
 
+mod common;
+
+use common::{benches_dir, null_writer, parse_instances, run_instances, split_query_instances};
 use criterion::{Criterion, criterion_group, criterion_main};
-use de::query;
+use de::query::{self, DeOutput};
+use de::sparql::AggregateHdt;
 #[cfg(target_os = "linux")]
 use pprof::criterion::{Output, PProfProfiler};
-use std::{
-    io::{BufWriter, Sink, sink},
-    path::{Path, PathBuf},
-    time::Duration,
-};
+use spargebra::Query;
+use std::io::{BufWriter, Sink};
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 use tempfile::tempdir;
 
 /// The twenty `WatDiv` templates, in family order.
@@ -55,39 +61,55 @@ const TEMPLATES: [&str; 20] = [
 const SCALE_VAR: &str = "DE_WATDIV_SCALE";
 const DEFAULT_SCALE: &str = "10";
 
-/// Results go to a sink, as in `benches/trainmarks.rs`: serialisation still
-/// runs, but the write syscall that would follow isn't part of what is tracked.
-fn null_writer() -> BufWriter<Sink> {
-    BufWriter::new(sink())
-}
-
 fn fixture_dir(scale: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("benches")
-        .join("watdiv")
-        .join(scale)
+    benches_dir().join("watdiv").join(scale)
 }
 
-/// Split a `WatDiv` template file into its query instances, which are separated
-/// by blank lines.
-fn split_query_instances(text: &str) -> Vec<String> {
-    let mut instances = Vec::new();
-    let mut current = String::new();
-    for line in text.lines() {
-        if line.trim().is_empty() {
-            if !current.trim().is_empty() {
-                instances.push(std::mem::take(&mut current));
-            }
-            current.clear();
-        } else {
-            current.push_str(line);
-            current.push('\n');
-        }
+/// The scale to run, and its package and query directory, or `None` (after
+/// saying how to get them) when the fixtures are missing.
+fn fixtures() -> Option<(String, PathBuf, PathBuf)> {
+    let scale = std::env::var(SCALE_VAR).unwrap_or_else(|_| DEFAULT_SCALE.to_string());
+    let dir = fixture_dir(&scale);
+    let hdt = dir.join("dataset.hdt");
+    let queries_dir = dir.join("queries");
+    if let Some(missing) = [&hdt, &queries_dir]
+        .into_iter()
+        .find(|path| !path.exists())
+    {
+        eprintln!(
+            "skipping WatDiv benchmarks: {} is missing.\n\
+             run `make bench-watdiv` (or `WATDIV_SCALE={scale} make bench-watdiv`) to download \
+             the fixtures.",
+            missing.display(),
+        );
+        return None;
     }
-    if !current.trim().is_empty() {
-        instances.push(current);
-    }
+    Some((scale, hdt, queries_dir))
+}
+
+/// Read one template file's instances.
+fn read_instances(queries_dir: &Path, template: &str) -> Vec<String> {
+    let path = queries_dir.join(format!("{template}.txt"));
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()));
+    let instances = split_query_instances(&text);
+    assert!(
+        !instances.is_empty(),
+        "{} contains no queries",
+        path.display()
+    );
     instances
+}
+
+/// Load every template's instances, parsed and ready to evaluate.
+fn load_workload(queries_dir: &Path) -> Vec<(&'static str, Vec<Query>)> {
+    TEMPLATES
+        .iter()
+        .map(|template| {
+            let instances = read_instances(queries_dir, template);
+            (*template, parse_instances(template, &instances))
+        })
+        .collect()
 }
 
 /// Write every template's instances to `.rq` files under `dir`, since
@@ -96,16 +118,7 @@ fn write_instances(queries_dir: &Path, dir: &Path) -> Vec<(&'static str, Vec<Str
     TEMPLATES
         .iter()
         .map(|template| {
-            let path = queries_dir.join(format!("{template}.txt"));
-            let text = std::fs::read_to_string(&path)
-                .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()));
-            let instances = split_query_instances(&text);
-            assert!(
-                !instances.is_empty(),
-                "{} contains no queries",
-                path.display()
-            );
-            let files = instances
+            let files = read_instances(queries_dir, template)
                 .iter()
                 .enumerate()
                 .map(|(i, instance)| {
@@ -123,7 +136,7 @@ fn write_instances(queries_dir: &Path, dir: &Path) -> Vec<(&'static str, Vec<Str
 }
 
 /// Answer `query_files` over `data_files` with one `do_query` call.
-fn run(
+fn run_do_query(
     runtime: &tokio::runtime::Runtime,
     data_files: &[String],
     query_files: &[String],
@@ -134,7 +147,7 @@ fn run(
             data_files,
             query_files,
             query::EntailmentMode::Off,
-            &query::DeOutput::CSV,
+            &DeOutput::CSV,
             writer,
         )
         .await
@@ -142,21 +155,10 @@ fn run(
     });
 }
 
-fn watdiv(c: &mut Criterion) {
-    let scale = std::env::var(SCALE_VAR).unwrap_or_else(|_| DEFAULT_SCALE.to_string());
-    let dir = fixture_dir(&scale);
-    let hdt = dir.join("dataset.hdt");
-    let queries_dir = dir.join("queries");
-
-    if let Some(missing) = [&hdt, &queries_dir].into_iter().find(|path| !path.exists()) {
-        eprintln!(
-            "skipping WatDiv benchmarks: {} is missing.\n\
-             run `make bench-watdiv` (or `WATDIV_SCALE={scale} make bench-watdiv`) to download \
-             the fixtures.",
-            missing.display(),
-        );
+fn watdiv_do_query(c: &mut Criterion) {
+    let Some((scale, hdt, queries_dir)) = fixtures() else {
         return;
-    }
+    };
     let data_files = vec![
         hdt.to_str()
             .expect("WatDiv fixture path must be valid UTF-8")
@@ -174,7 +176,7 @@ fn watdiv(c: &mut Criterion) {
     // sidecar and faults the file in. Both are one-off costs that would
     // otherwise land on whichever template runs first, including when `cargo
     // bench -- <filter>` runs only one of them.
-    run(
+    run_do_query(
         &runtime,
         &data_files,
         &workload[0].1[..1],
@@ -187,7 +189,7 @@ fn watdiv(c: &mut Criterion) {
     for (template, query_files) in &workload {
         group.bench_function(*template, |b| {
             let mut writer = null_writer();
-            b.iter(|| run(&runtime, &data_files, query_files, &mut writer));
+            b.iter(|| run_do_query(&runtime, &data_files, query_files, &mut writer));
         });
     }
     group.finish();
@@ -197,20 +199,83 @@ fn watdiv(c: &mut Criterion) {
         .expect("failed to clean up the query instances");
 }
 
+fn watdiv(c: &mut Criterion) {
+    let Some((scale, hdt, queries_dir)) = fixtures() else {
+        return;
+    };
+    let hdt_path = hdt
+        .to_str()
+        .expect("WatDiv fixture path must be valid UTF-8")
+        .to_string();
+    let store = AggregateHdt::new(std::slice::from_ref(&hdt_path))
+        .expect("failed to register the WatDiv HDT package");
+
+    // The first open of a package builds its `.index.v5-rust-cache` sidecar and
+    // faults the file in. Both are one-off costs that would otherwise land on
+    // whichever group happens to run first, including when `cargo bench --
+    // <filter>` runs only one of them.
+    drop(
+        store
+            .get_snapshot(None)
+            .expect("failed to warm the WatDiv HDT index"),
+    );
+
+    bench_open(c, &scale, &store);
+
+    let snapshot = store
+        .get_snapshot(None)
+        .expect("failed to open the WatDiv HDT package");
+    let workload = load_workload(&queries_dir);
+
+    let mut group = c.benchmark_group(format!("watdiv_query/{scale}"));
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(10));
+    for (template, queries) in &workload {
+        group.bench_function(*template, |b| {
+            let mut writer = null_writer();
+            b.iter(|| {
+                run_instances(template, queries, &snapshot, &DeOutput::CSV, &mut writer);
+            });
+        });
+    }
+    group.finish();
+}
+
+/// Time `get_snapshot` on its own.
+///
+/// This is the per-request cost the server pays today, because `serve` builds a
+/// fresh snapshot for every query. It is tracked separately so that the effect
+/// of caching HDT handles is visible without disturbing the query numbers.
+fn bench_open(c: &mut Criterion, scale: &str, store: &AggregateHdt) {
+    let mut group = c.benchmark_group(format!("watdiv_open/{scale}"));
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(10));
+    group.bench_function("get_snapshot", |b| {
+        b.iter(|| {
+            drop(
+                store
+                    .get_snapshot(None)
+                    .expect("failed to open the WatDiv HDT package"),
+            );
+        });
+    });
+    group.finish();
+}
+
 #[cfg(target_os = "linux")]
 criterion_group! {
     name = benches;
     config = Criterion::default()
         .with_profiler(PProfProfiler::new(100, Output::Protobuf))
         .warm_up_time(Duration::from_millis(500));
-    targets = watdiv
+    targets = watdiv_do_query, watdiv
 }
 
 #[cfg(not(target_os = "linux"))]
 criterion_group! {
     name = benches;
     config = Criterion::default().warm_up_time(Duration::from_millis(500));
-    targets = watdiv
+    targets = watdiv_do_query, watdiv
 }
 
 criterion_main!(benches);

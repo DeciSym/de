@@ -6,7 +6,6 @@ use spargebra::{Query, SparqlParser};
 use std::{
     collections::{HashMap, HashSet},
     io::{Error, ErrorKind},
-    iter,
     path::{Path, PathBuf},
     str::FromStr,
     sync::{Arc, RwLock},
@@ -48,15 +47,116 @@ pub struct AggregateHdt {
     named_graphs: Option<HashSet<String>>,
 }
 
+/// The loaded graphs a query runs against, with the per-query lookups already
+/// resolved.
+///
+/// `spareval` calls `internal_quads_for_pattern` once per binding of the outer
+/// pattern in a nested-loop join, so anything this type recomputes per call is
+/// multiplied by the size of the intermediate result. Graph selection and the
+/// `Arc<str>` form of each graph IRI are therefore resolved once here, at
+/// snapshot time, rather than on every probe.
 pub struct AggregateHdtSnapshot {
-    // Map graph names (URIs) to HDT instances. Each value can be either the
+    // The loaded graphs, in a stable order. Each entry can be either the
     // hybrid (mmap+cache) or fully in-memory backend; HdtAny picks the right
     // one per file (see hdt::HdtAny::open).
-    pub hdts: HashMap<String, hdt::HdtAny>,
-    // Optional explicit default graph membership. If None, all loaded graphs are used as default.
-    pub default_graphs: Option<HashSet<String>>,
-    // Optional explicit named graph membership. If None, all loaded graphs are named.
-    pub named_graphs: Option<HashSet<String>>,
+    graphs: Vec<LoadedGraph>,
+    // Indices into `graphs` that make up the default graph: the explicitly
+    // configured membership when there is one, else every loaded graph.
+    default_graph: Box<[usize]>,
+    // Indices into `graphs` that are visible as named graphs, under the same
+    // rule.
+    named_graph: Box<[usize]>,
+    // Graph IRI to index, for resolving a GRAPH <iri> pattern.
+    by_iri: HashMap<Arc<str>, usize>,
+}
+
+/// One loaded graph, with its IRI pre-wrapped so that yielding it with a quad
+/// is a refcount increment rather than an allocation.
+struct LoadedGraph {
+    iri: Arc<str>,
+    hdt: hdt::HdtAny,
+}
+
+/// Which graphs one `internal_quads_for_pattern` call has to visit.
+///
+/// Borrowed from the snapshot rather than collected, so that the common cases
+/// -- the default graph, or one named graph -- allocate nothing per call.
+#[derive(Clone, Copy)]
+enum GraphSelection<'a> {
+    /// Every graph at these indices, in order.
+    Many(&'a [usize]),
+    /// Exactly one graph.
+    One(usize),
+    /// No graph matches; the pattern yields nothing.
+    Empty,
+}
+
+impl GraphSelection<'_> {
+    fn get(self, position: usize) -> Option<usize> {
+        match self {
+            Self::Many(indices) => indices.get(position).copied(),
+            Self::One(index) if position == 0 => Some(index),
+            Self::One(_) | Self::Empty => None,
+        }
+    }
+}
+
+impl AggregateHdtSnapshot {
+    /// Build a snapshot from loaded graphs and the configured memberships.
+    ///
+    /// `default_graphs` and `named_graphs` are `None` when the dataset was
+    /// discovered from the filesystem, which means "every loaded graph".
+    fn new(
+        loaded: Vec<(String, hdt::HdtAny)>,
+        default_graphs: Option<&HashSet<String>>,
+        named_graphs: Option<&HashSet<String>>,
+    ) -> Self {
+        let graphs: Vec<LoadedGraph> = loaded
+            .into_iter()
+            .map(|(iri, hdt)| LoadedGraph {
+                iri: Arc::from(iri),
+                hdt,
+            })
+            .collect();
+        let select = |members: Option<&HashSet<String>>| -> Box<[usize]> {
+            graphs
+                .iter()
+                .enumerate()
+                .filter(|(_, graph)| members.is_none_or(|m| m.contains(graph.iri.as_ref())))
+                .map(|(index, _)| index)
+                .collect()
+        };
+        let default_graph = select(default_graphs);
+        let named_graph = select(named_graphs);
+        let by_iri = graphs
+            .iter()
+            .enumerate()
+            .map(|(index, graph)| (Arc::clone(&graph.iri), index))
+            .collect();
+        Self {
+            graphs,
+            default_graph,
+            named_graph,
+            by_iri,
+        }
+    }
+
+    /// The graphs a pattern with this `graph_name` has to be answered from.
+    ///
+    /// Mirrors `spareval`'s encoding: `Some(None)` is the default graph,
+    /// `Some(Some(iri))` one named graph, and `None` every named graph. The
+    /// nested `Option` is that trait's parameter shape, not a choice made here.
+    #[allow(clippy::option_option)]
+    fn select(&self, graph_name: Option<Option<&Arc<str>>>) -> GraphSelection<'_> {
+        match graph_name {
+            Some(None) => GraphSelection::Many(&self.default_graph),
+            Some(Some(target)) => match self.by_iri.get(target) {
+                Some(&index) if self.named_graph.contains(&index) => GraphSelection::One(index),
+                _ => GraphSelection::Empty,
+            },
+            None => GraphSelection::Many(&self.named_graph),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -169,7 +269,7 @@ impl AggregateHdt {
         // (mmap+cache) backend but falls back to in-memory for files where
         // the hybrid cache cannot be built (e.g. zero-triple HDTs that the
         // wavelet-tree library refuses to index).
-        let hdts: HashMap<String, hdt::HdtAny> = paths_vec
+        let hdts: Vec<(String, hdt::HdtAny)> = paths_vec
             .par_iter()
             .map(
                 |(graph_name, path)| -> anyhow::Result<(String, hdt::HdtAny)> {
@@ -179,15 +279,13 @@ impl AggregateHdt {
                     Ok((graph_name.clone(), hdt))
                 },
             )
-            .collect::<anyhow::Result<Vec<_>>>()?
-            .into_iter()
-            .collect();
+            .collect::<anyhow::Result<Vec<_>>>()?;
 
-        Ok(AggregateHdtSnapshot {
+        Ok(AggregateHdtSnapshot::new(
             hdts,
-            default_graphs: self.default_graphs.clone(),
-            named_graphs: self.named_graphs.clone(),
-        })
+            self.default_graphs.as_ref(),
+            self.named_graphs.as_ref(),
+        ))
     }
 
     /// Returns `true` if the given graph IRI is registered in the path map.
@@ -321,18 +419,18 @@ pub fn term_to_hdt_bgp_str(term: Term) -> String {
 }
 
 struct StreamingInternalQuadIter<'a> {
-    graphs: Vec<(&'a String, &'a hdt::HdtAny)>,
+    graphs: &'a [LoadedGraph],
+    selection: GraphSelection<'a>,
     subject: Option<Arc<str>>,
     predicate: Option<Arc<str>>,
     object: Option<Arc<str>>,
     emit_default_graph: bool,
-    current_graph: usize,
+    position: usize,
     current_iter: Option<StreamingInternalQuadIterator<'a>>,
 }
 
 type StreamingInternalQuadIterator<'a> =
     Box<dyn Iterator<Item = Result<InternalQuad<Arc<str>>, Error>> + 'a>;
-type StringTriple = [Arc<str>; 3];
 
 fn scoped_blank_node(term: Arc<str>, graph_name: &Arc<str>) -> Arc<str> {
     if !term.starts_with("_:") {
@@ -361,166 +459,50 @@ fn unscoped_pattern_term(term: &Arc<str>, graph_name: &Arc<str>) -> Option<Arc<s
     Some(Arc::from(format!("_:{original}")))
 }
 
-// TODO: Delete this function once `hdt::HdtGeneric::triples_with_pattern`
-// relaxes its input lifetime constraints. Today upstream's signature is
-// `triples_with_pattern<'a>(&'a self, sp: Option<&'a str>, ...)`, tying the
-// input `&str` lifetime to the returned iterator's lifetime — even though the
-// body internally clones each input to `Arc<str>` and never borrows from the
-// originals past the call. That tight lifetime forces us to keep this owned
-// `Arc<str>` shaped wrapper because our filter terms (computed locally in
-// `StreamingInternalQuadIter::ensure_current_iter` after blank-node
-// unscoping) don't outlive the iterator. When upstream relaxes the signature
-// (e.g. `Option<&str>` with an unrelated lifetime), this whole function
-// collapses to `hdt.triples_with_pattern(s.as_deref(), p.as_deref(),
-// o.as_deref())` and we additionally pick up upstream's `TripleCache` for
-// repeated id->string lookups.
-fn indexed_triples_with_pattern<'a>(
-    hdt: &'a hdt::HdtAny,
-    subject: Option<Arc<str>>,
-    predicate: Option<Arc<str>>,
-    object: Option<Arc<str>>,
-) -> Box<dyn Iterator<Item = StringTriple> + 'a> {
-    match hdt {
-        hdt::HdtAny::Hybrid(h) => {
-            indexed_triples_with_pattern_generic(h, subject, predicate, object)
-        }
-        hdt::HdtAny::InMemory(h) => {
-            indexed_triples_with_pattern_generic(h, subject, predicate, object)
+/// Rewrite the three pattern positions into one graph's own term space.
+///
+/// `None` means the pattern cannot match in this graph at all, because a bound
+/// term is a blank node scoped to a different one.
+fn unscoped_pattern(
+    pattern: [Option<&Arc<str>>; 3],
+    graph_name: &Arc<str>,
+) -> Option<[Option<Arc<str>>; 3]> {
+    let mut unscoped: [Option<Arc<str>>; 3] = [None, None, None];
+    for (slot, term) in unscoped.iter_mut().zip(pattern) {
+        if let Some(term) = term {
+            *slot = Some(unscoped_pattern_term(term, graph_name)?);
         }
     }
-}
-
-fn indexed_triples_with_pattern_generic<'a, D, S, B>(
-    hdt: &'a hdt::HdtGeneric<D, S, B>,
-    subject: Option<Arc<str>>,
-    predicate: Option<Arc<str>>,
-    object: Option<Arc<str>>,
-) -> Box<dyn Iterator<Item = StringTriple> + 'a>
-where
-    D: hdt::DictSectPfcAccess + 'a,
-    S: hdt::containers::SequenceAccess + 'a,
-    B: hdt::containers::BitmapAccess + 'a,
-{
-    use hdt::IdKind;
-    use hdt::triples::{ObjectIter, PredicateIter, PredicateObjectIter, SubjectIter};
-
-    let pattern: [Option<(Arc<str>, usize)>; 3] = [
-        subject.map(|term| {
-            let id = hdt.dict.string_to_id(term.as_ref(), IdKind::Subject);
-            (term, id)
-        }),
-        predicate.map(|term| {
-            let id = hdt.dict.string_to_id(term.as_ref(), IdKind::Predicate);
-            (term, id)
-        }),
-        object.map(|term| {
-            let id = hdt.dict.string_to_id(term.as_ref(), IdKind::Object);
-            (term, id)
-        }),
-    ];
-
-    if pattern.iter().flatten().any(|entry| entry.1 == 0) {
-        return Box::new(iter::empty());
-    }
-
-    match pattern {
-        [Some(s), Some(p), Some(o)] => {
-            if SubjectIter::with_pattern(&hdt.triples, [s.1, p.1, o.1])
-                .next()
-                .is_some()
-            {
-                Box::new(iter::once([s.0, p.0, o.0]))
-            } else {
-                Box::new(iter::empty())
-            }
-        }
-        [Some(s), Some(p), None] => Box::new(
-            SubjectIter::with_pattern(&hdt.triples, [s.1, p.1, 0]).map(move |triple| {
-                [
-                    s.0.clone(),
-                    p.0.clone(),
-                    Arc::from(hdt.dict.id_to_string(triple[2], IdKind::Object).unwrap()),
-                ]
-            }),
-        ),
-        [Some(s), None, Some(o)] => Box::new(
-            SubjectIter::with_pattern(&hdt.triples, [s.1, 0, o.1]).map(move |triple| {
-                [
-                    s.0.clone(),
-                    Arc::from(hdt.dict.id_to_string(triple[1], IdKind::Predicate).unwrap()),
-                    o.0.clone(),
-                ]
-            }),
-        ),
-        [Some(s), None, None] => Box::new(
-            SubjectIter::with_pattern(&hdt.triples, [s.1, 0, 0]).map(move |triple| {
-                [
-                    s.0.clone(),
-                    Arc::from(hdt.dict.id_to_string(triple[1], IdKind::Predicate).unwrap()),
-                    Arc::from(hdt.dict.id_to_string(triple[2], IdKind::Object).unwrap()),
-                ]
-            }),
-        ),
-        [None, Some(p), Some(o)] => Box::new(PredicateObjectIter::new(&hdt.triples, p.1, o.1).map(
-            move |subject_id| {
-                [
-                    Arc::from(hdt.dict.id_to_string(subject_id, IdKind::Subject).unwrap()),
-                    p.0.clone(),
-                    o.0.clone(),
-                ]
-            },
-        )),
-        [None, Some(p), None] => {
-            Box::new(PredicateIter::new(&hdt.triples, p.1).map(move |triple| {
-                [
-                    Arc::from(hdt.dict.id_to_string(triple[0], IdKind::Subject).unwrap()),
-                    p.0.clone(),
-                    Arc::from(hdt.dict.id_to_string(triple[2], IdKind::Object).unwrap()),
-                ]
-            }))
-        }
-        [None, None, Some(o)] => Box::new(ObjectIter::new(&hdt.triples, o.1).map(move |triple| {
-            [
-                Arc::from(hdt.dict.id_to_string(triple[0], IdKind::Subject).unwrap()),
-                Arc::from(hdt.dict.id_to_string(triple[1], IdKind::Predicate).unwrap()),
-                o.0.clone(),
-            ]
-        })),
-        [None, None, None] => Box::new(hdt.triples_all()),
-    }
+    Some(unscoped)
 }
 
 impl StreamingInternalQuadIter<'_> {
     fn ensure_current_iter(&mut self) -> bool {
-        while self.current_iter.is_none() && self.current_graph < self.graphs.len() {
-            let (graph_name, hdt) = self.graphs[self.current_graph];
-            self.current_graph += 1;
-            let graph_name: Arc<str> = Arc::from(graph_name.as_str());
-            let subject_filter = match self.subject.as_ref() {
-                Some(term) => match unscoped_pattern_term(term, &graph_name) {
-                    Some(term) => Some(term),
-                    None => continue,
-                },
-                None => None,
+        while self.current_iter.is_none() {
+            let Some(index) = self.selection.get(self.position) else {
+                break;
             };
-            let predicate_filter = match self.predicate.as_ref() {
-                Some(term) => match unscoped_pattern_term(term, &graph_name) {
-                    Some(term) => Some(term),
-                    None => continue,
-                },
-                None => None,
-            };
-            let object_filter = match self.object.as_ref() {
-                Some(term) => match unscoped_pattern_term(term, &graph_name) {
-                    Some(term) => Some(term),
-                    None => continue,
-                },
-                None => None,
+            self.position += 1;
+            let LoadedGraph { iri, hdt } = &self.graphs[index];
+            let graph_name = Arc::clone(iri);
+            let Some([subject_filter, predicate_filter, object_filter]) = unscoped_pattern(
+                [
+                    self.subject.as_ref(),
+                    self.predicate.as_ref(),
+                    self.object.as_ref(),
+                ],
+                &graph_name,
+            ) else {
+                continue;
             };
             let emit_default_graph = self.emit_default_graph;
 
+            // Upstream owns the pattern dispatch, and with it the
+            // `TripleCache` that materialises each dictionary id in a single
+            // `Arc` allocation and reuses the previous one when consecutive
+            // triples repeat a term -- which, in SPO order, most of them do.
             self.current_iter = Some(Box::new(
-                indexed_triples_with_pattern(hdt, subject_filter, predicate_filter, object_filter)
+                hdt.triples_with_arc_pattern(subject_filter, predicate_filter, object_filter)
                     .map(move |[subject, predicate, object]| {
                         let output_graph_name = if emit_default_graph {
                             None
@@ -569,52 +551,24 @@ impl<'a> QueryableDataset<'a> for &'a AggregateHdtSnapshot {
         object: Option<&Arc<str>>,
         graph_name: Option<Option<&Arc<str>>>,
     ) -> impl Iterator<Item = Result<InternalQuad<Self::InternalTerm>, Error>> + use<'a> {
-        let graph_name_owned = graph_name.map(|inner: Option<&Arc<str>>| inner.cloned());
-        let emit_default_graph = matches!(graph_name_owned, Some(None));
-
-        // Optimization: Pre-filter graphs to reduce unnecessary work
-        // Note: get_snapshot() already filtered graphs at load time,
-        // so self.hdts contains only the required graphs. This filter
-        // handles additional runtime graph name matching from the query.
-        let graphs_to_query: Vec<(&String, &hdt::HdtAny)> = self
-            .hdts
-            .iter()
-            .filter(|(g, _h)| {
-                match &graph_name_owned {
-                    // Query for default graph: Some(None)
-                    // Default graph is explicit when configured, else union of all loaded graphs
-                    Some(None) => self
-                        .default_graphs
-                        .as_ref()
-                        .is_none_or(|defaults| defaults.contains(g.as_str())),
-                    // Query for specific named graph: Some(Some(graph))
-                    Some(Some(target_graph)) => {
-                        g.as_str() == target_graph.as_ref()
-                            && self
-                                .named_graphs
-                                .as_ref()
-                                .is_none_or(|named| named.contains(g.as_str()))
-                    }
-                    // Query across all graphs: None
-                    None => self
-                        .named_graphs
-                        .as_ref()
-                        .is_none_or(|named| named.contains(g.as_str())),
-                }
-            })
-            .collect();
+        let emit_default_graph = matches!(graph_name, Some(None));
+        // Graph membership was resolved when the snapshot was built, so this is
+        // a slice borrow (or, for GRAPH <iri>, one hash lookup) rather than a
+        // filtered scan of every loaded graph on every probe.
+        let selection = self.select(graph_name);
 
         let subject = subject.cloned();
         let predicate = predicate.cloned();
         let object = object.cloned();
 
         StreamingInternalQuadIter::<'a> {
-            graphs: graphs_to_query,
+            graphs: &self.graphs,
+            selection,
             subject,
             predicate,
             object,
             emit_default_graph,
-            current_graph: 0,
+            position: 0,
             current_iter: None,
         }
     }
@@ -630,24 +584,57 @@ impl<'a> QueryableDataset<'a> for &'a AggregateHdtSnapshot {
     fn internal_named_graphs(
         &self,
     ) -> impl Iterator<Item = Result<Self::InternalTerm, Self::Error>> + use<'a> {
-        let keys: Vec<Arc<str>> = match &self.named_graphs {
-            Some(named) => self
-                .hdts
-                .keys()
-                .filter(|k| named.contains(k.as_str()))
-                .map(|k| Arc::from(k.as_str()))
-                .collect(),
-            None => self.hdts.keys().map(|k| Arc::from(k.as_str())).collect(),
-        };
+        let keys: Vec<Arc<str>> = self
+            .named_graph
+            .iter()
+            .map(|&index| Arc::clone(&self.graphs[index].iri))
+            .collect();
         keys.into_iter().map(Ok)
     }
 
+    /// Count the triples matching a pattern, summed over the graphs it reads.
+    ///
+    /// Comunica's HDT source does the same thing through `countTriples`, and for
+    /// the same reason: without it the optimiser scores every `?s <p> ?o`
+    /// pattern alike and, when two tie, leaves them in the order the query was
+    /// written -- which for a nested-loop join decides whether the selective
+    /// pattern drives the scan or is driven by it.
+    ///
+    /// Most shapes cost O(1) here because the HDT index already knows the extent
+    /// of the range a pattern walks, so this stays far cheaper than the plan it
+    /// improves. `?P?` and `S?O` come back as approximations, which is fine:
+    /// the number is only ever compared against other patterns' numbers.
+    fn estimated_cardinality(
+        &self,
+        subject: Option<&Arc<str>>,
+        predicate: Option<&Arc<str>>,
+        object: Option<&Arc<str>>,
+        graph_name: Option<Option<&Arc<str>>>,
+    ) -> Option<usize> {
+        let selection = self.select(graph_name);
+        let mut total: usize = 0;
+        let mut position = 0;
+        while let Some(index) = selection.get(position) {
+            position += 1;
+            let LoadedGraph { iri, hdt } = &self.graphs[index];
+            let Some([subject, predicate, object]) =
+                unscoped_pattern([subject, predicate, object], iri)
+            else {
+                continue;
+            };
+            total = total.saturating_add(
+                hdt.cardinality(subject.as_deref(), predicate.as_deref(), object.as_deref())
+                    .value,
+            );
+        }
+        Some(total)
+    }
+
     fn contains_internal_graph_name(&self, graph_name: &Arc<str>) -> Result<bool, Self::Error> {
-        Ok(self.hdts.contains_key(graph_name.as_ref())
-            && self
-                .named_graphs
-                .as_ref()
-                .is_none_or(|named| named.contains(graph_name.as_ref())))
+        Ok(matches!(
+            self.select(Some(Some(graph_name))),
+            GraphSelection::One(_)
+        ))
     }
 }
 
@@ -1121,11 +1108,7 @@ mod tests {
 
     #[test]
     fn test_query_rejects_invalid_base_iri_without_panic() {
-        let snapshot = AggregateHdtSnapshot {
-            hdts: std::collections::HashMap::new(),
-            default_graphs: None,
-            named_graphs: None,
-        };
+        let snapshot = AggregateHdtSnapshot::new(Vec::new(), None, None);
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             query(
                 "SELECT ?s ?p ?o WHERE { ?s ?p ?o }",

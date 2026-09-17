@@ -7,6 +7,9 @@ BENCH_SCALE ?= large
 # WatDiv dataset scale: 10 (~1M triples) or 100 (~10M). Matches Comunica's
 # benchmark-watdiv-hdt and benchmark-watdiv-hdt-100.
 WATDIV_SCALE ?= 10
+# BSBM product count: 1000 (~372K triples) or 10000 (~3.5M). Matches Comunica's
+# benchmark-bsbm-hdt and benchmark-bsbm-hdt-10k.
+BSBM_PRODUCT_COUNT ?= 1000
 
 init:
 	scripts/download-sample-bench.sh
@@ -42,6 +45,16 @@ bench: bench-init
 bench-watdiv:
 	scripts/fetch-watdiv-data.sh $(WATDIV_SCALE)
 	DE_WATDIV_SCALE=$(WATDIV_SCALE) cargo bench --bench watdiv
+
+# Generate the BSBM fixtures with the official bsbmtools generator (needs Java)
+# and run the BSBM query benchmarks.
+bench-bsbm:
+	python3 scripts/gen-bsbm-data.py $(BSBM_PRODUCT_COUNT)
+	DE_BSBM_PRODUCT_COUNT=$(BSBM_PRODUCT_COUNT) cargo bench --bench bsbm
+
+# Every query benchmark: the two imported standard workloads. Kept apart from
+# `bench`, which also measures HDT creation over the trainmarks fixtures.
+bench-query: bench-watdiv bench-bsbm
 
 build:
 	cargo build --features=server
