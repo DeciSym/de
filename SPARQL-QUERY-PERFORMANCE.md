@@ -39,7 +39,7 @@ The parts worth taking:
 | --- | --- |
 | Asks HDT for a real cardinality per pattern and plans joins from it | Plans from a fixed 8-entry constant table that never sees the data |
 | Hands bindings straight out of the source, no intermediate term objects | Round-trips every join value through a dictionary string and back |
-| Opens each HDT document once and keeps it until invalidated | Re-opens every graph on every request |
+| Opens each HDT document once and keeps it until invalidated | Re-opened every graph on every request (item 3) |
 
 The parts not worth taking are recorded in [Deliberately not adopted](#deliberately-not-adopted).
 
@@ -255,7 +255,44 @@ raw ids. Staging:
 
 ## 3. Open each HDT once, not once per request
 
-**Status: not started.**
+**Status: done.** Measured in [`BENCHMARKS.md`](BENCHMARKS.md): `get_snapshot`
+drops 99.6% on the benchmark packages, and behind `de serve` a 5 GB package goes
+from ~1 s of decode on every request to ~1 s once.
+
+`AggregateHdt` keeps opened packages and hands them out as `Arc<HdtAny>`. Three
+things made this straightforward:
+
+* `HdtAny` is `Send + Sync` and has no interior mutability beyond its own
+  caches, so queries share a handle with no lock at all. Only the cache map is
+  locked, and only to look up.
+* `serve` already stats every package on every request, to decide whether to
+  re-`sync`. Keying handles on `(modification time, length)` reuses a check that
+  was already being paid for, and a package rebuilt in place is noticed without
+  the store being told.
+* `HdtAny::size_in_bytes` counts decoded structures but not memory-mapped file
+  pages -- those are the kernel's to reclaim -- so it is exactly the right thing
+  to budget against.
+
+Eviction is least-recently-used against a byte budget defaulting to a quarter of
+system memory, and never touches a package the calling snapshot is about to use:
+those are alive through that snapshot's `Arc` regardless, so evicting them would
+free nothing and only force the next request to decode them again. The budget
+therefore bounds what is retained *between* queries; the peak is unchanged at
+the working set of a single request, which is what it always was.
+
+`AggregateHdt::with_handle_cache_budget` sets the ceiling, and
+`cached_handle_count` / `cached_handle_bytes` report what is held.
+
+### Still open
+
+* No CLI flag: the budget is settable through the library but `de serve` has no
+  `--handle-cache-bytes`. A ten-line follow-up.
+* Two requests racing on the same unopened package both decode it and the second
+  insert wins. Avoiding that means making one wait on the other, which is worse
+  for the common case.
+* The CLI gains nothing: `do_query` already reuses one snapshot across the query
+  files of an invocation, and a process-lifetime cache cannot outlive the
+  process.
 
 ### What Comunica does
 

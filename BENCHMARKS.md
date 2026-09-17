@@ -344,3 +344,49 @@ taken from runs adjacent in time, and the `trainmarks` section above was
 re-measured with the two arms interleaved after a sequential A/B produced an
 impossible result (HDT creation "regressing" by 33%). Treat any single run as
 unreliable, and interleave.
+
+### After: caching open HDT handles (`SPARQL-QUERY-PERFORMANCE.md` item 3)
+
+`AggregateHdt` now keeps opened packages and hands them out as `Arc<HdtAny>`,
+keyed by each file's modification time and length and bounded by heap footprint.
+
+#### `get_snapshot`
+
+| Workload | Before | After | change |
+| --- | ---: | ---: | ---: |
+| WatDiv scale 10 (7.2 MiB package) | 280.42 µs | 964.17 ns | **-99.6%** |
+| BSBM 1000 products (18.7 MiB package) | 305.00 µs | 965.94 ns | **-99.7%** |
+
+What is left is a `stat` per graph and a refcount increment.
+
+#### The case this was for: a 5 GB package behind `de serve`
+
+`dblp.hdt` is 5.3 GB with a 2.3 GB index sidecar. Five sequential SPARQL
+requests, each a pattern that matches nothing so the timing is all overhead:
+
+| Request | Wall time | Server RSS |
+| --- | ---: | ---: |
+| 1 (cold) | 0.98 s | 663 MB |
+| 2 | 0.00 s | 663 MB |
+| 3-5 | 0.00 s | 663 MB |
+
+The first request is what *every* request used to cost. The RSS is the decoded
+wavelet tree, which used to be allocated and freed per request and is now
+allocated once.
+
+Concurrency is the sharper version of the same point. Eight simultaneous
+requests against that server moved peak RSS from 679,396 KB to 680,220 KB — an
+increase of under a megabyte, because all eight share one handle. Before, each
+in-flight request decoded its own copy, so eight concurrent requests meant eight
+copies of a 663 MB structure.
+
+#### Query benchmarks
+
+Unchanged, as they should be: the benchmark builds its snapshot once, outside
+the timed region, so the cache is not on the measured path. A run with the cache
+and an interleaved control without it agreed to within a few percent in both
+directions.
+
+Both runs sat about 10% above the numbers recorded for item 1, which is the
+machine and not the code — see the note at the end of this file. The comparison
+that means anything is the interleaved one.

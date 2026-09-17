@@ -8,7 +8,8 @@ use std::{
     io::{Error, ErrorKind},
     path::{Path, PathBuf},
     str::FromStr,
-    sync::{Arc, RwLock},
+    sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock},
+    time::SystemTime,
 };
 
 fn lock_read_file_paths<'a>(
@@ -36,15 +37,187 @@ fn graph_uri_for_path(path: &Path) -> anyhow::Result<String> {
 }
 
 /// Boundary over a Header-Dictionary-Triples (HDT) storage layer.
-/// Stores file paths only; HDT instances are created per-request for better concurrency.
+///
+/// Maps graph IRIs to files on disk and keeps the packages those files decode
+/// to open between queries. Opening is not cheap: the hybrid backend decodes a
+/// whole wavelet tree out of the index sidecar, which for a 5 GB package is
+/// about a second of CPU and 660 MB of allocation. Doing that per request also
+/// meant concurrent requests each decoded their own copy of identical data.
+///
+/// Handles are shared as `Arc<HdtAny>`, which is sound because `HdtAny` is
+/// `Sync` and holds no interior mutability beyond its own caches, so queries
+/// take no lock at all. Only the cache map is locked, and only to look up.
 #[derive(Clone)]
 pub struct AggregateHdt {
     // Map graph names (URIs) to file paths on disk
     file_paths: Arc<RwLock<HashMap<String, PathBuf>>>,
+    // Packages kept open between queries, keyed by path. Shared across clones
+    // of this store, which is what makes it useful to `serve`: the store is
+    // cloned per request.
+    handles: Arc<Mutex<HandleCache>>,
     // Optional explicit default graph membership. If None, all loaded graphs are used as default.
     default_graphs: Option<HashSet<String>>,
     // Optional explicit named graph membership. If None, all loaded graphs are named.
     named_graphs: Option<HashSet<String>>,
+}
+
+fn new_handle_cache() -> Arc<Mutex<HandleCache>> {
+    Arc::new(Mutex::new(HandleCache::new(default_handle_cache_budget())))
+}
+
+/// Share of system memory the handle cache may hold by default.
+const HANDLE_CACHE_MEMORY_SHARE: u64 = 4;
+
+/// Budget used when system memory cannot be determined.
+const HANDLE_CACHE_FALLBACK_BYTES: usize = 1 << 30;
+
+/// Default ceiling on what the handle cache may hold.
+fn default_handle_cache_budget() -> usize {
+    system_memory_bytes().map_or(HANDLE_CACHE_FALLBACK_BYTES, |total| {
+        usize::try_from(total / HANDLE_CACHE_MEMORY_SHARE).unwrap_or(usize::MAX)
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn system_memory_bytes() -> Option<u64> {
+    let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
+    let line = meminfo.lines().find(|line| line.starts_with("MemTotal:"))?;
+    line.split_whitespace()
+        .nth(1)?
+        .parse::<u64>()
+        .ok()?
+        .checked_mul(1024)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn system_memory_bytes() -> Option<u64> {
+    None
+}
+
+/// What makes a cached handle still the right answer for a path.
+///
+/// Rebuilding an HDT in place changes its modification time, and almost always
+/// its length too. `serve` already stats every package on every request to
+/// decide whether to re-`sync`, so checking this costs nothing new.
+///
+/// A file whose modification time cannot be read has no key and is therefore
+/// never cached, rather than being cached under a key that cannot detect a
+/// change.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct FileKey {
+    modified: SystemTime,
+    len: u64,
+}
+
+impl FileKey {
+    fn for_path(path: &Path) -> Option<Self> {
+        let metadata = std::fs::metadata(path).ok()?;
+        Some(Self {
+            modified: metadata.modified().ok()?,
+            len: metadata.len(),
+        })
+    }
+}
+
+/// One HDT package held open between queries.
+struct CachedHandle {
+    key: FileKey,
+    hdt: Arc<hdt::HdtAny>,
+    /// Heap footprint, from `HdtAny::size_in_bytes`, which counts the decoded
+    /// structures but not memory-mapped file pages -- those live in the OS page
+    /// cache and are the kernel's to reclaim, not ours to budget.
+    bytes: usize,
+    /// Tick of the last snapshot to use this handle, for LRU eviction.
+    last_used: u64,
+}
+
+/// Open HDT packages, bounded by heap footprint.
+struct HandleCache {
+    entries: HashMap<PathBuf, CachedHandle>,
+    budget: usize,
+    tick: u64,
+}
+
+impl HandleCache {
+    fn new(budget: usize) -> Self {
+        Self {
+            entries: HashMap::new(),
+            budget,
+            tick: 0,
+        }
+    }
+
+    /// Total held. Summed rather than tracked so there is no counter to drift
+    /// out of step with the map; a store has tens of packages, not millions.
+    fn bytes(&self) -> usize {
+        self.entries.values().map(|entry| entry.bytes).sum()
+    }
+
+    fn next_tick(&mut self) -> u64 {
+        self.tick += 1;
+        self.tick
+    }
+
+    /// The handle for `path`, if it is open and still matches the file on disk.
+    fn get(&mut self, path: &Path, key: FileKey) -> Option<Arc<hdt::HdtAny>> {
+        let tick = self.next_tick();
+        let entry = self.entries.get_mut(path)?;
+        if entry.key != key {
+            // The file was rebuilt under us; the caller reopens it.
+            return None;
+        }
+        entry.last_used = tick;
+        Some(Arc::clone(&entry.hdt))
+    }
+
+    fn insert(&mut self, path: PathBuf, key: FileKey, hdt: Arc<hdt::HdtAny>) {
+        let tick = self.next_tick();
+        let bytes = hdt.size_in_bytes();
+        self.entries.insert(
+            path,
+            CachedHandle {
+                key,
+                hdt,
+                bytes,
+                last_used: tick,
+            },
+        );
+    }
+
+    /// Drop least-recently-used handles until the budget is met.
+    ///
+    /// Packages the calling snapshot is about to use are never evicted. They
+    /// are alive through that snapshot's `Arc` regardless, so dropping them
+    /// here would not free anything -- it would only force the next request to
+    /// decode them again. The budget is therefore a bound on what is retained
+    /// *between* queries; the peak stays what it always was, the working set of
+    /// a single request.
+    fn evict(&mut self, in_use: &HashSet<PathBuf>) {
+        let mut total = self.bytes();
+        if total <= self.budget {
+            return;
+        }
+        let mut candidates: Vec<(u64, PathBuf)> = self
+            .entries
+            .iter()
+            .filter(|(path, _)| !in_use.contains(*path))
+            .map(|(path, entry)| (entry.last_used, path.clone()))
+            .collect();
+        candidates.sort_unstable();
+        for (_, path) in candidates {
+            if total <= self.budget {
+                break;
+            }
+            if let Some(entry) = self.entries.remove(&path) {
+                total = total.saturating_sub(entry.bytes);
+            }
+        }
+    }
+
+    /// Forget handles for files that are no longer part of the dataset.
+    fn retain_paths(&mut self, keep: &HashSet<PathBuf>) {
+        self.entries.retain(|path, _| keep.contains(path));
+    }
 }
 
 /// The loaded graphs a query runs against, with the per-query lookups already
@@ -74,7 +247,7 @@ pub struct AggregateHdtSnapshot {
 /// is a refcount increment rather than an allocation.
 struct LoadedGraph {
     iri: Arc<str>,
-    hdt: hdt::HdtAny,
+    hdt: Arc<hdt::HdtAny>,
 }
 
 /// Which graphs one `internal_quads_for_pattern` call has to visit.
@@ -107,7 +280,7 @@ impl AggregateHdtSnapshot {
     /// `default_graphs` and `named_graphs` are `None` when the dataset was
     /// discovered from the filesystem, which means "every loaded graph".
     fn new(
-        loaded: Vec<(String, hdt::HdtAny)>,
+        loaded: Vec<(String, Arc<hdt::HdtAny>)>,
         default_graphs: Option<&HashSet<String>>,
         named_graphs: Option<&HashSet<String>>,
     ) -> Self {
@@ -172,6 +345,7 @@ impl AggregateHdt {
     pub fn empty() -> Self {
         Self {
             file_paths: Arc::new(RwLock::new(HashMap::new())),
+            handles: new_handle_cache(),
             default_graphs: None,
             named_graphs: None,
         }
@@ -186,6 +360,7 @@ impl AggregateHdt {
 
         Ok(Self {
             file_paths: Arc::new(RwLock::new(file_paths)),
+            handles: new_handle_cache(),
             default_graphs: None,
             named_graphs: None,
         })
@@ -213,9 +388,48 @@ impl AggregateHdt {
 
         Ok(Self {
             file_paths: Arc::new(RwLock::new(file_paths)),
+            handles: new_handle_cache(),
             default_graphs: Some(default_graphs),
             named_graphs: Some(named_graph_set),
         })
+    }
+
+    /// Cap what the handle cache retains between queries, in bytes of decoded
+    /// HDT structure.
+    ///
+    /// Defaults to a quarter of system memory. Lower it when the process shares
+    /// a machine, raise it when the dataset is larger than that and every graph
+    /// is queried often. A budget smaller than a single package does not break
+    /// anything -- that package is simply reopened per request, as it was
+    /// before this cache existed.
+    #[must_use]
+    pub fn with_handle_cache_budget(self, bytes: usize) -> Self {
+        self.lock_handles().budget = bytes;
+        self
+    }
+
+    /// How many HDT packages are currently held open.
+    #[must_use]
+    pub fn cached_handle_count(&self) -> usize {
+        self.lock_handles().entries.len()
+    }
+
+    /// Bytes of decoded HDT structure currently held open. Memory-mapped file
+    /// pages are not counted; see [`CachedHandle::bytes`].
+    #[must_use]
+    pub fn cached_handle_bytes(&self) -> usize {
+        self.lock_handles().bytes()
+    }
+
+    /// Take the handle-cache lock, recovering from poisoning.
+    ///
+    /// A panic elsewhere must not make the store permanently unqueryable, and
+    /// there is no invariant here for a panicking thread to leave half-applied:
+    /// entries are inserted and removed one at a time, the byte total is
+    /// derived rather than tracked, and a handle whose file has changed is
+    /// rejected by its own key.
+    fn lock_handles(&self) -> MutexGuard<'_, HandleCache> {
+        self.handles.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Create a snapshot of HDT instances for querying.
@@ -226,8 +440,11 @@ impl AggregateHdt {
     ///   If Some(vec), only graphs in the vec are loaded.
     ///
     /// # Performance
-    /// Filtering graphs before loading can significantly reduce memory usage and load time
-    /// when you only need to query a subset of available graphs.
+    /// Packages already open are handed straight back, so a snapshot over an
+    /// unchanged dataset costs a stat per graph and a refcount increment. Only
+    /// the first request after a package appears or is rebuilt pays to decode
+    /// it. Filtering still matters for the first request and for the cache
+    /// budget: a graph never asked for is never opened.
     ///
     /// # Example
     /// ```ignore
@@ -265,21 +482,74 @@ impl AggregateHdt {
             .collect();
         drop(file_paths_guard);
 
-        // Load filtered HDTs in parallel. HdtAny::open prefers the hybrid
+        // Identify each package before consulting the cache, so a file that has
+        // been rebuilt since it was opened is reopened rather than answered
+        // from a stale handle.
+        let keyed: Vec<(String, PathBuf, Option<FileKey>)> = paths_vec
+            .into_iter()
+            .map(|(graph_name, path)| {
+                let key = FileKey::for_path(&path);
+                (graph_name, path, key)
+            })
+            .collect();
+
+        // Cache hits in one pass, so the lock is never held across an open.
+        let mut handles: Vec<Option<Arc<hdt::HdtAny>>> = {
+            let mut cache = self.lock_handles();
+            keyed
+                .iter()
+                .map(|(_, path, key)| key.and_then(|key| cache.get(path, key)))
+                .collect()
+        };
+
+        // Open what is left in parallel. HdtAny::open prefers the hybrid
         // (mmap+cache) backend but falls back to in-memory for files where
         // the hybrid cache cannot be built (e.g. zero-triple HDTs that the
         // wavelet-tree library refuses to index).
-        let hdts: Vec<(String, hdt::HdtAny)> = paths_vec
+        //
+        // Two requests racing on the same missing package both open it and the
+        // second insert wins. That wastes one decode and is not worth a
+        // per-path lock to avoid: the alternative is making every request wait
+        // on whichever one got there first.
+        let opened: Vec<(usize, Arc<hdt::HdtAny>)> = handles
+            .iter()
+            .enumerate()
+            .filter(|(_, handle)| handle.is_none())
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>()
             .par_iter()
-            .map(
-                |(graph_name, path)| -> anyhow::Result<(String, hdt::HdtAny)> {
-                    let hdt = hdt::HdtAny::open_with_threshold(path, None).map_err(|e| {
-                        anyhow::anyhow!("Failed to load HDT from {}: {e}", path.display())
-                    })?;
-                    Ok((graph_name.clone(), hdt))
-                },
-            )
+            .map(|&index| -> anyhow::Result<(usize, Arc<hdt::HdtAny>)> {
+                let path = &keyed[index].1;
+                let hdt = hdt::HdtAny::open_with_threshold(path, None).map_err(|e| {
+                    anyhow::anyhow!("Failed to load HDT from {}: {e}", path.display())
+                })?;
+                Ok((index, Arc::new(hdt)))
+            })
             .collect::<anyhow::Result<Vec<_>>>()?;
+
+        {
+            let mut cache = self.lock_handles();
+            for (index, hdt) in &opened {
+                let (_, path, key) = &keyed[*index];
+                if let Some(key) = *key {
+                    cache.insert(path.clone(), key, Arc::clone(hdt));
+                }
+            }
+            let in_use: HashSet<PathBuf> = keyed.iter().map(|(_, path, _)| path.clone()).collect();
+            cache.evict(&in_use);
+        }
+        for (index, hdt) in opened {
+            handles[index] = Some(hdt);
+        }
+
+        let hdts: Vec<(String, Arc<hdt::HdtAny>)> = keyed
+            .into_iter()
+            .zip(handles)
+            .map(|((graph_name, _, _), handle)| {
+                let hdt = handle.expect("every selected graph was either cached or opened above");
+                (graph_name, hdt)
+            })
+            .collect();
 
         Ok(AggregateHdtSnapshot::new(
             hdts,
@@ -360,12 +630,22 @@ impl AggregateHdt {
             }
         }
 
-        let mut file_paths = lock_write_file_paths(&self.file_paths, "modifying HDT paths")?;
-        // Build set of existing paths for comparison
-        let existing_paths: HashSet<PathBuf> = file_paths.values().cloned().collect();
-        let added = current_files.difference(&existing_paths).count();
-        let removed = existing_paths.difference(&current_files).count();
-        *file_paths = discovered_mappings;
+        let (added, removed) = {
+            let mut file_paths = lock_write_file_paths(&self.file_paths, "modifying HDT paths")?;
+            // Build set of existing paths for comparison
+            let existing_paths: HashSet<PathBuf> = file_paths.values().cloned().collect();
+            let added = current_files.difference(&existing_paths).count();
+            let removed = existing_paths.difference(&current_files).count();
+            *file_paths = discovered_mappings;
+            (added, removed)
+        };
+
+        // Let go of packages that are no longer part of the dataset. A file
+        // that is still here but was rebuilt needs no action: its cached handle
+        // carries the old modification time and will be rejected on next use.
+        // Taken after the path-map guard is dropped, so the two locks are never
+        // held at once.
+        self.lock_handles().retain_paths(&current_files);
 
         Ok((added, removed))
     }
@@ -798,6 +1078,186 @@ mod tests {
             .prefix("de-tests-")
             .tempdir_in(std::env::current_dir()?)
             .map_err(anyhow::Error::from)
+    }
+
+    /// A package opened once is handed back, not decoded again.
+    #[test]
+    #[cfg(feature = "server")]
+    fn test_handle_is_reused_across_snapshots() -> anyhow::Result<()> {
+        let hdt_path = get_test_hdt_path("apple.hdt");
+        let store = AggregateHdt::new(std::slice::from_ref(&hdt_path))?;
+
+        let first = store
+            .get_snapshot(None)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        assert_eq!(store.cached_handle_count(), 1);
+        assert!(store.cached_handle_bytes() > 0);
+
+        let second = store
+            .get_snapshot(None)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        assert!(
+            Arc::ptr_eq(&first.graphs[0].hdt, &second.graphs[0].hdt),
+            "the second snapshot should share the first snapshot's handle"
+        );
+        assert_eq!(store.cached_handle_count(), 1, "no second copy was opened");
+        Ok(())
+    }
+
+    /// Rebuilding a package in place invalidates its handle.
+    ///
+    /// The cache key is the file's modification time and length, so a rebuild
+    /// is noticed without the store being told about it.
+    #[test]
+    #[cfg(feature = "server")]
+    fn test_rebuilt_package_is_reopened() -> anyhow::Result<()> {
+        let work_dir = utf8_tempdir()?;
+        let hdt_path = work_dir.path().join("fruit.hdt");
+        std::fs::copy(get_test_hdt_path("apple.hdt"), &hdt_path)?;
+        let hdt_path_str = hdt_path.to_string_lossy().into_owned();
+        let store = AggregateHdt::new(std::slice::from_ref(&hdt_path_str))?;
+
+        let first = store
+            .get_snapshot(None)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let first_handle = Arc::clone(&first.graphs[0].hdt);
+        drop(first);
+
+        // Rewrite the file with different content so both halves of the key
+        // change, then make sure the modification time really moved: a copy
+        // finishing inside the filesystem's timestamp granularity would
+        // otherwise leave the key looking unchanged.
+        std::fs::copy(get_test_hdt_path("apple.hdt"), &hdt_path)?;
+        let bumped = SystemTime::now() + std::time::Duration::from_secs(1);
+        fs_set_times(&hdt_path, bumped)?;
+
+        let second = store
+            .get_snapshot(None)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        assert!(
+            !Arc::ptr_eq(&first_handle, &second.graphs[0].hdt),
+            "a rebuilt package must not be answered from the old handle"
+        );
+        assert_eq!(
+            store.cached_handle_count(),
+            1,
+            "the stale entry was replaced"
+        );
+        Ok(())
+    }
+
+    /// The cache stays inside its budget by dropping what was used least
+    /// recently, and never drops a package the caller is still using.
+    #[test]
+    #[cfg(feature = "server")]
+    fn test_handle_cache_evicts_to_budget() -> anyhow::Result<()> {
+        let work_dir = utf8_tempdir()?;
+        let first_path = work_dir.path().join("first.hdt");
+        let second_path = work_dir.path().join("second.hdt");
+        std::fs::copy(get_test_hdt_path("apple.hdt"), &first_path)?;
+        std::fs::copy(get_test_hdt_path("apple.hdt"), &second_path)?;
+        let first_str = first_path.to_string_lossy().into_owned();
+        let second_str = second_path.to_string_lossy().into_owned();
+
+        // Room for one package but not two.
+        let store = AggregateHdt::new(&[first_str.clone(), second_str.clone()])?;
+        let one_package_bytes = {
+            let probe = AggregateHdt::new(std::slice::from_ref(&first_str))?;
+            drop(
+                probe
+                    .get_snapshot(None)
+                    .map_err(|e| anyhow::anyhow!("{e}"))?,
+            );
+            probe.cached_handle_bytes()
+        };
+        let store = store.with_handle_cache_budget(one_package_bytes);
+
+        let first_graph = store
+            .graph_names()?
+            .into_iter()
+            .find(|name| name.contains("first.hdt"));
+        let first_graph = first_graph.expect("first.hdt should be registered");
+        let second_graph = store
+            .graph_names()?
+            .into_iter()
+            .find(|name| name.contains("second.hdt"));
+        let second_graph = second_graph.expect("second.hdt should be registered");
+
+        drop(
+            store
+                .get_snapshot(Some(vec![first_graph]))
+                .map_err(|e| anyhow::anyhow!("{e}"))?,
+        );
+        assert_eq!(store.cached_handle_count(), 1);
+
+        drop(
+            store
+                .get_snapshot(Some(vec![second_graph]))
+                .map_err(|e| anyhow::anyhow!("{e}"))?,
+        );
+        assert_eq!(
+            store.cached_handle_count(),
+            1,
+            "the older package should have been evicted to stay inside the budget"
+        );
+        assert!(store.cached_handle_bytes() <= one_package_bytes);
+
+        // Both at once: the budget does not apply to the working set of a
+        // single snapshot, which is alive through its own Arcs regardless.
+        let both = store
+            .get_snapshot(None)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        assert_eq!(both.graphs.len(), 2);
+        assert_eq!(
+            store.cached_handle_count(),
+            2,
+            "packages in use must not be evicted out from under the snapshot"
+        );
+        Ok(())
+    }
+
+    /// A file that leaves the dataset takes its handle with it.
+    #[test]
+    #[cfg(feature = "server")]
+    fn test_sync_drops_handles_for_removed_files() -> anyhow::Result<()> {
+        let work_dir = utf8_tempdir()?;
+        let sync_dir = work_dir.path().join("sync");
+        std::fs::create_dir(&sync_dir)?;
+        let kept = sync_dir.join("kept.hdt");
+        let removed = sync_dir.join("removed.hdt");
+        std::fs::copy(get_test_hdt_path("apple.hdt"), &kept)?;
+        std::fs::copy(get_test_hdt_path("apple.hdt"), &removed)?;
+
+        let store = AggregateHdt::new(&[
+            kept.to_string_lossy().into_owned(),
+            removed.to_string_lossy().into_owned(),
+        ])?;
+        drop(
+            store
+                .get_snapshot(None)
+                .map_err(|e| anyhow::anyhow!("{e}"))?,
+        );
+        assert_eq!(store.cached_handle_count(), 2);
+
+        std::fs::remove_file(&removed)?;
+        let (added, removed_count) = store.sync(&sync_dir)?;
+        assert_eq!(added, 0);
+        assert_eq!(removed_count, 1);
+        assert_eq!(
+            store.cached_handle_count(),
+            1,
+            "sync should let go of the package that is no longer in the dataset"
+        );
+        Ok(())
+    }
+
+    /// Set a file's modification time, so a test can make a rewrite visible to
+    /// the cache key regardless of filesystem timestamp granularity.
+    #[cfg(feature = "server")]
+    fn fs_set_times(path: &Path, modified: SystemTime) -> anyhow::Result<()> {
+        let file = std::fs::File::options().write(true).open(path)?;
+        file.set_modified(modified)?;
+        Ok(())
     }
 
     #[test]
