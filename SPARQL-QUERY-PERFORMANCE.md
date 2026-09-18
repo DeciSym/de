@@ -1,22 +1,35 @@
 # SPARQL-over-HDT query performance: findings and plan
 
-Status: analysis complete, work in progress.
-Date: 2026-09-16.
+Status: items 1, 3 and 4 done; items 2 and 5 open.
+Started 2026-09-16, last updated 2026-09-18.
 
 This note records what a read of [comunica-feature-hdt] (Comunica's SPARQL-over-HDT
 support) suggests for `de` and for the [`hdt`] crate it builds on, why each item
-matters, and how each one will be measured. It is a working document: the
-"Status" line on each item is updated as work lands.
+matters, and how each one is measured. It is a working document: the "Status"
+line on each item is updated as work lands, and a claim that measurement
+contradicts is corrected in place rather than quietly dropped -- item 2 is the
+example, and the correction is more useful than the original.
+
+| Item | Status | Effect |
+| --- | --- | --- |
+| 1. Cardinality-aware join ordering | done | WatDiv 5.14 s -> 0.25 s; BSBM a wash |
+| 2. Join values as dictionary IDs | open, scoped | 2.7-4.6x on the probe path, whole-query share unmeasured |
+| 3. Open each HDT once per process | done | `get_snapshot` -99.6%; 5 GB package decoded once, not per request |
+| 4. Local fixes in `de/src/sparql.rs` | done | WatDiv -2 to -15%, BSBM -8 to -31% |
+| 5. `hdt/src/sparql.rs` materialises everything | open | `hdt` crate hygiene; no effect on `de` |
+
+Measurements live in [`BENCHMARKS.md`](BENCHMARKS.md), including a note on why
+this machine cannot be trusted for a sequential A/B.
 
 **Local build overrides.** Items 1 and 4 change `hdt` and the DeciSym oxigraph
 fork as well as `de`. Until those are pushed and the pins in `Cargo.toml` are
 bumped, `de` builds against working trees through a git-ignored
 `.cargo/config.toml`:
 
-| Crate | Working tree | Branch |
+| Crate | Working tree | Branch, commit |
 | --- | --- | --- |
-| `hdt` | `../hdt` | `perf-qwt-opus-max` (uncommitted) |
-| `spareval`, `sparopt`, `spargebra`, `sparesults`, `oxrdfxml` | `../oxigraph-cardinality` | `cardinality-estimator-hook`, a worktree off the pinned `ed7335a2` |
+| `hdt` | `../hdt` | `perf-qwt-opus-max`, `8a4f52b` (committed, unpushed) |
+| `spareval`, `sparopt`, `spargebra`, `sparesults`, `oxrdfxml` | `../oxigraph-cardinality` | `cardinality-estimator-hook`, `85f04251` (committed, unpushed) -- a worktree off the pinned `ed7335a2` |
 
 The five oxigraph crates have to move as a set; patching only some of them would
 put two versions of `spargebra`'s types in the graph. A checkout without that
@@ -35,11 +48,11 @@ structural choices, and two of those choices are ones `de` has not made yet.
 
 The parts worth taking:
 
-| Comunica does | `de` today |
-| --- | --- |
-| Asks HDT for a real cardinality per pattern and plans joins from it | Plans from a fixed 8-entry constant table that never sees the data |
-| Hands bindings straight out of the source, no intermediate term objects | Round-trips every join value through a dictionary string and back |
-| Opens each HDT document once and keeps it until invalidated | Re-opened every graph on every request (item 3) |
+| Comunica does | `de` when this was written | now |
+| --- | --- | --- |
+| Asks HDT for a real cardinality per pattern and plans joins from it | Planned from a fixed 8-entry constant table that never sees the data | done (item 1) |
+| Hands bindings straight out of the source, no intermediate term objects | Round-trips every join value through a dictionary string and back | open (item 2) |
+| Opens each HDT document once and keeps it until invalidated | Re-opened every graph on every request | done (item 3) |
 
 The parts not worth taking are recorded in [Deliberately not adopted](#deliberately-not-adopted).
 
@@ -198,9 +211,11 @@ Fixing that is nearly free once the bounds are exposed, and it also improves
 
 ---
 
-## 2. Stop round-tripping join values through dictionary strings
+## 2. Keep join values as dictionary IDs
 
-**Status: not started.**
+**Status: not started, and scoped out.** Measured 2026-09-18; the earlier version
+of this section misdiagnosed where the cost was, and its sketch was unsound. Both
+are corrected below.
 
 ### What Comunica does
 
@@ -208,48 +223,98 @@ Commit `623d9af`, "Avoid creation of intermediary triple objects", replaced
 `searchTriples` with `searchBindings` so the source produces bindings directly and
 no intermediate triple objects are allocated per result.
 
-### What `de` does
+### What is actually being paid for
 
-`de`'s `InternalTerm` is `Arc<str>`. `spareval` passes bound join values back into
-the next pattern as `InternalTerm`s, so on every probe
-`indexed_triples_with_pattern_generic` does:
+`de`'s `InternalTerm` is `Arc<str>`, so every value that flows between patterns is
+a string. Timing 20,000 probes per predicate on WatDiv scale 10, against the same
+walk done entirely in dictionary IDs:
+
+| Predicate | results/probe | string path | ID path | speedup | of which `string_to_id` |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `wsdbm:friendOf` | 128 | 391.6 ms | 132.5 ms | 3.0x | 8.5 ms (2%) |
+| `rev:reviewer` | 1 | 13.7 ms | 5.0 ms | 2.7x | 6.8 ms (50%) |
+| `foaf:givenName` | 1 | 8.5 ms | 3.1 ms | 2.7x | 3.1 ms (37%) |
+| `schema:text` | 1 | 3.8 ms | 0.8 ms | 4.6x | 1.1 ms (28%) |
+
+This section used to claim the cost was `string_to_id` -- re-resolving a string
+the previous pattern had just produced. That is real but it is the *smaller* half,
+and only dominates at low fan-out. The larger half is materialising result terms
+that a nested-loop join consumes and discards: roughly 250 ms of `friendOf`'s
+391 ms. Keeping intermediates as IDs avoids both, and defers `externalize_term`
+to the terms that actually reach the result set -- the same shape as Comunica's
+`searchBindings` change.
+
+### The sketch that was wrong
 
 ```rust
-// src/sparql.rs:404
-let id = hdt.dict.string_to_id(term.as_ref(), IdKind::Subject);
+enum HdtTerm { Id(u32), Str(Arc<str>) }   // WRONG as written
 ```
 
-on a string that the *previous* pattern produced with `id_to_string` from the same
-dictionary. Each such call is a front-coded PFC binary search plus a block
-decompression, per bound term, per probe — to recover an integer HDT had already
-handed out. Joins then hash and compare `Arc<str>` rather than integers.
+The claim attached to it -- "`Eq`/`Hash` stay sound" -- is false. HDT numbers
+subjects and objects in overlapping spaces, so the same integer names two
+different terms depending on position. On WatDiv:
 
-`hdt` already exposes the raw material: `triple_ids_with_pattern` and
-`triple_ids_with_id_pattern` (`src/hdt.rs:244`, `src/hdt.rs:260`).
+```
+id 47961 as subject: "http://db.uwaterloo.ca/~galuc/wsdbm/City236"
+id 47961 as object:  "\"0\""
+```
 
-### Sketch
+A pattern like `?a :p ?x . ?x :q ?b` binds `?x` from an object position and probes
+it as a subject. Built as sketched, that silently joins a city against the literal
+`"0"`. An ID is only a term identity when paired with the position it came from,
+so the representation has to carry a canonical ID, not a raw one.
+
+Canonicalisation is still cheap, but it is the design rather than a footnote. The
+four dictionary sections partition cleanly, so `shared | subjects | objects` lay
+into one space with
 
 ```rust
-enum HdtTerm { Id(u32), Str(Arc<str>) }   // Str only for terms absent from the dictionary
+canonical(id, Object) = if id <= shared { id } else { id + num_subjects }
+canonical(id, Subject) = id
 ```
 
-`Eq`/`Hash` stay sound: a term that is not in the dictionary can never equal one
-that is, so the two variants never need to compare equal across the split.
+Predicates need their own range plus a small table, because a predicate IRI may
+also appear as a subject or object and the two must unify. Predicate counts are
+tiny -- 86 on WatDiv -- so that table is built once per graph.
 
-Canonicalising ids across sections is cheap. `four_sect_dict.rs:175` shows subject
-and object ids coincide below `shared_size`, so subject/object canonicalisation is
-O(1) arithmetic. Only predicates need a precomputed table, and predicate counts
-are small (thousands, not millions).
+### What it would take
 
-`externalize_term` then runs only on terms that actually reach the result set —
-the same shape as Comunica's `searchBindings` change.
+1. **`hdt`** -- expose canonical term IDs, or enough of the section layout for
+   `de` to compute them, plus per-graph `local id <-> canonical id` conversion.
+2. **`de`** -- `InternalTerm` becomes the ID representation. 36 `Arc<str>` sites
+   in `src/sparql.rs` and nothing outside it, so no oxigraph change and no pin
+   bump.
+3. **Blank nodes** -- `scoped_blank_node` currently does string surgery
+   (`_:g<hex>_<id>`) to keep two graphs' blank nodes apart. With IDs a blank
+   node's identity is naturally `(graph, id)`, so this gets simpler, but it is a
+   rewrite rather than a port.
+4. **Multi-graph** -- IDs are per file, so cross-graph joins cannot compare them.
+   Single-graph fast path first (the CLI, and most server queries), then a
+   per-graph `local id -> global symbol` table, backed by the interner already in
+   `hdt` (`src/concurrent_interner.rs`).
+5. **`quads_for_pattern_strings`** -- public, returns strings, no in-tree callers;
+   externalises at the boundary.
 
-Multi-graph is the wrinkle: ids are per file, so cross-graph joins cannot compare
-raw ids. Staging:
+### Two reasons to measure before building
 
-1. Single-HDT fast path (covers the CLI and most server queries).
-2. Multi-graph via a per-graph `local id -> global symbol` table, backed by the
-   interner already in `hdt` (`src/concurrent_interner.rs`).
+**The whole-query share is unknown.** The table above is the *probe path*. C3
+answers 48,802 rows in ~220 ms, about 4.5 us per row, while the probe path costs
+~0.15 us per result. The gap is `spareval`'s tuple machinery -- hashing, cloning,
+`InternalTuple` bookkeeping -- which this item does not touch. A 3x probe path
+may move a join-heavy query far less than 3x. An attempt to model C3's join by
+hand was discarded as unsound: it short-circuited where the evaluator builds a
+cross-product, giving 76 rows against the real 48,802.
+
+**There is a plausible regression.** `FILTER`, `ORDER BY` and aggregation call
+`externalize_expression_term` per evaluation. Today the string is already in
+hand; with IDs each evaluation pays a dictionary lookup, and both WatDiv and BSBM
+have numeric filters. The `externalize_expression_term` hook exists to cache
+this, but it has to be designed in rather than discovered afterwards.
+
+The cheap next step is to instrument `internal_quads_for_pattern` to count probes
+and materialised terms for C3 and BSBM q05. That turns "2.7-4.6x on a path of
+unknown weight" into a whole-query estimate, for an hour's work against a change
+that touches term representation everywhere.
 
 ---
 
@@ -374,9 +439,14 @@ carries its own `// TODO: improve error handling` on the same line.
 
 ---
 
-## 5. Upstream: `hdt/src/sparql.rs` materialises whole result sets
+## 5. Upstream: `hdt/src/sparql.rs` is now the worst of the three impls
 
-**Status: not started.** (`hdt` crate only; `de` does not enable its `sparql` feature.)
+**Status: not started. Still relevant, and it has grown a second defect.**
+(`hdt` crate only, behind its optional `sparql` feature, which `de` does not
+enable and which `hdt`'s CI does not build -- its workflow checks `cache` and
+`sophia` only.)
+
+Three lines carry both problems:
 
 ```rust
 // hdt/src/sparql.rs:62
@@ -387,12 +457,44 @@ let v: Vec<_> = self.triples_with_pattern(ps, pp, po)
 v.into_iter()
 ```
 
-`?s ?p ?o` over a large package builds the entire result set in memory before
-returning. The `collect` existed only to escape the old input lifetime; with
-`triples_with_pattern` now taking `Option<&str>` it can stream.
+**The `collect` is unbounded.** `?s ?p ?o` over a large package builds the whole
+result set in memory before returning anything -- 500M+ `String`s on a graph the
+size of dblp. This existed only to escape the old input lifetime, and that
+lifetime was relaxed as part of item 4a, so it can stream today. Returning
+`Box<dyn Iterator<Item = ...> + 'a>` satisfies the trait's `impl Iterator + use<'a>`
+and lets the named-graph early-return share the type.
 
-`de`'s `StreamingInternalQuadIter` (`src/sparql.rs:323`) is the shape to lift
-upstream, and it also adds the named-graph support `hdt`'s version rejects.
+**`InternalTerm = String` throws away item 4's work.** `triples_with_pattern`
+yields `[Arc<str>; 3]`, and `.map(|a| a.to_string())` copies every one into a
+fresh `String`. That is a second allocation per term on top of the one
+`TripleCache` just made, and it defeats the cache's memoisation outright: when
+consecutive triples repeat a term, `TripleCache` hands back the same `Arc`, and
+this converts each clone into a separate `String` anyway. Changing `InternalTerm`
+to `Arc<str>` removes the copy and restores the memoisation -- the same finding
+as item 4b, in the crate that item 4b was added to.
+
+### Is it still worth doing?
+
+Yes, but as maintenance of the `hdt` crate rather than as `de` performance work.
+Nothing in `de` runs this code: `de` has its own `QueryableDataset` over
+`AggregateHdtSnapshot`, which streams, supports named graphs, and answers
+cardinality. The audience is someone using the `hdt` crate's built-in SPARQL
+support, for whom the `collect` is a straightforward out-of-memory bug.
+
+That leaves a choice worth making deliberately rather than by default:
+
+* **Fix in place** -- stream, and switch `InternalTerm` to `Arc<str>`. Small,
+  and fixes the bug for that audience.
+* **Lift `de`'s impl upstream** -- `StreamingInternalQuadIter` (`de/src/sparql.rs`)
+  is strictly better: it streams, and it supports the named graphs `hdt`'s
+  version rejects outright. The cardinality hook cannot come with it, because
+  `hdt` depends on crates.io `spareval 0.2.6` and `estimated_cardinality` exists
+  only in the DeciSym fork -- that part has to wait for the hook to be upstreamed.
+* **Drop the feature** -- defensible given it is untested in CI and unused by its
+  only in-tree consumer, and honest about which impl is the maintained one.
+
+Whichever way it goes, the feature should be added to `hdt`'s CI matrix. It
+compiles today only by luck: nothing builds it.
 
 ---
 
@@ -406,6 +508,10 @@ upstream, and it also adds the named-graph support `hdt`'s version rejects.
   adjacency list; adding paging would be a regression.
 - **`maxBufferSize` read-ahead.** Same reason — it buffers across an async FFI
   boundary that does not exist here.
+
+Both still hold as of 2026-09-18. Nothing in items 1, 3 or 4 changed the shape of
+the iterator these would wrap, and item 2 would make paging less attractive
+still: the cheaper a probe gets, the more a buffering layer costs relative to it.
 
 ## Also borrowed: the benchmarks
 
