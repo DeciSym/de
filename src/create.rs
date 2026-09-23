@@ -111,10 +111,15 @@ pub async fn do_create_with_options(
 /// where mtime granularity causes a stale cache to be treated as valid
 /// for a freshly-overwritten HDT.
 pub fn write_hdt_to_path(hdt: &hdt::Hdt, path: &Path) -> anyhow::Result<()> {
-    if let (Some(parent), Some(file_name)) = (
-        path.parent().filter(|&p| !p.as_os_str().is_empty()),
-        path.file_name().and_then(|n| n.to_str()),
-    ) {
+    // `Path::parent` reports `Some("")` for a bare file name such as
+    // `out.hdt`, which is how the CLI is normally driven from the directory
+    // holding the data (`de create -o out.hdt -d data.nt`). Resolve that to
+    // the current directory so those sidecars are cleaned up as well.
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
         let stale_prefix = format!("{file_name}.index.");
         if let Ok(entries) = fs::read_dir(parent) {
             for entry in entries.flatten() {
