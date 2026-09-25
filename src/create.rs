@@ -308,7 +308,7 @@ pub async fn files_to_rdf(
             .find(|e| e.supported_extensions().contains(&ext));
 
         if let Some(enricher) = matched_enricher {
-            debug!("Enriching file: {file}");
+            debug!("Enriching file {file} with {}", enricher.name());
             // Safe `expect` — the enricher/file_id_fn invariant was checked
             // upfront, so reaching this branch with `enrichers` non-empty
             // implies `file_id_fn` is `Some(_)`.
@@ -320,6 +320,7 @@ pub async fn files_to_rdf(
                 file_path: file,
                 file_id: &file_id,
                 root_id,
+                report: None,
             };
             let outcome = enricher
                 .enrich(&ctx)

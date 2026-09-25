@@ -3,6 +3,7 @@
 
 use async_trait::async_trait;
 use oxrdf::{IriParseError, NamedNode, Triple};
+use std::sync::{Mutex, PoisonError};
 
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -96,11 +97,70 @@ pub struct EnrichCtx<'a> {
     /// component information about the artifact. `None` means the enricher
     /// should produce file-local triples only.
     pub root_id: Option<&'a NamedNode>,
+    /// Where to report how the output was produced, for a caller that
+    /// records provenance. `None` when the caller doesn't collect reports.
+    pub report: Option<&'a EnrichReport>,
+}
+
+/// A request an enricher made to a language model, reported through
+/// [`EnrichReport::llm_call`]. Fields the enricher can't determine stay
+/// `None`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct LlmCall {
+    /// The model the enricher asked for.
+    pub model: String,
+    /// The model the server says it used, which can differ from `model`
+    /// (for example an alias resolved to a snapshot).
+    pub served_model: Option<String>,
+    /// The server's fingerprint of the backend configuration that answered.
+    pub system_fingerprint: Option<String>,
+    pub temperature: Option<f32>,
+    pub max_tokens: Option<u32>,
+    /// BLAKE3 hex digest of the prompt's instructions (the system prompt).
+    pub prompt_digest: Option<String>,
+    /// BLAKE3 hex digest of the raw response text.
+    pub response_digest: Option<String>,
+    pub prompt_tokens: Option<u64>,
+    pub completion_tokens: Option<u64>,
+}
+
+/// Collects what enrichers report about how they produced their output,
+/// handed to them through [`EnrichCtx::report`].
+#[derive(Debug, Default)]
+pub struct EnrichReport {
+    llm_calls: Mutex<Vec<LlmCall>>,
+}
+
+impl EnrichReport {
+    /// Record a request made to a language model.
+    pub fn llm_call(&self, call: LlmCall) {
+        self.llm_calls
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(call);
+    }
+
+    /// The language-model requests recorded so far, in order, leaving the
+    /// report empty.
+    pub fn take_llm_calls(&self) -> Vec<LlmCall> {
+        std::mem::take(
+            &mut *self
+                .llm_calls
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+        )
+    }
 }
 
 #[async_trait]
 pub trait Enricher: Send + Sync {
     fn supported_extensions(&self) -> Vec<&str>;
+    /// Name that callers record for files this enricher handles. Defaults to
+    /// the implementing type's path, e.g. `de_enrichers::enrichers::docx::DocxEnricher`.
+    /// Wrappers should forward the name of the enricher they wrap.
+    fn name(&self) -> &str {
+        std::any::type_name::<Self>()
+    }
     /// Extract triples from `ctx.file_path`.
     ///
     /// Return [`EnrichOutcome::Triples`] (possibly empty) when the file was
@@ -108,4 +168,47 @@ pub trait Enricher: Send + Sync {
     /// through to the generic converter — typical when the file is already in
     /// the target RDF format.
     async fn enrich(&self, ctx: &EnrichCtx<'_>) -> EnrichResult<EnrichOutcome>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct NamedByDefault;
+
+    #[async_trait]
+    impl Enricher for NamedByDefault {
+        fn supported_extensions(&self) -> Vec<&str> {
+            vec!["txt"]
+        }
+
+        async fn enrich(&self, _ctx: &EnrichCtx<'_>) -> EnrichResult<EnrichOutcome> {
+            Ok(EnrichOutcome::Declined)
+        }
+    }
+
+    #[test]
+    fn name_defaults_to_the_implementing_type() {
+        let enricher: Box<dyn Enricher> = Box::new(NamedByDefault);
+        assert_eq!(enricher.name(), std::any::type_name::<NamedByDefault>());
+        assert!(enricher.name().ends_with("::NamedByDefault"));
+    }
+
+    #[test]
+    fn report_hands_back_calls_in_order() {
+        let report = EnrichReport::default();
+        for model in ["a", "b"] {
+            report.llm_call(LlmCall {
+                model: model.to_string(),
+                ..LlmCall::default()
+            });
+        }
+        let models: Vec<_> = report
+            .take_llm_calls()
+            .into_iter()
+            .map(|call| call.model)
+            .collect();
+        assert_eq!(models, ["a", "b"]);
+        assert!(report.take_llm_calls().is_empty());
+    }
 }
