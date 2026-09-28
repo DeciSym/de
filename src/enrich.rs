@@ -187,9 +187,10 @@ pub trait Enricher: Send + Sync {
     /// Extract triples from `ctx.file_path`.
     ///
     /// Return [`EnrichOutcome::Triples`] (possibly empty) when the file was
-    /// handled. Return [`EnrichOutcome::Declined`] to let the caller fall
-    /// through to the generic converter — typical when the file is already in
-    /// the target RDF format.
+    /// handled, or [`EnrichOutcome::TriplesWithProvenance`] to also describe
+    /// how the triples were produced. Return [`EnrichOutcome::Declined`] to let
+    /// the caller fall through to the generic converter — typical when the
+    /// file is already in the target RDF format.
     async fn enrich(&self, ctx: &EnrichCtx<'_>) -> EnrichResult<EnrichOutcome>;
 }
 
