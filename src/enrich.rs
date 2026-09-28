@@ -173,12 +173,11 @@ pub fn run_iri(root: &NamedNode, path: &str) -> Result<NamedNode, IriParseError>
 #[async_trait]
 pub trait Enricher: Send + Sync {
     fn supported_extensions(&self) -> Vec<&str>;
-    /// Name that callers record for files this enricher handles. Defaults to
-    /// the implementing type's path, e.g. `de_enrichers::enrichers::docx::DocxEnricher`.
-    /// Wrappers should forward the name of the enricher they wrap.
-    fn name(&self) -> &str {
-        std::any::type_name::<Self>()
-    }
+    /// Short, stable identifier that callers record for files this enricher
+    /// handles, e.g. `docx`. It ends up in package provenance, so keep it fixed
+    /// across releases and unique among the enrichers a build uses. Wrappers
+    /// return the name of the enricher they wrap.
+    fn name(&self) -> &str;
     /// Extract triples from `ctx.file_path`.
     ///
     /// Return [`EnrichOutcome::Triples`] (possibly empty) when the file was
@@ -191,26 +190,6 @@ pub trait Enricher: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    struct NamedByDefault;
-
-    #[async_trait]
-    impl Enricher for NamedByDefault {
-        fn supported_extensions(&self) -> Vec<&str> {
-            vec!["txt"]
-        }
-
-        async fn enrich(&self, _ctx: &EnrichCtx<'_>) -> EnrichResult<EnrichOutcome> {
-            Ok(EnrichOutcome::Declined)
-        }
-    }
-
-    #[test]
-    fn name_defaults_to_the_implementing_type() {
-        let enricher: Box<dyn Enricher> = Box::new(NamedByDefault);
-        assert_eq!(enricher.name(), std::any::type_name::<NamedByDefault>());
-        assert!(enricher.name().ends_with("::NamedByDefault"));
-    }
 
     fn triple(s: &str) -> Triple {
         Triple::new(

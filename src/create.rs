@@ -791,6 +791,10 @@ mod tests {
             vec!["mock"]
         }
 
+        fn name(&self) -> &'static str {
+            "mock"
+        }
+
         async fn enrich(&self, _ctx: &EnrichCtx<'_>) -> EnrichResult<EnrichOutcome> {
             Ok(EnrichOutcome::Triples(vec![Triple::new(
                 NamedNode::new("http://example.org/mock-subject")?,
@@ -807,6 +811,10 @@ mod tests {
     impl Enricher for DescribingEnricher {
         fn supported_extensions(&self) -> Vec<&str> {
             vec!["mock"]
+        }
+
+        fn name(&self) -> &'static str {
+            "describing"
         }
 
         async fn enrich(&self, _ctx: &EnrichCtx<'_>) -> EnrichResult<EnrichOutcome> {
@@ -1014,6 +1022,10 @@ mod tests {
             vec!["mock"]
         }
 
+        fn name(&self) -> &'static str {
+            "decline"
+        }
+
         async fn enrich(&self, _ctx: &EnrichCtx<'_>) -> EnrichResult<EnrichOutcome> {
             Ok(EnrichOutcome::Declined)
         }
@@ -1025,6 +1037,10 @@ mod tests {
     impl Enricher for FailingParseEnricher {
         fn supported_extensions(&self) -> Vec<&str> {
             vec!["mock"]
+        }
+
+        fn name(&self) -> &'static str {
+            "failing-parse"
         }
 
         async fn enrich(&self, ctx: &EnrichCtx<'_>) -> EnrichResult<EnrichOutcome> {
