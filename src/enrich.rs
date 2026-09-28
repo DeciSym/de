@@ -143,18 +143,24 @@ impl EnrichCtx<'_> {
     /// A node for this run, `<root>/<path>`, or `None` without a root. What an
     /// enricher records about one run belongs on such a node rather than on
     /// [`Self::file_id`], which every package holding the file shares.
-    #[must_use]
-    pub fn run_node(&self, path: &str) -> Option<NamedNode> {
-        self.root_id.and_then(|root| run_iri(root, path).ok())
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `<root>/<path>` isn't a valid IRI.
+    pub fn run_node(&self, path: &str) -> Result<Option<NamedNode>, IriParseError> {
+        self.root_id.map(|root| run_iri(root, path)).transpose()
     }
 
     /// [`Self::run_node`] for this file: `<root>/<kind>/<key>`, where the key
-    /// is the last segment of [`Self::file_id`] (the content hash, for
-    /// content-addressed ids).
-    #[must_use]
-    pub fn file_run_node(&self, kind: &str) -> Option<NamedNode> {
-        let id = self.file_id.as_str();
-        let key = id.rsplit(['/', '#']).next().unwrap_or(id);
+    /// is the last non-empty segment of [`Self::file_id`] (the content hash,
+    /// for content-addressed ids).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the node's IRI isn't valid.
+    pub fn file_run_node(&self, kind: &str) -> Result<Option<NamedNode>, IriParseError> {
+        let id = self.file_id.as_str().trim_end_matches(['/', '#']);
+        let key = id.rsplit_once(['/', '#']).map_or(id, |(_, key)| key);
         self.run_node(&format!("{kind}/{key}"))
     }
 }
@@ -221,7 +227,7 @@ mod tests {
     }
 
     #[test]
-    fn run_nodes_hang_off_the_root() {
+    fn run_nodes_hang_off_the_root() -> Result<(), IriParseError> {
         let file = NamedNode::new_unchecked("https://decisym.ai/data/dcdb80c5");
         let root = NamedNode::new_unchecked("https://decisym.ai/data/2d47b137");
         let ctx = EnrichCtx {
@@ -230,18 +236,31 @@ mod tests {
             root_id: Some(&root),
         };
         assert_eq!(
-            ctx.run_node("llm-agent/5f2c").unwrap().as_str(),
+            ctx.run_node("llm-agent/5f2c")?.unwrap().as_str(),
             "https://decisym.ai/data/2d47b137/llm-agent/5f2c"
         );
         assert_eq!(
-            ctx.file_run_node("llm").unwrap().as_str(),
+            ctx.file_run_node("llm")?.unwrap().as_str(),
             "https://decisym.ai/data/2d47b137/llm/dcdb80c5"
         );
+        // A trailing separator on the file id doesn't leave the key empty.
+        let slashed = NamedNode::new_unchecked("https://decisym.ai/data/dcdb80c5/");
+        let slashed_ctx = EnrichCtx {
+            file_id: &slashed,
+            ..ctx
+        };
+        assert_eq!(
+            slashed_ctx.file_run_node("llm")?.unwrap().as_str(),
+            "https://decisym.ai/data/2d47b137/llm/dcdb80c5"
+        );
+        // A path that can't be part of an IRI is an error, not a missing root.
+        assert!(ctx.run_node("not an iri").is_err());
         let rootless = EnrichCtx {
             root_id: None,
             ..ctx
         };
-        assert_eq!(rootless.file_run_node("llm"), None);
+        assert_eq!(rootless.file_run_node("llm")?, None);
+        Ok(())
     }
 
     #[test]
