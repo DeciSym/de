@@ -70,14 +70,31 @@ impl EnrichError {
 /// converter.
 #[derive(Debug)]
 pub enum EnrichOutcome {
-    /// The enricher handled the file. The inner `Vec` may be empty if the
-    /// file legitimately had nothing to extract (e.g. an OOXML archive with
-    /// no `docProps/core.xml`).
-    Triples(Vec<Triple>),
+    /// The enricher handled the file. `content` is what it extracted, and may
+    /// be empty if the file legitimately had nothing to extract (e.g. an OOXML
+    /// archive with no `docProps/core.xml`). `provenance` describes how the
+    /// content was produced (e.g. the language-model requests it made). It's
+    /// written with `content` but kept apart from it, so callers can tell what
+    /// was extracted from the account of how.
+    Enriched {
+        content: Vec<Triple>,
+        provenance: Vec<Triple>,
+    },
     /// The enricher saw the file and declined to handle it (e.g. the content
     /// was already the target RDF format). The caller should fall through to
     /// generic conversion.
     Declined,
+}
+
+impl EnrichOutcome {
+    /// [`Self::Enriched`] with `content` and no provenance.
+    #[must_use]
+    pub fn enriched(content: Vec<Triple>) -> Self {
+        Self::Enriched {
+            content,
+            provenance: Vec::new(),
+        }
+    }
 }
 
 /// Per-file context handed to [`Enricher::enrich`].
@@ -98,14 +115,111 @@ pub struct EnrichCtx<'a> {
     pub root_id: Option<&'a NamedNode>,
 }
 
+impl EnrichCtx<'_> {
+    /// A node for this run, `<root>/<path>`, or `None` without a root. What an
+    /// enricher records about one run belongs on such a node rather than on
+    /// [`Self::file_id`], which every package holding the file shares.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `<root>/<path>` isn't a valid IRI.
+    pub fn run_node(&self, path: &str) -> Result<Option<NamedNode>, IriParseError> {
+        self.root_id.map(|root| run_iri(root, path)).transpose()
+    }
+
+    /// [`Self::run_node`] for this file: `<root>/<kind>/<key>`, where the key
+    /// is the last non-empty segment of [`Self::file_id`] (the content hash,
+    /// for content-addressed ids).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the node's IRI isn't valid.
+    pub fn file_run_node(&self, kind: &str) -> Result<Option<NamedNode>, IriParseError> {
+        let id = self.file_id.as_str().trim_end_matches(['/', '#']);
+        let key = id.rsplit_once(['/', '#']).map_or(id, |(_, key)| key);
+        self.run_node(&format!("{kind}/{key}"))
+    }
+}
+
+/// `root` extended by `path`, without doubling a trailing `/` or `#`.
+///
+/// # Errors
+///
+/// Returns an error if the result isn't a valid IRI.
+pub fn run_iri(root: &NamedNode, path: &str) -> Result<NamedNode, IriParseError> {
+    let root = root.as_str();
+    let sep = if root.ends_with(['/', '#']) { "" } else { "/" };
+    NamedNode::new(format!("{root}{sep}{path}"))
+}
+
 #[async_trait]
 pub trait Enricher: Send + Sync {
     fn supported_extensions(&self) -> Vec<&str>;
+    /// Short, stable identifier that callers record for files this enricher
+    /// handles, e.g. `docx`. It ends up in package provenance, so keep it fixed
+    /// across releases and unique among the enrichers a build uses. Wrappers
+    /// return the name of the enricher they wrap.
+    fn name(&self) -> &str;
     /// Extract triples from `ctx.file_path`.
     ///
-    /// Return [`EnrichOutcome::Triples`] (possibly empty) when the file was
-    /// handled. Return [`EnrichOutcome::Declined`] to let the caller fall
-    /// through to the generic converter — typical when the file is already in
-    /// the target RDF format.
+    /// Return [`EnrichOutcome::Enriched`] when the file was handled, with any
+    /// provenance describing how the content was produced. Return
+    /// [`EnrichOutcome::Declined`] to let the caller fall through to the
+    /// generic converter — typical when the file is already in the target RDF
+    /// format.
     async fn enrich(&self, ctx: &EnrichCtx<'_>) -> EnrichResult<EnrichOutcome>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn run_nodes_hang_off_the_root() -> Result<(), IriParseError> {
+        let file = NamedNode::new_unchecked("https://decisym.ai/data/dcdb80c5");
+        let root = NamedNode::new_unchecked("https://decisym.ai/data/2d47b137");
+        let ctx = EnrichCtx {
+            file_path: "report.docx",
+            file_id: &file,
+            root_id: Some(&root),
+        };
+        assert_eq!(
+            ctx.run_node("llm-agent/5f2c")?.unwrap().as_str(),
+            "https://decisym.ai/data/2d47b137/llm-agent/5f2c"
+        );
+        assert_eq!(
+            ctx.file_run_node("llm")?.unwrap().as_str(),
+            "https://decisym.ai/data/2d47b137/llm/dcdb80c5"
+        );
+        // A trailing separator on the file id doesn't leave the key empty.
+        let slashed = NamedNode::new_unchecked("https://decisym.ai/data/dcdb80c5/");
+        let slashed_ctx = EnrichCtx {
+            file_id: &slashed,
+            ..ctx
+        };
+        assert_eq!(
+            slashed_ctx.file_run_node("llm")?.unwrap().as_str(),
+            "https://decisym.ai/data/2d47b137/llm/dcdb80c5"
+        );
+        // A path that can't be part of an IRI is an error, not a missing root.
+        assert!(ctx.run_node("not an iri").is_err());
+        let rootless = EnrichCtx {
+            root_id: None,
+            ..ctx
+        };
+        assert_eq!(rootless.file_run_node("llm")?, None);
+        Ok(())
+    }
+
+    #[test]
+    fn run_iri_keeps_a_single_separator() {
+        for (root, expected) in [
+            ("https://example.org/pkg", "https://example.org/pkg/create"),
+            ("https://example.org/pkg/", "https://example.org/pkg/create"),
+            ("https://example.org/pkg#", "https://example.org/pkg#create"),
+        ] {
+            let root = NamedNode::new_unchecked(root);
+            assert_eq!(run_iri(&root, "create").unwrap().as_str(), expected);
+        }
+    }
 }

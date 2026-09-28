@@ -308,7 +308,7 @@ pub async fn files_to_rdf(
             .find(|e| e.supported_extensions().contains(&ext));
 
         if let Some(enricher) = matched_enricher {
-            debug!("Enriching file: {file}");
+            debug!("Enriching file {file} with {}", enricher.name());
             // Safe `expect` — the enricher/file_id_fn invariant was checked
             // upfront, so reaching this branch with `enrichers` non-empty
             // implies `file_id_fn` is `Some(_)`.
@@ -326,17 +326,20 @@ pub async fn files_to_rdf(
                 .await
                 .with_context(|| format!("error enriching file {file}"))?;
             match outcome {
-                EnrichOutcome::Declined => {
-                    debug!("Enricher declined {file}, routing to converter");
-                    files_to_convert.push(file.clone());
-                }
-                EnrichOutcome::Triples(triples) => {
-                    for triple in &triples {
+                EnrichOutcome::Enriched {
+                    content,
+                    provenance,
+                } => {
+                    for triple in content.iter().chain(&provenance) {
                         writeln!(out_file, "{triple} .").with_context(|| {
                             format!("error writing enriched triples for {file}")
                         })?;
                     }
                     enriched_sources.push(file.clone());
+                }
+                EnrichOutcome::Declined => {
+                    debug!("Enricher declined {file}, routing to converter");
+                    files_to_convert.push(file.clone());
                 }
             }
         }
@@ -795,13 +798,82 @@ mod tests {
             vec!["mock"]
         }
 
+        fn name(&self) -> &'static str {
+            "mock"
+        }
+
         async fn enrich(&self, _ctx: &EnrichCtx<'_>) -> EnrichResult<EnrichOutcome> {
-            Ok(EnrichOutcome::Triples(vec![Triple::new(
+            Ok(EnrichOutcome::enriched(vec![Triple::new(
                 NamedNode::new("http://example.org/mock-subject")?,
                 NamedNode::new("http://example.org/type")?,
                 NamedNode::new("http://example.org/Mock")?,
             )]))
         }
+    }
+
+    /// Returns one content triple and one provenance triple.
+    struct DescribingEnricher;
+
+    #[async_trait]
+    impl Enricher for DescribingEnricher {
+        fn supported_extensions(&self) -> Vec<&str> {
+            vec!["mock"]
+        }
+
+        fn name(&self) -> &'static str {
+            "describing"
+        }
+
+        async fn enrich(&self, _ctx: &EnrichCtx<'_>) -> EnrichResult<EnrichOutcome> {
+            let triple = |s: &str| -> EnrichResult<Triple> {
+                Ok(Triple::new(
+                    NamedNode::new(format!("http://example.org/{s}"))?,
+                    NamedNode::new("http://example.org/p")?,
+                    NamedNode::new("http://example.org/o")?,
+                ))
+            };
+            Ok(EnrichOutcome::Enriched {
+                content: vec![triple("content")?],
+                provenance: vec![triple("provenance")?],
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn files_to_rdf_writes_provenance_with_content() -> anyhow::Result<()> {
+        let tmp = tempdir()?;
+        let input = tmp.path().join("input.mock");
+        write(&input, "anything")?;
+        let input = input
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("invalid input path"))?
+            .to_string();
+
+        let mut out_file = tempfile::Builder::new().suffix(".nt").tempfile()?;
+        let enrichers: Vec<Box<dyn Enricher>> = vec![Box::new(DescribingEnricher)];
+        let file_id_fn: Option<FileIdFn> = Some(&test_file_id);
+        let result = files_to_rdf(
+            std::slice::from_ref(&input),
+            &mut out_file,
+            Arc::new(crate::rdf2nt::OxRdfConvert {}),
+            &enrichers,
+            None,
+            file_id_fn,
+            true,
+        )
+        .await?;
+
+        assert_eq!(result.enriched_sources, vec![input]);
+        let written = fs::read_to_string(out_file.path())?;
+        assert!(
+            written.contains("<http://example.org/content>"),
+            "{written}"
+        );
+        assert!(
+            written.contains("<http://example.org/provenance>"),
+            "{written}"
+        );
+        Ok(())
     }
 
     /// Returns a deterministic per-path id for tests, so the same path always
@@ -957,6 +1029,10 @@ mod tests {
             vec!["mock"]
         }
 
+        fn name(&self) -> &'static str {
+            "decline"
+        }
+
         async fn enrich(&self, _ctx: &EnrichCtx<'_>) -> EnrichResult<EnrichOutcome> {
             Ok(EnrichOutcome::Declined)
         }
@@ -968,6 +1044,10 @@ mod tests {
     impl Enricher for FailingParseEnricher {
         fn supported_extensions(&self) -> Vec<&str> {
             vec!["mock"]
+        }
+
+        fn name(&self) -> &'static str {
+            "failing-parse"
         }
 
         async fn enrich(&self, ctx: &EnrichCtx<'_>) -> EnrichResult<EnrichOutcome> {
