@@ -1,7 +1,7 @@
 // Copyright (c) 2025, Decisym, LLC
 // Licensed under the BSD 3-Clause License (see LICENSE file in the project root).
 
-use crate::enrich::{EnrichCtx, EnrichResult, Enricher};
+use crate::enrich::{EnrichCtx, EnrichOutcome, EnrichResult, Enricher};
 use crate::hdt_meta;
 use crate::rdf2nt::ConvertResult;
 use crate::rdf2nt::OxRdfConvert;
@@ -325,15 +325,22 @@ pub async fn files_to_rdf(
                 .enrich(&ctx)
                 .await
                 .with_context(|| format!("error enriching file {file}"))?;
-            if let Some((content, provenance)) = outcome.into_parts() {
-                for triple in content.iter().chain(&provenance) {
-                    writeln!(out_file, "{triple} .")
-                        .with_context(|| format!("error writing enriched triples for {file}"))?;
+            match outcome {
+                EnrichOutcome::Enriched {
+                    content,
+                    provenance,
+                } => {
+                    for triple in content.iter().chain(&provenance) {
+                        writeln!(out_file, "{triple} .").with_context(|| {
+                            format!("error writing enriched triples for {file}")
+                        })?;
+                    }
+                    enriched_sources.push(file.clone());
                 }
-                enriched_sources.push(file.clone());
-            } else {
-                debug!("Enricher declined {file}, routing to converter");
-                files_to_convert.push(file.clone());
+                EnrichOutcome::Declined => {
+                    debug!("Enricher declined {file}, routing to converter");
+                    files_to_convert.push(file.clone());
+                }
             }
         }
         // Check for triples, this is the preferred RDF format and no additional conversion is required
@@ -796,7 +803,7 @@ mod tests {
         }
 
         async fn enrich(&self, _ctx: &EnrichCtx<'_>) -> EnrichResult<EnrichOutcome> {
-            Ok(EnrichOutcome::Triples(vec![Triple::new(
+            Ok(EnrichOutcome::enriched(vec![Triple::new(
                 NamedNode::new("http://example.org/mock-subject")?,
                 NamedNode::new("http://example.org/type")?,
                 NamedNode::new("http://example.org/Mock")?,
@@ -825,7 +832,7 @@ mod tests {
                     NamedNode::new("http://example.org/o")?,
                 ))
             };
-            Ok(EnrichOutcome::TriplesWithProvenance {
+            Ok(EnrichOutcome::Enriched {
                 content: vec![triple("content")?],
                 provenance: vec![triple("provenance")?],
             })

@@ -70,15 +70,13 @@ impl EnrichError {
 /// converter.
 #[derive(Debug)]
 pub enum EnrichOutcome {
-    /// The enricher handled the file. The inner `Vec` may be empty if the
-    /// file legitimately had nothing to extract (e.g. an OOXML archive with
-    /// no `docProps/core.xml`).
-    Triples(Vec<Triple>),
-    /// The enricher handled the file and also describes how it produced
-    /// `content` (e.g. the language-model requests it made). `provenance` is
-    /// written with `content` but kept apart from it, so callers can tell
-    /// what was extracted from the account of how.
-    TriplesWithProvenance {
+    /// The enricher handled the file. `content` is what it extracted, and may
+    /// be empty if the file legitimately had nothing to extract (e.g. an OOXML
+    /// archive with no `docProps/core.xml`). `provenance` describes how the
+    /// content was produced (e.g. the language-model requests it made). It's
+    /// written with `content` but kept apart from it, so callers can tell what
+    /// was extracted from the account of how.
+    Enriched {
         content: Vec<Triple>,
         provenance: Vec<Triple>,
     },
@@ -89,34 +87,12 @@ pub enum EnrichOutcome {
 }
 
 impl EnrichOutcome {
-    /// The extracted content, or `None` if the enricher declined the file.
+    /// [`Self::Enriched`] with `content` and no provenance.
     #[must_use]
-    pub fn content(&self) -> Option<&[Triple]> {
-        match self {
-            Self::Triples(content) | Self::TriplesWithProvenance { content, .. } => Some(content),
-            Self::Declined => None,
-        }
-    }
-
-    /// Mutable access to the extracted content, or `None` if the enricher
-    /// declined the file.
-    pub fn content_mut(&mut self) -> Option<&mut Vec<Triple>> {
-        match self {
-            Self::Triples(content) | Self::TriplesWithProvenance { content, .. } => Some(content),
-            Self::Declined => None,
-        }
-    }
-
-    /// `(content, provenance)`, or `None` if the enricher declined the file.
-    #[must_use]
-    pub fn into_parts(self) -> Option<(Vec<Triple>, Vec<Triple>)> {
-        match self {
-            Self::Triples(content) => Some((content, Vec::new())),
-            Self::TriplesWithProvenance {
-                content,
-                provenance,
-            } => Some((content, provenance)),
-            Self::Declined => None,
+    pub fn enriched(content: Vec<Triple>) -> Self {
+        Self::Enriched {
+            content,
+            provenance: Vec::new(),
         }
     }
 }
@@ -186,46 +162,17 @@ pub trait Enricher: Send + Sync {
     fn name(&self) -> &str;
     /// Extract triples from `ctx.file_path`.
     ///
-    /// Return [`EnrichOutcome::Triples`] (possibly empty) when the file was
-    /// handled, or [`EnrichOutcome::TriplesWithProvenance`] to also describe
-    /// how the triples were produced. Return [`EnrichOutcome::Declined`] to let
-    /// the caller fall through to the generic converter — typical when the
-    /// file is already in the target RDF format.
+    /// Return [`EnrichOutcome::Enriched`] when the file was handled, with any
+    /// provenance describing how the content was produced. Return
+    /// [`EnrichOutcome::Declined`] to let the caller fall through to the
+    /// generic converter — typical when the file is already in the target RDF
+    /// format.
     async fn enrich(&self, ctx: &EnrichCtx<'_>) -> EnrichResult<EnrichOutcome>;
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn triple(s: &str) -> Triple {
-        Triple::new(
-            NamedNode::new_unchecked(format!("http://example.org/{s}")),
-            NamedNode::new_unchecked("http://example.org/p"),
-            NamedNode::new_unchecked("http://example.org/o"),
-        )
-    }
-
-    #[test]
-    fn outcome_keeps_content_apart_from_provenance() {
-        let plain = EnrichOutcome::Triples(vec![triple("a")]);
-        assert_eq!(plain.content(), Some(&[triple("a")][..]));
-        assert_eq!(plain.into_parts(), Some((vec![triple("a")], Vec::new())));
-
-        let mut described = EnrichOutcome::TriplesWithProvenance {
-            content: vec![triple("a")],
-            provenance: vec![triple("how")],
-        };
-        described.content_mut().unwrap().push(triple("b"));
-        assert_eq!(described.content(), Some(&[triple("a"), triple("b")][..]));
-        assert_eq!(
-            described.into_parts(),
-            Some((vec![triple("a"), triple("b")], vec![triple("how")]))
-        );
-
-        assert_eq!(EnrichOutcome::Declined.content(), None);
-        assert_eq!(EnrichOutcome::Declined.into_parts(), None);
-    }
 
     #[test]
     fn run_nodes_hang_off_the_root() -> Result<(), IriParseError> {
