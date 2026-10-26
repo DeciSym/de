@@ -40,10 +40,10 @@ http = { version = "1.4", optional = true }
 log = "0.4"
 oxhttp = { version = "0.3", optional=true }
 oxrdf = "0.3"
-oxrdfio = "0.2"
+oxrdfio = "=0.2.7"
 rayon = "1.11.0"
 sparesults = "0.3"
-spareval = { version = "0.2", features = ["sep-0002", "sep-0006"] }
+spareval = { version = "=0.2.9", features = ["sep-0002", "sep-0006"] }
 spargebra = "0.4"
 reasonable = "0.4.3"
 tempfile = {version = "3.27"}
@@ -78,11 +78,15 @@ default = []
 server = ["dep:oxhttp", "dep:http"]
 
 [patch.crates-io]
-spareval = { git = "https://github.com/DeciSym/oxigraph.git", rev = "ed7335a2bc224c4fd71b7e6dfe7ce93a96485115" }
-sparopt = { git = "https://github.com/DeciSym/oxigraph.git", rev = "ed7335a2bc224c4fd71b7e6dfe7ce93a96485115" }
-spargebra = { git = "https://github.com/DeciSym/oxigraph.git", rev = "ed7335a2bc224c4fd71b7e6dfe7ce93a96485115" }
-sparesults = { git = "https://github.com/DeciSym/oxigraph.git", rev = "ed7335a2bc224c4fd71b7e6dfe7ce93a96485115" }
-oxrdfxml = { git = "https://github.com/DeciSym/oxigraph.git", rev = "ed7335a2bc224c4fd71b7e6dfe7ce93a96485115" }
+# The exact `spareval` and `oxrdfio` pins in [dependencies] stop cargo from
+# swapping these oxigraph patches for stock crates.io crates (it only warns that
+# a patch "was not used in the crate graph"). Bump the pins with the rev, to the
+# versions in the fork's lib/spareval and lib/oxrdfio at that rev.
+spareval = { git = "https://github.com/DeciSym/oxigraph.git", rev = "78d1d86d6dff016f400dee562da5b55691a63bb6" }
+sparopt = { git = "https://github.com/DeciSym/oxigraph.git", rev = "78d1d86d6dff016f400dee562da5b55691a63bb6" }
+spargebra = { git = "https://github.com/DeciSym/oxigraph.git", rev = "78d1d86d6dff016f400dee562da5b55691a63bb6" }
+sparesults = { git = "https://github.com/DeciSym/oxigraph.git", rev = "78d1d86d6dff016f400dee562da5b55691a63bb6" }
+oxrdfxml = { git = "https://github.com/DeciSym/oxigraph.git", rev = "78d1d86d6dff016f400dee562da5b55691a63bb6" }
 reasonable = { git = "https://github.com/DeciSym/reasonable.git", rev = "c961cfc1c45a09b218d8910c387b8c5c4ef3df03" }
 hdt = { git = "https://github.com/DeciSym/hdt.git", rev = "919c725fd5f0e42662f9e3824e3f96d86baa8bb4" }
 

@@ -188,7 +188,7 @@ mod tests {
         )?;
 
         assert_eq!(result.converted, 1);
-        assert!(result.unhandled.is_empty());
+        assert_eq!(result.unhandled, [] as [std::string::String; 0]);
 
         let output_data = fs::read_to_string(output.path())?;
         assert!(
@@ -221,7 +221,7 @@ mod tests {
         let res = OxRdfConvert {}
             .convert_to_nt(vec![gz_path.to_string_lossy().into_owned()], &out.reopen()?)?;
         assert_eq!(res.converted, 1);
-        assert!(res.unhandled.is_empty());
+        assert_eq!(res.unhandled, [] as [std::string::String; 0]);
         assert_eq!(count_triples_in(&out), APPLE_TRIPLES);
         Ok(())
     }
@@ -240,7 +240,7 @@ mod tests {
         let res = OxRdfConvert {}
             .convert_to_nt(vec![bz_path.to_string_lossy().into_owned()], &out.reopen()?)?;
         assert_eq!(res.converted, 1);
-        assert!(res.unhandled.is_empty());
+        assert_eq!(res.unhandled, [] as [std::string::String; 0]);
         assert_eq!(count_triples_in(&out), APPLE_TRIPLES);
         Ok(())
     }

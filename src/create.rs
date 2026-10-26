@@ -779,7 +779,7 @@ mod tests {
         )
         .await?;
 
-        assert!(result.unknown_files.is_empty());
+        assert_eq!(result.unknown_files, [] as [std::string::String; 0]);
         assert_eq!(
             result.combined_rdf_path,
             nt_path
@@ -942,8 +942,8 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(result.unknown_files.is_empty());
-        assert!(result.enriched_sources.is_empty());
+        assert_eq!(result.unknown_files, [] as [std::string::String; 0]);
+        assert_eq!(result.enriched_sources, [] as [std::string::String; 0]);
         // single NT file optimization: combined_rdf_path should be the original file
         assert_eq!(result.combined_rdf_path, nt_path);
     }
@@ -1016,7 +1016,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(result.enriched_sources, vec![mock_path]);
-        assert!(result.unknown_files.is_empty());
+        assert_eq!(result.unknown_files, [] as [std::string::String; 0]);
         let contents = std::fs::read_to_string(result.combined_rdf_path).unwrap();
         assert!(contents.contains("<http://example.org/Mock>"));
     }
@@ -1179,7 +1179,7 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(result.enriched_sources.is_empty());
+        assert_eq!(result.enriched_sources, [] as [std::string::String; 0]);
         assert_eq!(result.unknown_files, vec![mock_path]);
     }
 }
