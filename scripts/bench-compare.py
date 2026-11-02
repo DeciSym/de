@@ -11,7 +11,7 @@ main. This script does both halves:
         is comparing against.
 
     scripts/bench-compare.py compare BASELINE CURRENT [--threshold PCT]
-                                                      [--fail-above PCT]
+                                 [--fail-above PCT] [--base-commit SHA]
         Print a Markdown table comparing two sets of results, and append it to
         the job summary when run in GitHub Actions. BASELINE and CURRENT are
         criterion output directories: target/criterion, or a downloaded
@@ -38,9 +38,11 @@ from pathlib import Path
 
 RUN_FILE = "bench-run.json"
 
-# Environment variables that pick fixtures or scales, such as DE_BENCH_SCALE.
-# Results are comparable only when these match.
+# Environment variables that change what the benchmarks measure: fixture
+# choices such as DE_BENCH_SCALE, and the size of rayon's thread pool. Results
+# are comparable only when these match.
 SETTINGS_PREFIX = "DE_"
+SETTINGS_VARS = ("RAYON_NUM_THREADS",)
 
 
 def parse_tree(arg):
@@ -110,7 +112,9 @@ def record(args):
         "rustc": command_output("rustc", "--version"),
         "cpu": cpu_model(),
         "cpus": os.cpu_count(),
-        "settings": {k: v for k, v in sorted(os.environ.items()) if k.startswith(SETTINGS_PREFIX)},
+        "settings": {
+            k: v for k, v in sorted(os.environ.items()) if k.startswith(SETTINGS_PREFIX) or k in SETTINGS_VARS
+        },
         "benchmarks": len(results),
     }
     (root / RUN_FILE).write_text(json.dumps(run, indent=2) + "\n")
@@ -170,16 +174,27 @@ def compare(args):
             "Medians of criterion's samples."
         )
         notes = []
+        base_commit = base_run.get("commit") or ""
+        if args.base_commit and base_commit and not (
+            base_commit.startswith(args.base_commit) or args.base_commit.startswith(base_commit)
+        ):
+            notes.append(
+                f"The baseline ran on `{base_commit[:7]}`, not on `{args.base_commit[:7]}`, the commit "
+                "this run builds on, so the difference also covers the commits between them."
+            )
         if base_run.get("cpu") and cur_run.get("cpu") and base_run["cpu"] != cur_run["cpu"]:
             notes.append(
                 f"The baseline ran on a different CPU ({base_run['cpu']}; this run: {cur_run['cpu']}), "
                 "so some of the difference may be the machine."
             )
+        if base_run.get("cpus") and cur_run.get("cpus") and base_run["cpus"] != cur_run["cpus"]:
+            notes.append(f"The core count changed: {base_run['cpus']} then, {cur_run['cpus']} now.")
         if base_run.get("rustc") and cur_run.get("rustc") and base_run["rustc"] != cur_run["rustc"]:
             notes.append(f"The toolchain changed: {base_run['rustc']} then, {cur_run['rustc']} now.")
         if base_run.get("settings") is not None and cur_run.get("settings") is not None:
             if base_run["settings"] != cur_run["settings"]:
-                notes.append(f"The settings changed: {base_run['settings']} then, {cur_run['settings']} now.")
+                then, now = (", ".join(f"{k}={v}" for k, v in s.items()) or "none" for s in (base_run["settings"], cur_run["settings"]))
+                notes.append(f"The settings changed: {then} then, {now} now.")
         if notes:
             out += ["", *(f"> {note}" for note in notes)]
     else:
@@ -225,6 +240,7 @@ def main():
     cmp.add_argument("current", help="current results: DIR or DIR:NAME")
     cmp.add_argument("--threshold", type=float, default=10.0, help="smallest change to report, in percent (default: 10)")
     cmp.add_argument("--fail-above", type=float, help="exit 1 when a benchmark is slower by more than this percent")
+    cmp.add_argument("--base-commit", help="the commit the current run builds on; noted when the baseline isn't from it")
 
     args = parser.parse_args()
     if args.command == "record":
