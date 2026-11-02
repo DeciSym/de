@@ -183,11 +183,11 @@ engines in that report. `q6_delete_insert` is omitted: it is a SPARQL Update,
 and HDT packages are immutable.
 
 CI runs the suite at `large` on pushes to `main` and on pull requests that
-change code, and compares each run with the one for the `main` commit it
-builds on. The comparison is in the run's summary, and each run's results are
-kept as the `bench-trainmarks` artifact. Runners are shared machines, so treat small
-changes there as noise. To compare two runs on your own machine, save each as a
-criterion baseline:
+change code. It runs it twice on one runner, on the change and on its base
+commit, and compares the two in the run's summary. Each run's results are also
+kept as the `bench-trainmarks` artifact, but runners differ in CPU from run to
+run, so compare those only with others from the same CPU model. To compare two
+runs on your own machine, save each as a criterion baseline:
 
 ```sh
 DE_BENCH_SCALE=large cargo bench --bench trainmarks -- --save-baseline main   # on main

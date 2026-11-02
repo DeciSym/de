@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Record criterion results, and compare them with an earlier run.
+"""Record criterion results, and compare two sets of them.
 
-The Benchmarks workflow (.github/workflows/bench.yml) uploads every run's
-criterion estimates as an artifact, then compares them with the newest run on
-main. This script does both halves:
+The Benchmarks workflow (.github/workflows/bench.yml) runs the benchmarks on a
+change and on its base commit, one after the other on one runner, compares the
+two with this script, and keeps the change's results as an artifact:
 
     scripts/bench-compare.py record target/criterion
         Write bench-run.json beside the results: the commit, the CI run, the
@@ -24,8 +24,9 @@ main. This script does both halves:
 
 A difference counts as slower or faster only when it is larger than
 --threshold percent and the two medians' 95% confidence intervals don't
-overlap. GitHub's runners are shared virtual machines, so identical code moves
-by a few percent from run to run, and more when the runner's CPU model differs.
+overlap. Compare results from different machines with care: on GitHub's
+runners, whose CPU model varies from run to run, identical code has moved by
+40% to 60%.
 """
 
 import argparse
@@ -138,6 +139,35 @@ def describe(run, root, name):
     return f"{where} on `{commit}`" + (f", {when}" if when else "")
 
 
+def run_differences(base_run, cur_run, base_commit_arg):
+    """Notes on how two runs from different trees differ, beyond the code."""
+    notes = []
+    base_commit = base_run.get("commit") or ""
+    if base_commit_arg and base_commit and not (
+        base_commit.startswith(base_commit_arg) or base_commit_arg.startswith(base_commit)
+    ):
+        notes.append(
+            f"The baseline ran on `{base_commit[:7]}`, not on `{base_commit_arg[:7]}`, the commit "
+            "this run builds on, so the difference also covers the commits between them."
+        )
+    if base_run.get("cpu") and cur_run.get("cpu") and base_run["cpu"] != cur_run["cpu"]:
+        notes.append(
+            f"The baseline ran on a different CPU ({base_run['cpu']}; this run: {cur_run['cpu']}), "
+            "so some of the difference may be the machine."
+        )
+    if base_run.get("cpus") and cur_run.get("cpus") and base_run["cpus"] != cur_run["cpus"]:
+        notes.append(f"The core count changed: {base_run['cpus']} then, {cur_run['cpus']} now.")
+    if base_run.get("rustc") and cur_run.get("rustc") and base_run["rustc"] != cur_run["rustc"]:
+        notes.append(f"The toolchain changed: {base_run['rustc']} then, {cur_run['rustc']} now.")
+    if base_run.get("settings") is not None and cur_run.get("settings") is not None:
+        if base_run["settings"] != cur_run["settings"]:
+            then, now = (
+                ", ".join(f"{k}={v}" for k, v in s.items()) or "none" for s in (base_run["settings"], cur_run["settings"])
+            )
+            notes.append(f"The settings changed: {then} then, {now} now.")
+    return notes
+
+
 def compare(args):
     base_root, base_name = parse_tree(args.baseline)
     cur_root, cur_name = parse_tree(args.current)
@@ -164,44 +194,34 @@ def compare(args):
             (slower if change > 0 else faster).append((bench_id, base[0], cur[0], change))
         rows.append((bench_id, fmt_time(base[0]), fmt_time(cur[0]), f"{change:+.1f}%", verdict))
 
+    # Two named baselines in one tree were measured one after the other on one
+    # machine, so there are no machine differences to report.
+    same_tree = base_root.resolve() == cur_root.resolve()
+    this_run = describe(cur_run, cur_root, cur_name)
     out = ["## Benchmarks", ""]
+    if baseline and same_tree:
+        base = f"its base, `{args.base_commit[:7]}`" if args.base_commit else f"criterion baseline `{base_name}`"
+        machine = f" ({cur_run['cpu']})" if cur_run.get("cpu") else ""
+        out.append(f"This run, {this_run}, against {base}, measured one after the other on the same machine{machine}.")
+    elif baseline:
+        out.append(f"This run, {this_run}, against {describe(base_run, base_root, base_name)}.")
+    elif args.base_commit:
+        out.append(
+            f"No results for the base, `{args.base_commit[:7]}`: it has no such benchmarks, or they didn't "
+            f"build or run. So this is {this_run} on its own."
+        )
+    else:
+        out.append(f"No baseline to compare with, so this is {this_run} on its own.")
     if baseline:
-        out.append(f"This run, {describe(cur_run, cur_root, cur_name)}, against {describe(base_run, base_root, base_name)}.")
         out.append("")
         out.append(
             f"{len(slower)} slower and {len(faster)} faster, counting changes over "
             f"{args.threshold:g}% whose 95% confidence intervals don't overlap. "
             "Medians of criterion's samples."
         )
-        notes = []
-        base_commit = base_run.get("commit") or ""
-        if args.base_commit and base_commit and not (
-            base_commit.startswith(args.base_commit) or args.base_commit.startswith(base_commit)
-        ):
-            notes.append(
-                f"The baseline ran on `{base_commit[:7]}`, not on `{args.base_commit[:7]}`, the commit "
-                "this run builds on, so the difference also covers the commits between them."
-            )
-        if base_run.get("cpu") and cur_run.get("cpu") and base_run["cpu"] != cur_run["cpu"]:
-            notes.append(
-                f"The baseline ran on a different CPU ({base_run['cpu']}; this run: {cur_run['cpu']}), "
-                "so some of the difference may be the machine."
-            )
-        if base_run.get("cpus") and cur_run.get("cpus") and base_run["cpus"] != cur_run["cpus"]:
-            notes.append(f"The core count changed: {base_run['cpus']} then, {cur_run['cpus']} now.")
-        if base_run.get("rustc") and cur_run.get("rustc") and base_run["rustc"] != cur_run["rustc"]:
-            notes.append(f"The toolchain changed: {base_run['rustc']} then, {cur_run['rustc']} now.")
-        if base_run.get("settings") is not None and cur_run.get("settings") is not None:
-            if base_run["settings"] != cur_run["settings"]:
-                then, now = (", ".join(f"{k}={v}" for k, v in s.items()) or "none" for s in (base_run["settings"], cur_run["settings"]))
-                notes.append(f"The settings changed: {then} then, {now} now.")
+        notes = [] if same_tree else run_differences(base_run, cur_run, args.base_commit)
         if notes:
             out += ["", *(f"> {note}" for note in notes)]
-    else:
-        out.append(
-            f"No baseline to compare with, so this is {describe(cur_run, cur_root, cur_name)} on its own. "
-            "Baselines come from this workflow's successful runs on main."
-        )
     out += ["", "| Benchmark | Baseline | This run | Change | |", "| --- | ---: | ---: | ---: | --- |"]
     out += [f"| `{bench_id}` | {b} | {c} | {pct} | {verdict} |" for bench_id, b, c, pct, verdict in rows]
     report = "\n".join(out) + "\n"

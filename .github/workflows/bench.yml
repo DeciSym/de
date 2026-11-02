@@ -1,23 +1,29 @@
 name: Benchmarks
 
-# Runs the criterion benchmarks and compares them with the newest run on main.
+# Runs the criterion benchmarks on a change and on its base commit, one after
+# the other on the same runner, and compares the two.
 #
-# Every run uploads its criterion estimates as an artifact, `bench-<target>`,
-# kept 90 days from main and 14 from pull requests. To compare, a run downloads
-# that artifact from the successful run on main for the commit it builds on
-# (a pull request's base, or the previous commit on main), or failing that
-# from the newest successful run on main. Each push to main is therefore
-# compared with the one before, and each pull request with its base. The
-# comparison goes to the job summary, and slower benchmarks are annotated.
+# The base is a pull request's base commit, or the previous commit on main.
+# Same-runner comparison is the point: GitHub's runners vary in CPU model from
+# run to run, and on 2026-11-02 four runs of identical code on four CPU models
+# spread 43% to 62% per benchmark, so comparing with a stored run from another
+# runner flagged most benchmarks every time. The comparison goes to the job
+# summary, and slower benchmarks are annotated.
 #
-# Runners are shared VMs, so identical code moves a few percent between runs.
+# Every run also uploads the change's criterion estimates as an artifact,
+# `bench-<target>`, kept 90 days from main and 14 from pull requests: a record,
+# comparable only with runs on the same CPU model.
+#
 # scripts/bench-compare.py counts a change only when it is over
 # BENCH_THRESHOLD percent and the confidence intervals don't overlap. It
-# reports and never fails, until BENCH_FAIL_ABOVE is set: set it, above the
-# noise main's history shows, to fail the job on a regression of that size.
+# reports and never fails, until BENCH_FAIL_ABOVE is set: set it above the
+# noise seen when both sides are the same code. A pull request that changes
+# no benchmarked code shows that noise, and so does a run started by hand with
+# its own ref as the base.
 #
 # To add a target, add a matrix entry with the command that prepares its
-# fixtures.
+# fixtures. A base commit that predates the target measures nothing, and the
+# comparison says so.
 on:
   push:
     branches: [main]
@@ -39,14 +45,17 @@ on:
       - 'Makefile'
       - '.github/workflows/bench.yml'
   workflow_dispatch:
+    inputs:
+      base:
+        description: Commit, branch or tag to compare with on the same runner. Empty measures this ref alone; this ref itself measures noise.
+        type: string
+        default: ''
 
 permissions:
   contents: read
-  # to find earlier runs and download their artifacts
-  actions: read
 
 # A new push to a pull request cancels the run it supersedes. Runs on main are
-# never cancelled, so each commit there leaves a baseline.
+# never cancelled, so each commit there leaves a record.
 concurrency:
   group: bench-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -58,9 +67,9 @@ env:
   # HDT and index building run on rayon, so the create benchmarks scale with
   # cores. A fixed pool keeps them comparable if the runners' size changes.
   RAYON_NUM_THREADS: 4
-  # The commit to compare with: a pull request's base, or the previous commit
-  # on main. Empty for a run started by hand.
-  BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+  # The commit to compare with: a pull request's base, the previous commit on
+  # main, or the `base` input of a run started by hand.
+  BASE_SHA: ${{ github.event.pull_request.base.sha || (github.event.before != '0000000000000000000000000000000000000000' && github.event.before) || inputs.base }}
   BENCH_THRESHOLD: 10
   BENCH_FAIL_ABOVE: ''
 
@@ -74,10 +83,23 @@ jobs:
       matrix:
         include:
           - bench: trainmarks
-            fixtures: make bench-init BENCH_SCALE="$DE_BENCH_SCALE"
+            fixtures: python3 scripts/gen-trainmarks-data.py "$DE_BENCH_SCALE"
+    env:
+      # One target directory for both checkouts: the second build reuses the
+      # first one's dependencies, and both runs write one criterion tree.
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
     steps:
-      - uses: actions/checkout@v7
+      - name: Check out this commit
+        uses: actions/checkout@v7
         with:
+          path: head
+          submodules: recursive
+      - name: Check out the base commit
+        if: env.BASE_SHA != ''
+        uses: actions/checkout@v7
+        with:
+          path: base
+          ref: ${{ env.BASE_SHA }}
           submodules: recursive
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
@@ -85,19 +107,44 @@ jobs:
       # See the caching note in test_build.yml.
       - uses: Swatinem/rust-cache@v2
         with:
+          workspaces: head -> ../target
           shared-key: bench
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
+      # Both sides are built before either runs, so the two runs follow each
+      # other directly. Failures on the base side are tolerated: it may predate
+      # the target or its fixtures, and then the comparison has no baseline.
       - name: Prepare fixtures
+        working-directory: head
+        run: ${{ matrix.fixtures }}
+      - name: Prepare fixtures for the base
+        id: base-fixtures
+        if: env.BASE_SHA != ''
+        continue-on-error: true
+        working-directory: base
         run: ${{ matrix.fixtures }}
       - name: Build
+        working-directory: head
         run: cargo bench --locked --bench ${{ matrix.bench }} --no-run
+      - name: Build the base
+        id: base-build
+        if: steps.base-fixtures.outcome == 'success'
+        continue-on-error: true
+        working-directory: base
+        run: cargo bench --locked --bench ${{ matrix.bench }} --no-run
+      - name: Run benchmarks on the base
+        if: steps.base-build.outcome == 'success'
+        continue-on-error: true
+        working-directory: base
+        run: cargo bench --locked --bench ${{ matrix.bench }} -- --noplot --save-baseline base
       - name: Run benchmarks
-        run: cargo bench --locked --bench ${{ matrix.bench }} -- --noplot
+        working-directory: head
+        run: cargo bench --locked --bench ${{ matrix.bench }} -- --noplot --save-baseline head
       - name: Record run details
-        run: scripts/bench-compare.py record target/criterion
+        run: head/scripts/bench-compare.py record "$CARGO_TARGET_DIR/criterion"
 
       # Upload before comparing, so the results survive a failed comparison.
+      # criterion's `new` holds the last run, this commit's.
       - uses: actions/upload-artifact@v7
         with:
           name: bench-${{ matrix.bench }}
@@ -110,24 +157,7 @@ jobs:
           # on the existing name.
           overwrite: true
 
-      - name: Download baseline
-        env:
-          GH_TOKEN: ${{ github.token }}
-          ARTIFACT: bench-${{ matrix.bench }}
+      - name: Compare with the base
         run: |
-          # Fails when this workflow has never run on main; treat that as no runs.
-          runs=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow bench.yml --branch main \
-            --status success --limit 100 --json databaseId,headSha) || runs='[]'
-          run=$(jq -r --arg sha "$BASE_SHA" --argjson self "$GITHUB_RUN_ID" '
-            map(select(.databaseId != $self))
-            | (map(select(.headSha == $sha)) + .)[0].databaseId // empty' <<<"$runs")
-          if [ -z "$run" ]; then
-            echo "No earlier successful run on main to compare with."
-          elif ! gh run download "$run" --repo "$GITHUB_REPOSITORY" --name "$ARTIFACT" --dir baseline; then
-            echo "::notice::Run $run has no $ARTIFACT artifact to compare with: it expired, or the target is new."
-          fi
-
-      - name: Compare with baseline
-        run: |
-          scripts/bench-compare.py compare baseline target/criterion --base-commit "$BASE_SHA" \
-            --threshold "$BENCH_THRESHOLD" ${BENCH_FAIL_ABOVE:+--fail-above "$BENCH_FAIL_ABOVE"}
+          head/scripts/bench-compare.py compare "$CARGO_TARGET_DIR/criterion:base" "$CARGO_TARGET_DIR/criterion:head" \
+            --base-commit "$BASE_SHA" --threshold "$BENCH_THRESHOLD" ${BENCH_FAIL_ABOVE:+--fail-above "$BENCH_FAIL_ABOVE"}
