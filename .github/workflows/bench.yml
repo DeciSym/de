@@ -111,9 +111,9 @@ jobs:
           shared-key: bench
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      # Both sides are built before either runs, so the two runs follow each
-      # other directly. Failures on the base side are tolerated: it may predate
-      # the target or its fixtures, and then the comparison has no baseline.
+      # The base side builds and runs first. Failures there are tolerated: it
+      # may predate the target or its fixtures, and then the comparison has no
+      # baseline.
       - name: Prepare fixtures
         working-directory: head
         run: ${{ matrix.fixtures }}
@@ -123,9 +123,6 @@ jobs:
         continue-on-error: true
         working-directory: base
         run: ${{ matrix.fixtures }}
-      - name: Build
-        working-directory: head
-        run: cargo bench --locked --bench ${{ matrix.bench }} --no-run
       - name: Build the base
         id: base-build
         if: steps.base-fixtures.outcome == 'success'
@@ -137,6 +134,19 @@ jobs:
         continue-on-error: true
         working-directory: base
         run: cargo bench --locked --bench ${{ matrix.bench }} -- --noplot --save-baseline base
+      # Cargo hashes workspace packages by their path within the workspace, so
+      # both checkouts' builds of de get the same file names. This commit's
+      # sources were checked out before the base was built, so they look older
+      # than the base's artifacts, and the next build would reuse those.
+      - name: Remove the base's build of the workspace
+        if: env.BASE_SHA != ''
+        working-directory: head
+        run: |
+          mapfile -t packages < <(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | "-p", .name')
+          cargo clean --release "${packages[@]}"
+      - name: Build
+        working-directory: head
+        run: cargo bench --locked --bench ${{ matrix.bench }} --no-run
       - name: Run benchmarks
         working-directory: head
         run: cargo bench --locked --bench ${{ matrix.bench }} -- --noplot --save-baseline head
