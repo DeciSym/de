@@ -1,0 +1,125 @@
+name: Benchmarks
+
+# Runs the criterion benchmarks and compares them with the newest run on main.
+#
+# Every run uploads its criterion estimates as an artifact, `bench-<target>`,
+# kept 90 days from main and 14 from pull requests. To compare, a run downloads
+# that artifact from the successful run on main for the commit it builds on
+# (a pull request's base, or the previous commit on main), or failing that
+# from the newest successful run on main. Each push to main is therefore
+# compared with the one before, and each pull request with its base. The
+# comparison goes to the job summary, and slower benchmarks are annotated.
+#
+# Runners are shared VMs, so identical code moves a few percent between runs.
+# scripts/bench-compare.py counts a change only when it is over
+# BENCH_THRESHOLD percent and the confidence intervals don't overlap. It
+# reports and never fails, until BENCH_FAIL_ABOVE is set: set it, above the
+# noise main's history shows, to fail the job on a regression of that size.
+#
+# To add a target, add a matrix entry with the command that prepares its
+# fixtures.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'benches/**'
+      - 'scripts/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'Makefile'
+      - '.github/workflows/bench.yml'
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'benches/**'
+      - 'scripts/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'Makefile'
+      - '.github/workflows/bench.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  # to find earlier runs and download their artifacts
+  actions: read
+
+# A new push to a pull request cancels the run it supersedes. Runs on main are
+# never cancelled, so each commit there leaves a baseline.
+concurrency:
+  group: bench-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  # trainmarks fixture size: ~1M triples
+  DE_BENCH_SCALE: large
+  BENCH_THRESHOLD: 10
+  BENCH_FAIL_ABOVE: ''
+
+jobs:
+  bench:
+    name: ${{ matrix.bench }} benchmarks
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - bench: trainmarks
+            fixtures: make bench-init BENCH_SCALE="$DE_BENCH_SCALE"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+      # See the caching note in test_build.yml.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: bench
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Prepare fixtures
+        run: ${{ matrix.fixtures }}
+      - name: Build
+        run: cargo bench --locked --bench ${{ matrix.bench }} --no-run
+      - name: Run benchmarks
+        run: cargo bench --locked --bench ${{ matrix.bench }} -- --noplot
+      - name: Record run details
+        run: scripts/bench-compare.py record target/criterion
+
+      # Upload before comparing, so the results survive a failed comparison.
+      - uses: actions/upload-artifact@v7
+        with:
+          name: bench-${{ matrix.bench }}
+          path: |
+            target/criterion/bench-run.json
+            target/criterion/**/new/*.json
+          retention-days: ${{ github.ref == 'refs/heads/main' && 90 || 14 }}
+          if-no-files-found: error
+
+      - name: Download baseline
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT: bench-${{ matrix.bench }}
+          PREFERRED_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          # Fails when this workflow has never run on main; treat that as no runs.
+          runs=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow bench.yml --branch main \
+            --status success --limit 100 --json databaseId,headSha) || runs='[]'
+          run=$(jq -r --arg sha "$PREFERRED_SHA" --argjson self "$GITHUB_RUN_ID" '
+            map(select(.databaseId != $self))
+            | (map(select(.headSha == $sha)) + .)[0].databaseId // empty' <<<"$runs")
+          if [ -z "$run" ]; then
+            echo "No earlier successful run on main to compare with."
+          elif ! gh run download "$run" --repo "$GITHUB_REPOSITORY" --name "$ARTIFACT" --dir baseline; then
+            echo "::notice::Run $run has no $ARTIFACT artifact to compare with: it expired, or the target is new."
+          fi
+
+      - name: Compare with baseline
+        run: |
+          scripts/bench-compare.py compare baseline target/criterion \
+            --threshold "$BENCH_THRESHOLD" ${BENCH_FAIL_ABOVE:+--fail-above "$BENCH_FAIL_ABOVE"}

@@ -25,9 +25,9 @@ test: init
 presubmit: lint test
 
 # Check out the trainmarks submodule and generate the N-Triples and Turtle
-# fixtures the trainmarks bench target reads. Split out from `init` because
+# fixtures the trainmarks bench target reads. Kept apart from `init` because
 # they are ~150 MB at the default scale and only the benchmarks need them.
-bench-init: init
+bench-init:
 	git submodule update --init benches/trainmarks
 	python3 scripts/gen-trainmarks-data.py $(BENCH_SCALE)
 

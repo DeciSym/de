@@ -181,3 +181,16 @@ Without the fixtures the suite prints how to get them and measures nothing, so
 The queries are trainmarks' own `q1`–`q5`, shared verbatim with the other
 engines in that report. `q6_delete_insert` is omitted: it is a SPARQL Update,
 and HDT packages are immutable.
+
+CI runs the suite at `large` on pushes to `main` and on pull requests that
+change code, and compares each run with the one for the `main` commit it
+builds on. The comparison is in the run's summary, and each run's results are
+kept as the `bench-trainmarks` artifact. Runners are shared machines, so treat small
+changes there as noise. To compare two runs on your own machine, save each as a
+criterion baseline:
+
+```sh
+DE_BENCH_SCALE=large cargo bench --bench trainmarks -- --save-baseline main   # on main
+DE_BENCH_SCALE=large cargo bench --bench trainmarks -- --save-baseline mine   # on your branch
+scripts/bench-compare.py compare target/criterion:main target/criterion:mine
+```
