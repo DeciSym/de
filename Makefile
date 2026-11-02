@@ -56,8 +56,9 @@ docker.test: docker
 	${HUB}/de:${TAG} \
 	query --data /data/superhero.ttl --sparql /data/hero-height.rq -q | tr -d '\r'| diff - tests/goldens/superhero-query.csv
 
+# cargo-deb runs the release build itself; a separate `cargo build --release`
+# beforehand only made it compile `de` a second time.
 release: init
-	cargo build --release --features=server
 	cargo deb --deb-version ${VERSION} --features=server
 
 serve: docker

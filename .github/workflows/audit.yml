@@ -4,6 +4,8 @@ name: Security Audit
 # audit is driven by nightly.yml, which calls this workflow.
 on:
   push:
+    branches: [main]
+  pull_request:
   workflow_dispatch:
   workflow_call:
 
@@ -11,9 +13,13 @@ jobs:
   audit:
     runs-on: ubuntu-latest
     steps:
+      # cargo audit reads Cargo.lock only, so no submodules.
       - uses: actions/checkout@v7
+      # audit-check uses an installed cargo-audit. Without one it runs
+      # `cargo install cargo-audit`, which took 2 min 44 s of a 3 min job.
+      - uses: taiki-e/install-action@v2
         with:
-          submodules: recursive
+          tool: cargo-audit
       - uses: rustsec/audit-check@v2.0.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
