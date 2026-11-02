@@ -10,13 +10,13 @@ init:
 	@command -v cargo-machete >/dev/null 2>&1 || cargo install cargo-machete
 	@command -v cargo-deb >/dev/null 2>&1 || cargo install cargo-deb
 
+# Clippy runs once per feature set: `server` gates code in and out, so the
+# default build can warn about things the all-features build can't see.
 lint:
 	@command -v cargo-machete >/dev/null 2>&1 || cargo install cargo-machete
-	@command -v cargo-deb >/dev/null 2>&1 || cargo install cargo-deb
 	cargo fmt --check
 	cargo machete
-	cargo clippy --workspace --all-targets --no-deps
-	cargo clippy --workspace --all-targets --all-features --no-deps
+	cargo clippy --workspace --all-targets -- -D warnings -W clippy::pedantic
 	cargo clippy --workspace --all-targets --all-features -- -D warnings -W clippy::pedantic
 
 test: init
