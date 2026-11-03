@@ -10,13 +10,13 @@ init:
 	@command -v cargo-machete >/dev/null 2>&1 || cargo install cargo-machete
 	@command -v cargo-deb >/dev/null 2>&1 || cargo install cargo-deb
 
+# Clippy runs once per feature set: `server` gates code in and out, so the
+# default build can warn about things the all-features build can't see.
 lint:
 	@command -v cargo-machete >/dev/null 2>&1 || cargo install cargo-machete
-	@command -v cargo-deb >/dev/null 2>&1 || cargo install cargo-deb
 	cargo fmt --check
 	cargo machete
-	cargo clippy --workspace --all-targets --no-deps
-	cargo clippy --workspace --all-targets --all-features --no-deps
+	cargo clippy --workspace --all-targets -- -D warnings -W clippy::pedantic
 	cargo clippy --workspace --all-targets --all-features -- -D warnings -W clippy::pedantic
 
 test: init
@@ -25,9 +25,9 @@ test: init
 presubmit: lint test
 
 # Check out the trainmarks submodule and generate the N-Triples and Turtle
-# fixtures the trainmarks bench target reads. Split out from `init` because
+# fixtures the trainmarks bench target reads. Kept apart from `init` because
 # they are ~150 MB at the default scale and only the benchmarks need them.
-bench-init: init
+bench-init:
 	git submodule update --init benches/trainmarks
 	python3 scripts/gen-trainmarks-data.py $(BENCH_SCALE)
 
@@ -56,8 +56,9 @@ docker.test: docker
 	${HUB}/de:${TAG} \
 	query --data /data/superhero.ttl --sparql /data/hero-height.rq -q | tr -d '\r'| diff - tests/goldens/superhero-query.csv
 
+# cargo-deb runs the release build itself; a separate `cargo build --release`
+# beforehand only made it compile `de` a second time.
 release: init
-	cargo build --release --features=server
 	cargo deb --deb-version ${VERSION} --features=server
 
 serve: docker

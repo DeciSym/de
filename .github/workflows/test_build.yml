@@ -7,8 +7,14 @@ name: Build and Test
 # this file cron-free means the merge-gating checks can never be switched off
 # behind our backs. The weekly nightly-toolchain run lives in nightly.yml and
 # calls back into this workflow via `workflow_call`.
+#
+# Pushes to main and pull requests run CI, including pull requests from forks.
+# A branch without a pull request doesn't: open a draft pull request, or start
+# a run by hand with workflow_dispatch.
 on:
   push:
+    branches: [main]
+  pull_request:
   workflow_dispatch:
     inputs:
       toolchain:
@@ -25,32 +31,33 @@ on:
         type: string
         default: stable
 
+# A new push to a pull request cancels the run it supersedes. Runs on main are
+# never cancelled.
+concurrency:
+  group: build-and-test-${{ inputs.toolchain || 'stable' }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CARGO_TERM_COLOR: always
 
+# Caching, here and in lint.yml and bench.yml. Swatinem/rust-cache saves the
+# dependency builds (not de itself), and doesn't save when it restored an exact
+# match, so whichever job writes a key first fixes what it holds. Hence:
+#
+# - One shared-key per kind of build: `test` (dev profile, all features and
+#   dev-dependencies), `release` (the .deb), `lint` and `bench`. Jobs that
+#   build the same way share a key, and one of them writes it.
+# - Only main writes, and only with the stable toolchain. Pull requests restore
+#   main's caches (a branch can read its base branch's caches), so they don't
+#   fill the 10 GB quota and evict main's. A nightly build isn't worth saving:
+#   next week's nightly is a different compiler and can't use it.
+# - The key leaves out Cargo.lock. rust-cache adds the lockfile's hash itself
+#   and falls back to the newest cache without it, so a dependency bump
+#   rebuilds only what changed.
 jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-    - uses: actions/checkout@v7
-      with:
-        submodules: recursive
-
-    - uses: actions-rust-lang/setup-rust-toolchain@v1
-      with:
-        toolchain: ${{ inputs.toolchain || 'stable' }}
-        cache: false
-
-    - uses: Swatinem/rust-cache@v2
-      with: 
-        shared-key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-    - name: Build
-      run: cargo build --verbose
-
   end-to-end:
     name: end-to-end test
     runs-on: ubuntu-latest
-    needs: build
     steps:
     - uses: actions/checkout@v7
       with:
@@ -61,15 +68,22 @@ jobs:
         cache: false
     - uses: Swatinem/rust-cache@v2
       with:
-        shared-key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+        shared-key: test
+        save-if: ${{ github.ref == 'refs/heads/main' && (inputs.toolchain || 'stable') == 'stable' }}
+    - uses: taiki-e/install-action@v2
+      with:
+        tool: cargo-nextest
 
+    # Every test target except the server and W3C ones, which run in the jobs
+    # below. The `ci` profile in .config/nextest.toml leaves those two out.
     - name: Run Rust integration tests
-      run: make test
+      run: cargo nextest run --workspace --all-features --locked --profile ci
+    - name: Run doc tests
+      run: cargo test --workspace --all-features --locked --doc
 
   server-test:
     name: server test
     runs-on: ubuntu-latest
-    needs: build
     steps:
     - uses: actions/checkout@v7
       with:
@@ -80,15 +94,15 @@ jobs:
         cache: false
     - uses: Swatinem/rust-cache@v2
       with:
-        shared-key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+        shared-key: test
+        save-if: false
 
     - name: Run server integration tests
-      run: cargo test --test test-server --features server
+      run: cargo test --all-features --locked --test test-server
 
   w3c-conformance:
     name: W3C SPARQL/RDF conformance
     runs-on: ubuntu-latest
-    needs: build
     steps:
     - uses: actions/checkout@v7
       with:
@@ -99,19 +113,19 @@ jobs:
         cache: false
     - uses: Swatinem/rust-cache@v2
       with:
-        shared-key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+        shared-key: test
+        save-if: false
 
     # Exercises `de`'s `do_query_with_dataset` against the upstream W3C suite
     # via the shared `w3c-validation` workspace crate. Pinned as its own job
-    # (rather than buried in `make test`) so failures here surface a named
-    # red/green signal in the CI run summary.
+    # (rather than buried in the end-to-end job) so failures here surface a
+    # named red/green signal in the CI run summary.
     - name: Run W3C conformance suite
-      run: cargo test --test w3c-sparql --all-features
+      run: cargo test --all-features --locked --test w3c-sparql
 
   docker-test:
     name: docker image test
     runs-on: ubuntu-latest
-    needs: build
     steps:
     - uses: actions/checkout@v7
       with:
@@ -122,6 +136,12 @@ jobs:
         cache: false
     - uses: Swatinem/rust-cache@v2
       with:
-        shared-key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+        shared-key: release
+        save-if: ${{ github.ref == 'refs/heads/main' && (inputs.toolchain || 'stable') == 'stable' }}
+    # `make release` runs `init`, which installs both when they're missing.
+    # Prebuilt binaries save compiling them on every run.
+    - uses: taiki-e/install-action@v2
+      with:
+        tool: cargo-deb,cargo-machete
     - name: Run Docker test
       run: make docker.test

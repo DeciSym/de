@@ -1,0 +1,42 @@
+name: Lint
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A new push to a pull request cancels the run it supersedes. Runs on main are
+# never cancelled.
+concurrency:
+  group: lint-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    steps:
+      # The server feature embeds templates/yasgui, so clippy needs the submodule.
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          components: rustfmt, clippy
+          cache: false
+      # Caching follows the note in test_build.yml: one key per kind of build,
+      # written only by main.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: lint
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      # A prebuilt binary; `make lint` would otherwise compile it from source.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-machete
+      - name: Lint
+        run: make lint

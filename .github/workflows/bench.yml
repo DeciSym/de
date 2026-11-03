@@ -1,0 +1,176 @@
+name: Benchmarks
+
+# Runs the criterion benchmarks on a change and on its base commit, one after
+# the other on the same runner, and compares the two.
+#
+# The base is a pull request's base commit, or the previous commit on main.
+# Same-runner comparison is the point: GitHub's runners vary in CPU model from
+# run to run, and on 2026-11-02 four runs of identical code on four CPU models
+# spread 43% to 62% per benchmark, so comparing with a stored run from another
+# runner flagged most benchmarks every time. The comparison goes to the job
+# summary, and slower benchmarks are annotated.
+#
+# Every run also uploads the change's criterion estimates as an artifact,
+# `bench-<target>`, kept 90 days from main and 14 from pull requests: a record,
+# comparable only with runs on the same CPU model.
+#
+# scripts/bench-compare.py counts a change only when it is over
+# BENCH_THRESHOLD percent and the confidence intervals don't overlap, and fails
+# the job when a benchmark is more than BENCH_FAIL_ABOVE percent slower. Both
+# sit above the noise seen when both sides are the same code: up to 11.7% in
+# the first two samples, on 2026-11-02. A pull request that changes no
+# benchmarked code adds a sample, and so does a run started by hand with its
+# own ref as the base. Each run compares with its own base, so a slowdown that
+# is accepted and merged fails only its pull request and the push that lands
+# it, not the runs after.
+#
+# To add a target, add a matrix entry with the command that prepares its
+# fixtures. A base commit that predates the target measures nothing, and the
+# comparison says so.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'benches/**'
+      - 'scripts/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'Makefile'
+      - '.github/workflows/bench.yml'
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'benches/**'
+      - 'scripts/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'Makefile'
+      - '.github/workflows/bench.yml'
+  workflow_dispatch:
+    inputs:
+      base:
+        description: Commit, branch or tag to compare with on the same runner. Empty measures this ref alone; this ref itself measures noise.
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+# A new push to a pull request cancels the run it supersedes. Runs on main are
+# never cancelled, so each commit there leaves a record.
+concurrency:
+  group: bench-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  # trainmarks fixture size: ~1M triples
+  DE_BENCH_SCALE: large
+  # HDT and index building run on rayon, so the create benchmarks scale with
+  # cores. A fixed pool keeps them comparable if the runners' size changes.
+  RAYON_NUM_THREADS: 4
+  # The commit to compare with: a pull request's base, the previous commit on
+  # main, or the `base` input of a run started by hand.
+  BASE_SHA: ${{ github.event.pull_request.base.sha || (github.event.before != '0000000000000000000000000000000000000000' && github.event.before) || inputs.base }}
+  BENCH_THRESHOLD: 15
+  BENCH_FAIL_ABOVE: 25
+
+jobs:
+  bench:
+    name: ${{ matrix.bench }} benchmarks
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - bench: trainmarks
+            fixtures: python3 scripts/gen-trainmarks-data.py "$DE_BENCH_SCALE"
+    env:
+      # One target directory for both checkouts: the second build reuses the
+      # first one's dependencies, and both runs write one criterion tree.
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+    steps:
+      - name: Check out this commit
+        uses: actions/checkout@v7
+        with:
+          path: head
+          submodules: recursive
+      - name: Check out the base commit
+        if: env.BASE_SHA != ''
+        uses: actions/checkout@v7
+        with:
+          path: base
+          ref: ${{ env.BASE_SHA }}
+          submodules: recursive
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+      # See the caching note in test_build.yml.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: head -> ../target
+          shared-key: bench
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      # The base side builds and runs first. Failures there are tolerated: it
+      # may predate the target or its fixtures, and then the comparison has no
+      # baseline.
+      - name: Prepare fixtures
+        working-directory: head
+        run: ${{ matrix.fixtures }}
+      - name: Prepare fixtures for the base
+        id: base-fixtures
+        if: env.BASE_SHA != ''
+        continue-on-error: true
+        working-directory: base
+        run: ${{ matrix.fixtures }}
+      - name: Build the base
+        id: base-build
+        if: steps.base-fixtures.outcome == 'success'
+        continue-on-error: true
+        working-directory: base
+        run: cargo bench --locked --bench ${{ matrix.bench }} --no-run
+      - name: Run benchmarks on the base
+        if: steps.base-build.outcome == 'success'
+        continue-on-error: true
+        working-directory: base
+        run: cargo bench --locked --bench ${{ matrix.bench }} -- --noplot --save-baseline base
+      # Cargo hashes workspace packages by their path within the workspace, so
+      # both checkouts' builds of de get the same file names. This commit's
+      # sources were checked out before the base was built, so they look older
+      # than the base's artifacts, and the next build would reuse those.
+      - name: Remove the base's build of the workspace
+        if: env.BASE_SHA != ''
+        working-directory: head
+        run: |
+          mapfile -t packages < <(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | "-p", .name')
+          cargo clean --release "${packages[@]}"
+      - name: Build
+        working-directory: head
+        run: cargo bench --locked --bench ${{ matrix.bench }} --no-run
+      - name: Run benchmarks
+        working-directory: head
+        run: cargo bench --locked --bench ${{ matrix.bench }} -- --noplot --save-baseline head
+      - name: Record run details
+        run: head/scripts/bench-compare.py record "$CARGO_TARGET_DIR/criterion"
+
+      # Upload before comparing, so the results survive a failed comparison.
+      # criterion's `new` holds the last run, this commit's.
+      - uses: actions/upload-artifact@v7
+        with:
+          name: bench-${{ matrix.bench }}
+          path: |
+            target/criterion/bench-run.json
+            target/criterion/**/new/*.json
+          retention-days: ${{ github.ref == 'refs/heads/main' && 90 || 14 }}
+          if-no-files-found: error
+          # A re-run replaces the earlier attempt's results instead of failing
+          # on the existing name.
+          overwrite: true
+
+      - name: Compare with the base
+        run: |
+          head/scripts/bench-compare.py compare "$CARGO_TARGET_DIR/criterion:base" "$CARGO_TARGET_DIR/criterion:head" \
+            --base-commit "$BASE_SHA" --threshold "$BENCH_THRESHOLD" ${BENCH_FAIL_ABOVE:+--fail-above "$BENCH_FAIL_ABOVE"}

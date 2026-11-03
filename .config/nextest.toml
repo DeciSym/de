@@ -1,0 +1,7 @@
+# CI runs the HTTP endpoint and W3C conformance targets as jobs of their own, so
+# they show up as named checks (see .github/workflows/test_build.yml). The `ci`
+# profile leaves them out of the end-to-end job so that nothing runs twice.
+# `make test` still runs every target, with plain `cargo test`.
+[profile.ci]
+default-filter = "not (binary_id(de::test-server) | binary_id(de::w3c-sparql))"
+fail-fast = false
