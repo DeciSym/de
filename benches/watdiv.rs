@@ -13,8 +13,8 @@
 //!
 //! Opening and parsing are therefore on the measured path. That is noise
 //! against the complex templates (C3 takes seconds), but most of the lightest:
-//! on a laptop, S7 takes 1.7 ms this way, against tens of microseconds to
-//! evaluate. The light templates track the fixed cost of a query more than
+//! on a laptop, S7 takes about half a millisecond this way, against tens of
+//! microseconds to evaluate. The light templates track the fixed cost of a query more than
 //! evaluation; the complex ones track evaluation, and C3 in particular tracks
 //! join order.
 //!
