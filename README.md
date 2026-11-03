@@ -1,7 +1,7 @@
-[![Latest Version](https://img.shields.io/crates/v/de.svg)](https://crates.io/crates/de)
-[![Lint](https://github.com/DeciSym/de/actions/workflows/format_check.yml/badge.svg)](https://github.com/DeciSym/de/actions/workflows/format_check.yml)
+[![Lint](https://github.com/DeciSym/de/actions/workflows/lint.yml/badge.svg)](https://github.com/DeciSym/de/actions/workflows/lint.yml)
 [![Build](https://github.com/DeciSym/de/actions/workflows/test_build.yml/badge.svg)](https://github.com/DeciSym/de/actions/workflows/test_build.yml)
-[![Documentation](https://docs.rs/de/badge.svg)](https://docs.rs/de/)
+[![Security Audit](https://github.com/DeciSym/de/actions/workflows/audit.yml/badge.svg)](https://github.com/DeciSym/de/actions/workflows/audit.yml)
+[![License](https://img.shields.io/github/license/DeciSym/de)](LICENSE)
 
 # DeciSym Engine (`de`)
 
