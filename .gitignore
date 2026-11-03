@@ -8,3 +8,6 @@
 *.hdt.index.*
 
 Cargo.lock
+
+# Downloaded benchmark fixtures (see scripts/fetch-watdiv-data.sh).
+/benches/watdiv/

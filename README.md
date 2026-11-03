@@ -182,14 +182,28 @@ The queries are trainmarks' own `q1`–`q5`, shared verbatim with the other
 engines in that report. `q6_delete_insert` is omitted: it is a SPARQL Update,
 and HDT packages are immutable.
 
-CI runs the suite at `large` on pushes to `main` and on pull requests that
-change code. It runs it twice on one runner, on the change and on its base
-commit, and compares the two in the run's summary. It flags changes over 15%,
-and fails when a benchmark is more than 25% slower than on the base. Each run's
-results are also kept as the `bench-trainmarks` artifact, but runners differ
-in CPU from run to run, so compare those only with others from the same CPU
-model. To compare two runs on your own machine, save each as a criterion
-baseline:
+The `watdiv` suite runs the WatDiv workload Comunica uses for its own HDT
+engine: a published `dataset.hdt` (~1M triples) and twenty query templates with
+five instances each. Each benchmark answers a template's five instances the way
+`de query` would, so it includes opening the package and parsing the queries.
+That is noise for the complex templates, where join order decides the time, but
+most of the cost of the lightest ones. `make bench-watdiv` downloads the
+fixtures, pinned to one commit of `comunica/comunica-performance-assets` and
+checked by SHA-256, and runs the suite:
+
+```sh
+make bench-watdiv                       # scale 10, ~1M triples
+WATDIV_SCALE=100 make bench-watdiv      # ~10M triples
+```
+
+CI runs both suites, trainmarks at `large` and WatDiv at scale 10, on pushes to
+`main` and on pull requests that change code. It runs each twice on one
+runner, on the change and on its base commit, and compares the two in the run's
+summary. It flags changes over 15%, and fails when a benchmark is more than 25%
+slower than on the base. Each run's results are also kept as the
+`bench-trainmarks` and `bench-watdiv` artifacts, but runners differ in CPU from
+run to run, so compare those only with others from the same CPU model. To
+compare two runs on your own machine, save each as a criterion baseline:
 
 ```sh
 DE_BENCH_SCALE=large cargo bench --bench trainmarks -- --save-baseline main   # on main
