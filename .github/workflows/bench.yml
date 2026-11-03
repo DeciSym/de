@@ -15,11 +15,14 @@ name: Benchmarks
 # comparable only with runs on the same CPU model.
 #
 # scripts/bench-compare.py counts a change only when it is over
-# BENCH_THRESHOLD percent and the confidence intervals don't overlap. It
-# reports and never fails, until BENCH_FAIL_ABOVE is set: set it above the
-# noise seen when both sides are the same code. A pull request that changes
-# no benchmarked code shows that noise, and so does a run started by hand with
-# its own ref as the base.
+# BENCH_THRESHOLD percent and the confidence intervals don't overlap, and fails
+# the job when a benchmark is more than BENCH_FAIL_ABOVE percent slower. Both
+# sit above the noise seen when both sides are the same code: up to 11.7% in
+# the first two samples, on 2026-11-02. A pull request that changes no
+# benchmarked code adds a sample, and so does a run started by hand with its
+# own ref as the base. Each run compares with its own base, so a slowdown that
+# is accepted and merged fails only its pull request and the push that lands
+# it, not the runs after.
 #
 # To add a target, add a matrix entry with the command that prepares its
 # fixtures. A base commit that predates the target measures nothing, and the
@@ -70,8 +73,8 @@ env:
   # The commit to compare with: a pull request's base, the previous commit on
   # main, or the `base` input of a run started by hand.
   BASE_SHA: ${{ github.event.pull_request.base.sha || (github.event.before != '0000000000000000000000000000000000000000' && github.event.before) || inputs.base }}
-  BENCH_THRESHOLD: 10
-  BENCH_FAIL_ABOVE: ''
+  BENCH_THRESHOLD: 15
+  BENCH_FAIL_ABOVE: 25
 
 jobs:
   bench:
