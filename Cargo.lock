@@ -861,7 +861,7 @@ dependencies = [
 [[package]]
 name = "hdt"
 version = "0.7.3"
-source = "git+https://github.com/DeciSym/hdt.git?rev=919c725fd5f0e42662f9e3824e3f96d86baa8bb4#919c725fd5f0e42662f9e3824e3f96d86baa8bb4"
+source = "git+https://github.com/DeciSym/hdt.git?rev=8a4f52b91455be2739fe4b124db45e7649e6f209#8a4f52b91455be2739fe4b124db45e7649e6f209"
 dependencies = [
  "ahash",
  "bincode 2.0.1",
@@ -1356,7 +1356,7 @@ dependencies = [
 [[package]]
 name = "oxrdfxml"
 version = "0.2.5"
-source = "git+https://github.com/DeciSym/oxigraph.git?rev=78d1d86d6dff016f400dee562da5b55691a63bb6#78d1d86d6dff016f400dee562da5b55691a63bb6"
+source = "git+https://github.com/DeciSym/oxigraph.git?rev=7eddf6eda5f378832bf1ff12beb6eeec3862c8ad#7eddf6eda5f378832bf1ff12beb6eeec3862c8ad"
 dependencies = [
  "oxilangtag",
  "oxiri",
@@ -1948,7 +1948,7 @@ dependencies = [
 [[package]]
 name = "sparesults"
 version = "0.3.5"
-source = "git+https://github.com/DeciSym/oxigraph.git?rev=78d1d86d6dff016f400dee562da5b55691a63bb6#78d1d86d6dff016f400dee562da5b55691a63bb6"
+source = "git+https://github.com/DeciSym/oxigraph.git?rev=7eddf6eda5f378832bf1ff12beb6eeec3862c8ad#7eddf6eda5f378832bf1ff12beb6eeec3862c8ad"
 dependencies = [
  "json-event-parser",
  "memchr",
@@ -1960,7 +1960,7 @@ dependencies = [
 [[package]]
 name = "spareval"
 version = "0.2.9"
-source = "git+https://github.com/DeciSym/oxigraph.git?rev=78d1d86d6dff016f400dee562da5b55691a63bb6#78d1d86d6dff016f400dee562da5b55691a63bb6"
+source = "git+https://github.com/DeciSym/oxigraph.git?rev=7eddf6eda5f378832bf1ff12beb6eeec3862c8ad#7eddf6eda5f378832bf1ff12beb6eeec3862c8ad"
 dependencies = [
  "hex",
  "json-event-parser",
@@ -1982,7 +1982,7 @@ dependencies = [
 [[package]]
 name = "spargebra"
 version = "0.4.8"
-source = "git+https://github.com/DeciSym/oxigraph.git?rev=78d1d86d6dff016f400dee562da5b55691a63bb6#78d1d86d6dff016f400dee562da5b55691a63bb6"
+source = "git+https://github.com/DeciSym/oxigraph.git?rev=7eddf6eda5f378832bf1ff12beb6eeec3862c8ad#7eddf6eda5f378832bf1ff12beb6eeec3862c8ad"
 dependencies = [
  "oxilangtag",
  "oxiri",
@@ -1995,7 +1995,7 @@ dependencies = [
 [[package]]
 name = "sparopt"
 version = "0.3.9"
-source = "git+https://github.com/DeciSym/oxigraph.git?rev=78d1d86d6dff016f400dee562da5b55691a63bb6#78d1d86d6dff016f400dee562da5b55691a63bb6"
+source = "git+https://github.com/DeciSym/oxigraph.git?rev=7eddf6eda5f378832bf1ff12beb6eeec3862c8ad#7eddf6eda5f378832bf1ff12beb6eeec3862c8ad"
 dependencies = [
  "oxrdf",
  "rand",
