@@ -67,6 +67,8 @@ env:
   CARGO_TERM_COLOR: always
   # trainmarks fixture size: ~1M triples
   DE_BENCH_SCALE: large
+  # WatDiv dataset scale: ~1M triples
+  DE_WATDIV_SCALE: 10
   # HDT and index building run on rayon, so the create benchmarks scale with
   # cores. A fixed pool keeps them comparable if the runners' size changes.
   RAYON_NUM_THREADS: 4
@@ -87,6 +89,8 @@ jobs:
         include:
           - bench: trainmarks
             fixtures: python3 scripts/gen-trainmarks-data.py "$DE_BENCH_SCALE"
+          - bench: watdiv
+            fixtures: scripts/fetch-watdiv-data.sh "$DE_WATDIV_SCALE"
     env:
       # One target directory for both checkouts: the second build reuses the
       # first one's dependencies, and both runs write one criterion tree.

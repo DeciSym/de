@@ -4,6 +4,9 @@ VERSION ?= 0.0.0-test
 # Dataset scale for the trainmarks benchmarks: medium (~100K triples),
 # large (~1M) or xlarge (~10M). Must match DE_BENCH_SCALE at bench time.
 BENCH_SCALE ?= large
+# WatDiv dataset scale: 10 (~1M triples) or 100 (~10M). Matches Comunica's
+# benchmark-watdiv-hdt and benchmark-watdiv-hdt-100.
+WATDIV_SCALE ?= 10
 
 init:
 	scripts/download-sample-bench.sh
@@ -32,7 +35,13 @@ bench-init:
 	python3 scripts/gen-trainmarks-data.py $(BENCH_SCALE)
 
 bench: bench-init
-	DE_BENCH_SCALE=$(BENCH_SCALE) cargo bench
+	DE_BENCH_SCALE=$(BENCH_SCALE) cargo bench --bench trainmarks
+
+# Download the WatDiv fixtures Comunica publishes (an already-built dataset.hdt
+# plus the twenty query templates) and run the WatDiv query benchmarks.
+bench-watdiv:
+	scripts/fetch-watdiv-data.sh $(WATDIV_SCALE)
+	DE_WATDIV_SCALE=$(WATDIV_SCALE) cargo bench --bench watdiv
 
 build:
 	cargo build --features=server
