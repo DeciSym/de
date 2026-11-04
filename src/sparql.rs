@@ -215,6 +215,7 @@ impl HandleCache {
     }
 
     /// Forget handles for files that are no longer part of the dataset.
+    #[cfg(feature = "server")]
     fn retain_paths(&mut self, keep: &HashSet<PathBuf>) {
         self.entries.retain(|path, _| keep.contains(path));
     }
