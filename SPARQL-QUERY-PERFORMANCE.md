@@ -1,7 +1,7 @@
 # SPARQL-over-HDT query performance: findings and plan
 
-Status: items 1, 3 and 4 done; items 2 and 5 open.
-Started 2026-09-16, last updated 2026-09-18.
+Status: items 1, 3 and 4 done; items 2 and 5 open; item 6 proposed.
+Started 2026-09-16, last updated 2026-11-04.
 
 This note records what a read of [comunica-feature-hdt] (Comunica's SPARQL-over-HDT
 support) suggests for `de` and for the [`hdt`] crate it builds on, why each item
@@ -17,23 +17,25 @@ example, and the correction is more useful than the original.
 | 3. Open each HDT once per process | done | `get_snapshot` -99.6%; 5 GB package decoded once, not per request |
 | 4. Local fixes in `de/src/sparql.rs` | done | WatDiv -2 to -15%, BSBM -8 to -31% |
 | 5. `hdt/src/sparql.rs` materialises everything | open | `hdt` crate hygiene; no effect on `de` |
+| 6. Exact per-predicate counts, stored with the index | proposed | removes the cold first-query sampling, about 0.35 ms per newly opened package on CI; makes `?P?` exact |
 
 Measurements live in [`BENCHMARKS.md`](BENCHMARKS.md), including a note on why
-this machine cannot be trusted for a sequential A/B.
+this machine cannot be trusted for a sequential A/B. Since #22, CI runs the
+benchmarks on a pull request's base and head on one runner and compares them,
+which is what the 2026-11-04 numbers below come from.
 
-**Local build overrides.** Items 1 and 4 change `hdt` and the DeciSym oxigraph
-fork as well as `de`. Until those are pushed and the pins in `Cargo.toml` are
-bumped, `de` builds against working trees through a git-ignored
-`.cargo/config.toml`:
+**Pins.** Items 1 and 4 change `hdt` and the DeciSym oxigraph fork as well as
+`de`. Both are pushed, and `Cargo.toml` pins them:
 
-| Crate | Working tree | Branch, commit |
+| Crate | Repository, branch | Commit |
 | --- | --- | --- |
-| `hdt` | `../hdt` | `perf-qwt-opus-max`, `8a4f52b` (committed, unpushed) |
-| `spareval`, `sparopt`, `spargebra`, `sparesults`, `oxrdfxml` | `../oxigraph-cardinality` | `cardinality-estimator-hook`, `85f04251` (committed, unpushed) -- a worktree off the pinned `ed7335a2` |
+| `hdt` | DeciSym/hdt, `perf-qwt-opus-max` | `8a4f52b`, one commit on top of `main`'s `919c725f` |
+| `spareval`, `sparopt`, `spargebra`, `sparesults`, `oxrdfxml` | DeciSym/oxigraph, `cardinality-estimator-hook-v0513` | `7eddf6ed`: the hook (`85f04251`), ported from `de-v0510-rederive` to `de-v0513-rederive` |
 
 The five oxigraph crates have to move as a set; patching only some of them would
-put two versions of `spargebra`'s types in the graph. A checkout without that
-file keeps using the pinned revisions and builds `de` as it was.
+put two versions of `spargebra`'s types in the graph. To iterate on `hdt` or the
+fork alongside `de`, point the same five crates and `hdt` at working trees in a
+git-ignored `.cargo/config.toml`.
 
 [comunica-feature-hdt]: https://github.com/comunica/comunica-feature-hdt
 [`hdt`]: https://github.com/DeciSym/hdt
@@ -99,6 +101,15 @@ estimates without caching cost more than the better plans saved.
   with a leaf-only cost model does not always improve when the leaves get more
   accurate — a join-order search that estimates *intermediate* sizes is the next
   thing to try.
+* S3 is fixed (2026-11-04, `f5e50e1`). It started from 137 `publisher` triples
+  rather than 162 products of one category, which is right by count. But a
+  predicate-only pattern is read through the predicate's wavelet index, at
+  1.84 µs a triple against 0.77 µs for an object-anchored one, and S3 ran 40%
+  slower on CI. `estimated_cardinality` now weights predicate-only counts by
+  `PREDICATE_INDEX_ROW_COST` (3). On CI afterwards, S3 is +0.4% against `main`
+  and C3 −96%. S5 (+17%), F2 (+15%), S7 (+11%) and F4 (+10%) remain. They are
+  partly the cold sampling item 6 removes, and partly ties between
+  object-anchored patterns that a cost per access path could break.
 
 ### Background: what this replaced
 
@@ -495,6 +506,79 @@ That leaves a choice worth making deliberately rather than by default:
 
 Whichever way it goes, the feature should be added to `hdt`'s CI matrix. It
 compiles today only by luck: nothing builds it.
+
+---
+
+## 6. Exact per-predicate counts, stored with the index
+
+Status: proposed (2026-11-04).
+
+Join ordering wants to know how many triples each predicate has: `publisher`
+137, `caption` 224 and `hasGenre` 5,845 in WatDiv scale 10. An HDT file doesn't
+say. Its header carries only VoID statistics for the dataset as a whole; for
+the WatDiv package:
+
+| Header field | Value |
+| --- | ---: |
+| `void:triples` | 1,079,876 |
+| `void:properties` (distinct predicates) | 86 |
+| `void:distinctSubjects` | 52,505 |
+| `void:distinctObjects` | 105,975 |
+
+So `hdt`'s `predicate_cardinality` works the count out. The wavelet index gives
+the number of subject-predicate pairs for a predicate at once, but the triples
+are the sum of each pair's object-run length. `hdt` therefore samples
+`PREDICATE_SAMPLE` (32) pairs spread across the predicate's occurrences,
+averages their run lengths and multiplies back out. The answer is exact only
+when the predicate has 32 pairs or fewer; `publisher` has 137. It's cached in
+the `Hdt` value, so it's paid again every time a package is opened.
+
+### What that costs
+
+The first query against a newly opened package pays for every predicate-only
+pattern's sample; later queries hit the cache. In one process, S3's first of
+five instances plans in about 130 µs and the other four in 15 to 26 µs, which
+is `main`'s speed. In CI's `watdiv_do_query` group, which opens the package on
+every iteration, that cold first query is most of the gap between templates.
+The per-call overhead (`do_query` minus evaluation alone) is 0.90 ms for S7,
+whose patterns are anchored, but 1.26 to 1.30 ms for F2, F4 and S3, about
+0.35 ms more. `de serve` keeps packages open (item 3), so it pays once per
+package. A one-shot `de query` pays on every invocation.
+
+### Proposal
+
+1. **Count once, while building the index sidecar.** When `hdt` builds
+   `.index.v5-rust-cache`, walk the triples once and add each
+   subject-predicate pair's object-run length to its predicate's total: one
+   `u64` per predicate, 86 for WatDiv. That pass takes milliseconds next to the
+   seconds the wavelet index already takes, and the counts are loaded with the
+   rest of the sidecar. `predicate_cardinality` becomes an exact array read
+   from the first query on. The sidecar format changes, so its version suffix
+   goes to `v6`; existing sidecars are rebuilt once.
+2. **Optionally, carry the counts in the header too.** VoID already has
+   vocabulary for this: one `void:propertyPartition` per predicate, with
+   `void:property` and `void:triples`. `de create` could write those into the
+   header of every HDT it builds, so the counts travel with the file and any
+   tool can read them. Reading would prefer header partitions when present
+   and fall back to the sidecar, which covers HDTs built elsewhere, such as
+   Comunica's WatDiv package.
+
+### What it won't fix
+
+S5's remaining +17% on CI is about 0.66 ms per iteration. Roughly half is this
+cold sampling; the rest comes from S5 choosing differently between two
+object-anchored patterns that tie on shape. Exact counts don't change that
+choice. A cost per access path or an intermediate-size estimate (item 1, "Still
+open") would. Exact counts can still change plans where the
+32-pair sample misjudges a predicate with skewed run lengths. Measure BSBM as
+well as WatDiv before and after.
+
+### Done when
+
+* `?P?` cardinalities are exact and cost an array read from the first query
+  after a package is opened.
+* In CI's `watdiv_do_query` group, the per-call overhead of F2, F4 and S3 falls
+  to S7's.
 
 ---
 
