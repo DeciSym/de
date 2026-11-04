@@ -72,10 +72,7 @@ fn fixtures() -> Option<(String, PathBuf, PathBuf)> {
     let dir = fixture_dir(&scale);
     let hdt = dir.join("dataset.hdt");
     let queries_dir = dir.join("queries");
-    if let Some(missing) = [&hdt, &queries_dir]
-        .into_iter()
-        .find(|path| !path.exists())
-    {
+    if let Some(missing) = [&hdt, &queries_dir].into_iter().find(|path| !path.exists()) {
         eprintln!(
             "skipping WatDiv benchmarks: {} is missing.\n\
              run `make bench-watdiv` (or `WATDIV_SCALE={scale} make bench-watdiv`) to download \
