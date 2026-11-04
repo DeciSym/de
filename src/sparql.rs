@@ -757,6 +757,30 @@ fn unscoped_pattern(
     Some(unscoped)
 }
 
+/// How many times as much a triple costs to read when only its predicate is
+/// bound.
+///
+/// HDT reads a predicate-only pattern (`?s <p> ?o`) through the predicate's
+/// wavelet index, one `select` per triple, while a pattern with its subject or
+/// object bound reads a contiguous range of an adjacency list. On `WatDiv` scale
+/// 10 the predicate path took 1.84 µs a triple against 0.77 µs for an
+/// object-anchored pattern, about 2.4 times as much. Counting rows alone, the
+/// optimiser started `WatDiv`'s S3 from 137 `publisher` triples rather than 162
+/// products of one category, and S3 ran about 40% slower for it. 3 is the
+/// weight that was measured end to end: it recovered most of that without
+/// losing the plans the counts improved.
+const PREDICATE_INDEX_ROW_COST: usize = 3;
+
+/// The relative cost of reading one triple of a pattern whose subject,
+/// predicate and object are bound as given.
+fn row_cost(subject_bound: bool, predicate_bound: bool, object_bound: bool) -> usize {
+    if predicate_bound && !subject_bound && !object_bound {
+        PREDICATE_INDEX_ROW_COST
+    } else {
+        1
+    }
+}
+
 impl StreamingInternalQuadIter<'_> {
     fn ensure_current_iter(&mut self) -> bool {
         while self.current_iter.is_none() {
@@ -873,7 +897,8 @@ impl<'a> QueryableDataset<'a> for &'a AggregateHdtSnapshot {
         keys.into_iter().map(Ok)
     }
 
-    /// Count the triples matching a pattern, summed over the graphs it reads.
+    /// Count the triples matching a pattern, summed over the graphs it reads, and
+    /// weighted by what each one costs to read ([`row_cost`]).
     ///
     /// Comunica's HDT source does the same thing through `countTriples`, and for
     /// the same reason: without it the optimiser scores every `?s <p> ?o`
@@ -884,7 +909,10 @@ impl<'a> QueryableDataset<'a> for &'a AggregateHdtSnapshot {
     /// Most shapes cost O(1) here because the HDT index already knows the extent
     /// of the range a pattern walks, so this stays far cheaper than the plan it
     /// improves. `?P?` and `S?O` come back as approximations, which is fine:
-    /// the number is only ever compared against other patterns' numbers.
+    /// the number is only ever compared against other patterns' numbers. That is
+    /// also why the weight belongs here: the optimiser ranks patterns by these
+    /// numbers alone, so a count is only comparable once it reflects how
+    /// expensive its triples are to produce.
     fn estimated_cardinality(
         &self,
         subject: Option<&Arc<str>>,
@@ -903,10 +931,11 @@ impl<'a> QueryableDataset<'a> for &'a AggregateHdtSnapshot {
             else {
                 continue;
             };
-            total = total.saturating_add(
-                hdt.cardinality(subject.as_deref(), predicate.as_deref(), object.as_deref())
-                    .value,
-            );
+            let count = hdt
+                .cardinality(subject.as_deref(), predicate.as_deref(), object.as_deref())
+                .value;
+            let cost = row_cost(subject.is_some(), predicate.is_some(), object.is_some());
+            total = total.saturating_add(count.saturating_mul(cost));
         }
         Some(total)
     }
@@ -1056,7 +1085,8 @@ mod tests {
     use super::*;
     #[cfg(not(feature = "server"))]
     use super::{
-        AggregateHdtSnapshot, QueryEvaluationError, query, scoped_blank_node, unscoped_pattern_term,
+        AggregateHdtSnapshot, PREDICATE_INDEX_ROW_COST, QueryEvaluationError, query, row_cost,
+        scoped_blank_node, unscoped_pattern_term,
     };
     #[cfg(feature = "server")]
     use spareval::QueryableDataset;
@@ -1610,5 +1640,25 @@ mod tests {
             unscoped_pattern_term(&scoped, &graph_b).is_none(),
             "scoped blank nodes should stay graph-local"
         );
+    }
+
+    #[test]
+    fn test_row_cost_weights_only_predicate_only_patterns() {
+        assert_eq!(row_cost(false, true, false), PREDICATE_INDEX_ROW_COST);
+        for (subject, predicate, object) in [
+            (false, false, false),
+            (true, false, false),
+            (false, false, true),
+            (true, true, false),
+            (false, true, true),
+            (true, false, true),
+            (true, true, true),
+        ] {
+            assert_eq!(
+                row_cost(subject, predicate, object),
+                1,
+                "subject {subject}, predicate {predicate}, object {object}"
+            );
+        }
     }
 }
