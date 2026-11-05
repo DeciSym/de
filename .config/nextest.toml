@@ -3,5 +3,5 @@
 # profile leaves them out of the end-to-end job so that nothing runs twice.
 # `make test` still runs every target, with plain `cargo test`.
 [profile.ci]
-default-filter = "not (binary_id(de::test-server) | binary_id(de::w3c-sparql))"
+default-filter = "not (binary_id(de::test-serve) | binary_id(de::w3c-sparql))"
 fail-fast = false

@@ -98,7 +98,7 @@ jobs:
         save-if: false
 
     - name: Run server integration tests
-      run: cargo test --all-features --locked --test test-server
+      run: cargo test --all-features --locked --test test-serve
 
   w3c-conformance:
     name: W3C SPARQL/RDF conformance
