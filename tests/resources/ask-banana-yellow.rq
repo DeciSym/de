@@ -1,0 +1,2 @@
+PREFIX ex: <http://example.org/>
+ASK { ex:Banana ex:hasColor "yellow" }

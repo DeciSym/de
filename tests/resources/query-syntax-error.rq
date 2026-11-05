@@ -1,0 +1,1 @@
+SELEC ?fruit WHERE { ?fruit ?p ?o }

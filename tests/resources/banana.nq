@@ -1,0 +1,12 @@
+<http://example.org/Banana> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example.org/Fruit> .
+<http://example.org/Banana> <http://example.org/hasColor> "yellow" .
+<http://example.org/Banana> <http://example.org/hasTaste> "sweet" .
+<http://example.org/Banana> <http://example.org/hasShape> "curved" .
+<http://example.org/Banana> <http://example.org/hasWeight> "120 grams" .
+<http://example.org/Banana> <http://example.org/growsIn> <http://example.org/TropicalClimate> .
+<http://example.org/Banana> <http://example.org/isEdible> "true"^^<http://www.w3.org/2001/XMLSchema#boolean> .
+<http://example.org/Banana> <http://example.org/hasVitamin> <http://example.org/VitaminB6> .
+<http://example.org/Banana> <http://example.org/hasPrice> "$0.50" .
+<http://example.org/Banana> <http://example.org/hasOrigin> "Ecuador" .
+<http://example.org/Fruit> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/2000/01/rdf-schema#Class> .
+<http://example.org/Fruit> <http://www.w3.org/2000/01/rdf-schema#label> "Fruit" .
