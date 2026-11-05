@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+         xmlns:rdfs="http://www.w3.org/2000/01/rdf-schema#"
+         xmlns:ex="http://example.org/">
+  <ex:Fruit rdf:about="http://example.org/Banana">
+    <ex:hasColor>yellow</ex:hasColor>
+    <ex:hasTaste>sweet</ex:hasTaste>
+    <ex:hasShape>curved</ex:hasShape>
+    <ex:hasWeight>120 grams</ex:hasWeight>
+    <ex:growsIn rdf:resource="http://example.org/TropicalClimate"/>
+    <ex:isEdible rdf:datatype="http://www.w3.org/2001/XMLSchema#boolean">true</ex:isEdible>
+    <ex:hasVitamin rdf:resource="http://example.org/VitaminB6"/>
+    <ex:hasPrice>$0.50</ex:hasPrice>
+    <ex:hasOrigin>Ecuador</ex:hasOrigin>
+  </ex:Fruit>
+  <rdfs:Class rdf:about="http://example.org/Fruit">
+    <rdfs:label>Fruit</rdfs:label>
+  </rdfs:Class>
+</rdf:RDF>

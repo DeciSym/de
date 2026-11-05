@@ -207,20 +207,14 @@ pub async fn do_query_with_dataset_with_options<W: Write>(
         } else {
             let mut dir_path_vec = Vec::new();
             let mut source_hdt_cache = HashMap::new();
-            let mut hdt_path_vec = Vec::new();
-            for source_file in &dataset_key.default_data_files {
-                let hdt_path = prepare_source_hdt_path(
-                    source_file,
-                    entailment_mode,
-                    &mut source_hdt_cache,
-                    &mut dir_path_vec,
-                )
-                .await
-                .map_err(|e| anyhow::anyhow!("Error reading data files: {e}"))?;
-                hdt_path_vec.push(hdt_path);
-            }
-            hdt_path_vec.sort_unstable();
-            hdt_path_vec.dedup();
+            let hdt_path_vec = prepare_default_graph_hdt_paths(
+                &dataset_key.default_data_files,
+                entailment_mode,
+                &mut source_hdt_cache,
+                &mut dir_path_vec,
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("Error reading data files: {e}"))?;
 
             let mut named_hdt_graphs = Vec::new();
             for binding in &dataset_key.named_graphs {
@@ -638,6 +632,58 @@ async fn prepare_source_hdt_path(
 
     source_hdt_cache.insert(source_file.to_string(), resolved_hdt_path.clone());
     Ok(resolved_hdt_path)
+}
+
+/// Prepares the files of the default graph, returning the HDT paths to query.
+///
+/// The default graph is the merge of its files, so with entailment its closure
+/// has to be computed over all of them at once: an ontology in one file must
+/// apply to the data in another. Without entailment each file is prepared on
+/// its own, which lets a file that is also bound as a named graph be converted
+/// only once. Named graphs always keep a closure of their own.
+async fn prepare_default_graph_hdt_paths(
+    default_data_files: &[String],
+    entailment_mode: EntailmentMode,
+    source_hdt_cache: &mut HashMap<String, String>,
+    dir_path_vec: &mut Vec<String>,
+) -> anyhow::Result<Vec<String>> {
+    if entailment_mode == EntailmentMode::OwlRl && default_data_files.len() > 1 {
+        let merged =
+            prepare_merged_hdt_path(default_data_files, entailment_mode, dir_path_vec).await?;
+        return Ok(vec![merged]);
+    }
+    let mut hdt_paths = Vec::with_capacity(default_data_files.len());
+    for source_file in default_data_files {
+        hdt_paths.push(
+            prepare_source_hdt_path(source_file, entailment_mode, source_hdt_cache, dir_path_vec)
+                .await?,
+        );
+    }
+    hdt_paths.sort_unstable();
+    hdt_paths.dedup();
+    Ok(hdt_paths)
+}
+
+/// Prepares several source files as one HDT, so that entailment is computed
+/// over their merge rather than over each file on its own.
+async fn prepare_merged_hdt_path(
+    source_files: &[String],
+    entailment_mode: EntailmentMode,
+    dir_path_vec: &mut Vec<String>,
+) -> anyhow::Result<String> {
+    let prepared = handle_files(source_files.to_vec(), entailment_mode).await?;
+    dir_path_vec.extend(prepared.cleanup_dirs);
+    match prepared.hdt_paths.as_slice() {
+        [] => {
+            let (dir, path) = create_empty_hdt_for_named_graph()?;
+            dir_path_vec.push(dir);
+            Ok(path)
+        }
+        [path] => Ok(path.clone()),
+        paths => Err(anyhow::anyhow!(
+            "multiple prepared HDT paths for sources {source_files:?}: {paths:?}"
+        )),
+    }
 }
 
 #[allow(clippy::too_many_lines)]

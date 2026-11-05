@@ -1,0 +1,27 @@
+{
+  "@context": {
+    "ex": "http://example.org/",
+    "rdfs": "http://www.w3.org/2000/01/rdf-schema#",
+    "xsd": "http://www.w3.org/2001/XMLSchema#"
+  },
+  "@graph": [
+    {
+      "@id": "ex:Banana",
+      "@type": "ex:Fruit",
+      "ex:hasColor": "yellow",
+      "ex:hasTaste": "sweet",
+      "ex:hasShape": "curved",
+      "ex:hasWeight": "120 grams",
+      "ex:growsIn": { "@id": "ex:TropicalClimate" },
+      "ex:isEdible": { "@value": "true", "@type": "xsd:boolean" },
+      "ex:hasVitamin": { "@id": "ex:VitaminB6" },
+      "ex:hasPrice": "$0.50",
+      "ex:hasOrigin": "Ecuador"
+    },
+    {
+      "@id": "ex:Fruit",
+      "@type": "rdfs:Class",
+      "rdfs:label": "Fruit"
+    }
+  ]
+}
