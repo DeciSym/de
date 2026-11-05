@@ -486,24 +486,39 @@ async fn test_query_owl_rl_entailment() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The same entailment with the ontology passed as a separate `--data` file.
-/// Each input is prepared, and its closure computed, on its own, so the
-/// subclass axiom in one file never reaches the data in the other.
+/// The same entailment with the ontology passed as a separate `--data` file,
+/// once as Turtle and once as HDT. The default graph is the merge of all
+/// `--data` files, so the subclass axiom in one applies to the data in the
+/// other.
 #[tokio::test]
-#[ignore = "entailment is computed per --data file, not over their union"]
 async fn test_query_owl_rl_entailment_across_data_files() -> anyhow::Result<()> {
-    let data = [
-        "tests/resources/banana.ttl".to_string(),
-        "tests/resources/fruit-ontology.ttl".to_string(),
-    ];
-    let on = query_output(
-        &data,
-        "tests/resources/query-food.rq",
-        query::EntailmentMode::OwlRl,
-        &query::DeOutput::CSV,
+    let tmp_dir = tempdir()?;
+    let ontology_hdt = tmp_dir.path().join("fruit-ontology.hdt");
+    let ontology_hdt = ontology_hdt.to_string_lossy().to_string();
+    create::do_create(
+        &ontology_hdt,
+        &["tests/resources/fruit-ontology.ttl".to_string()],
     )
     .await?;
-    assert_eq!(on.replace('\r', "").trim(), golden("query-owl-rl.csv")?);
+
+    for ontology in [
+        "tests/resources/fruit-ontology.ttl".to_string(),
+        ontology_hdt,
+    ] {
+        let data = ["tests/resources/banana.ttl".to_string(), ontology.clone()];
+        let on = query_output(
+            &data,
+            "tests/resources/query-food.rq",
+            query::EntailmentMode::OwlRl,
+            &query::DeOutput::CSV,
+        )
+        .await?;
+        assert_eq!(
+            on.replace('\r', "").trim(),
+            golden("query-owl-rl.csv")?,
+            "ontology from {ontology}"
+        );
+    }
     Ok(())
 }
 
