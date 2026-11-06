@@ -14,9 +14,9 @@ default-run = "de"
 keywords = ["hdt", "rdf", "semantic-web", "triple-store", "sparql"]
 categories = ["command-line-utilities"]
 # Benchmark fixtures: the trainmarks submodule is a separate repo of fixtures
-# and harnesses for other engines, and the WatDiv directory holds downloaded
-# datasets. None of it belongs in the published crate.
-exclude = ["benches/trainmarks", "benches/watdiv"]
+# and harnesses for other engines, and the WatDiv and BSBM directories hold
+# downloaded/generated datasets. None of it belongs in the published crate.
+exclude = ["benches/trainmarks", "benches/watdiv", "benches/bsbm"]
 
 [[bin]]
 name = "de"
@@ -29,6 +29,10 @@ harness = false
 
 [[bench]]
 name = "watdiv"
+harness = false
+
+[[bench]]
+name = "bsbm"
 harness = false
 
 [dependencies]
@@ -87,11 +91,11 @@ server = ["dep:oxhttp", "dep:http"]
 # swapping these oxigraph patches for stock crates.io crates (it only warns that
 # a patch "was not used in the crate graph"). Bump the pins with the rev, to the
 # versions in the fork's lib/spareval and lib/oxrdfio at that rev.
-spareval = { git = "https://github.com/DeciSym/oxigraph.git", rev = "78d1d86d6dff016f400dee562da5b55691a63bb6" }
-sparopt = { git = "https://github.com/DeciSym/oxigraph.git", rev = "78d1d86d6dff016f400dee562da5b55691a63bb6" }
-spargebra = { git = "https://github.com/DeciSym/oxigraph.git", rev = "78d1d86d6dff016f400dee562da5b55691a63bb6" }
-sparesults = { git = "https://github.com/DeciSym/oxigraph.git", rev = "78d1d86d6dff016f400dee562da5b55691a63bb6" }
-oxrdfxml = { git = "https://github.com/DeciSym/oxigraph.git", rev = "78d1d86d6dff016f400dee562da5b55691a63bb6" }
+spareval = { git = "https://github.com/DeciSym/oxigraph.git", rev = "7eddf6eda5f378832bf1ff12beb6eeec3862c8ad" }
+sparopt = { git = "https://github.com/DeciSym/oxigraph.git", rev = "7eddf6eda5f378832bf1ff12beb6eeec3862c8ad" }
+spargebra = { git = "https://github.com/DeciSym/oxigraph.git", rev = "7eddf6eda5f378832bf1ff12beb6eeec3862c8ad" }
+sparesults = { git = "https://github.com/DeciSym/oxigraph.git", rev = "7eddf6eda5f378832bf1ff12beb6eeec3862c8ad" }
+oxrdfxml = { git = "https://github.com/DeciSym/oxigraph.git", rev = "7eddf6eda5f378832bf1ff12beb6eeec3862c8ad" }
 reasonable = { git = "https://github.com/DeciSym/reasonable.git", rev = "c961cfc1c45a09b218d8910c387b8c5c4ef3df03" }
-hdt = { git = "https://github.com/DeciSym/hdt.git", rev = "919c725fd5f0e42662f9e3824e3f96d86baa8bb4" }
+hdt = { git = "https://github.com/DeciSym/hdt.git", rev = "8a4f52b91455be2739fe4b124db45e7649e6f209" }
 

@@ -6,10 +6,10 @@ use spargebra::{Query, SparqlParser};
 use std::{
     collections::{HashMap, HashSet},
     io::{Error, ErrorKind},
-    iter,
     path::{Path, PathBuf},
     str::FromStr,
-    sync::{Arc, RwLock},
+    sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock},
+    time::SystemTime,
 };
 
 fn lock_read_file_paths<'a>(
@@ -37,26 +37,300 @@ fn graph_uri_for_path(path: &Path) -> anyhow::Result<String> {
 }
 
 /// Boundary over a Header-Dictionary-Triples (HDT) storage layer.
-/// Stores file paths only; HDT instances are created per-request for better concurrency.
+///
+/// Maps graph IRIs to files on disk and keeps the packages those files decode
+/// to open between queries. Opening is not cheap: the hybrid backend decodes a
+/// whole wavelet tree out of the index sidecar, which for a 5 GB package is
+/// about a second of CPU and 660 MB of allocation. Doing that per request also
+/// meant concurrent requests each decoded their own copy of identical data.
+///
+/// Handles are shared as `Arc<HdtAny>`, which is sound because `HdtAny` is
+/// `Sync` and holds no interior mutability beyond its own caches, so queries
+/// take no lock at all. Only the cache map is locked, and only to look up.
 #[derive(Clone)]
 pub struct AggregateHdt {
     // Map graph names (URIs) to file paths on disk
     file_paths: Arc<RwLock<HashMap<String, PathBuf>>>,
+    // Packages kept open between queries, keyed by path. Shared across clones
+    // of this store, which is what makes it useful to `serve`: the store is
+    // cloned per request.
+    handles: Arc<Mutex<HandleCache>>,
     // Optional explicit default graph membership. If None, all loaded graphs are used as default.
     default_graphs: Option<HashSet<String>>,
     // Optional explicit named graph membership. If None, all loaded graphs are named.
     named_graphs: Option<HashSet<String>>,
 }
 
+fn new_handle_cache() -> Arc<Mutex<HandleCache>> {
+    Arc::new(Mutex::new(HandleCache::new(default_handle_cache_budget())))
+}
+
+/// Share of system memory the handle cache may hold by default.
+const HANDLE_CACHE_MEMORY_SHARE: u64 = 4;
+
+/// Budget used when system memory cannot be determined.
+const HANDLE_CACHE_FALLBACK_BYTES: usize = 1 << 30;
+
+/// Default ceiling on what the handle cache may hold.
+fn default_handle_cache_budget() -> usize {
+    system_memory_bytes().map_or(HANDLE_CACHE_FALLBACK_BYTES, |total| {
+        usize::try_from(total / HANDLE_CACHE_MEMORY_SHARE).unwrap_or(usize::MAX)
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn system_memory_bytes() -> Option<u64> {
+    let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
+    let line = meminfo.lines().find(|line| line.starts_with("MemTotal:"))?;
+    line.split_whitespace()
+        .nth(1)?
+        .parse::<u64>()
+        .ok()?
+        .checked_mul(1024)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn system_memory_bytes() -> Option<u64> {
+    None
+}
+
+/// What makes a cached handle still the right answer for a path.
+///
+/// Rebuilding an HDT in place changes its modification time, and almost always
+/// its length too. `serve` already stats every package on every request to
+/// decide whether to re-`sync`, so checking this costs nothing new.
+///
+/// A file whose modification time cannot be read has no key and is therefore
+/// never cached, rather than being cached under a key that cannot detect a
+/// change.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct FileKey {
+    modified: SystemTime,
+    len: u64,
+}
+
+impl FileKey {
+    fn for_path(path: &Path) -> Option<Self> {
+        let metadata = std::fs::metadata(path).ok()?;
+        Some(Self {
+            modified: metadata.modified().ok()?,
+            len: metadata.len(),
+        })
+    }
+}
+
+/// One HDT package held open between queries.
+struct CachedHandle {
+    key: FileKey,
+    hdt: Arc<hdt::HdtAny>,
+    /// Heap footprint, from `HdtAny::size_in_bytes`, which counts the decoded
+    /// structures but not memory-mapped file pages -- those live in the OS page
+    /// cache and are the kernel's to reclaim, not ours to budget.
+    bytes: usize,
+    /// Tick of the last snapshot to use this handle, for LRU eviction.
+    last_used: u64,
+}
+
+/// Open HDT packages, bounded by heap footprint.
+struct HandleCache {
+    entries: HashMap<PathBuf, CachedHandle>,
+    budget: usize,
+    tick: u64,
+}
+
+impl HandleCache {
+    fn new(budget: usize) -> Self {
+        Self {
+            entries: HashMap::new(),
+            budget,
+            tick: 0,
+        }
+    }
+
+    /// Total held. Summed rather than tracked so there is no counter to drift
+    /// out of step with the map; a store has tens of packages, not millions.
+    fn bytes(&self) -> usize {
+        self.entries.values().map(|entry| entry.bytes).sum()
+    }
+
+    fn next_tick(&mut self) -> u64 {
+        self.tick += 1;
+        self.tick
+    }
+
+    /// The handle for `path`, if it is open and still matches the file on disk.
+    fn get(&mut self, path: &Path, key: FileKey) -> Option<Arc<hdt::HdtAny>> {
+        let tick = self.next_tick();
+        let entry = self.entries.get_mut(path)?;
+        if entry.key != key {
+            // The file was rebuilt under us; the caller reopens it.
+            return None;
+        }
+        entry.last_used = tick;
+        Some(Arc::clone(&entry.hdt))
+    }
+
+    fn insert(&mut self, path: PathBuf, key: FileKey, hdt: Arc<hdt::HdtAny>) {
+        let tick = self.next_tick();
+        let bytes = hdt.size_in_bytes();
+        self.entries.insert(
+            path,
+            CachedHandle {
+                key,
+                hdt,
+                bytes,
+                last_used: tick,
+            },
+        );
+    }
+
+    /// Drop least-recently-used handles until the budget is met.
+    ///
+    /// Packages the calling snapshot is about to use are never evicted. They
+    /// are alive through that snapshot's `Arc` regardless, so dropping them
+    /// here would not free anything -- it would only force the next request to
+    /// decode them again. The budget is therefore a bound on what is retained
+    /// *between* queries; the peak stays what it always was, the working set of
+    /// a single request.
+    fn evict(&mut self, in_use: &HashSet<PathBuf>) {
+        let mut total = self.bytes();
+        if total <= self.budget {
+            return;
+        }
+        let mut candidates: Vec<(u64, PathBuf)> = self
+            .entries
+            .iter()
+            .filter(|(path, _)| !in_use.contains(*path))
+            .map(|(path, entry)| (entry.last_used, path.clone()))
+            .collect();
+        candidates.sort_unstable();
+        for (_, path) in candidates {
+            if total <= self.budget {
+                break;
+            }
+            if let Some(entry) = self.entries.remove(&path) {
+                total = total.saturating_sub(entry.bytes);
+            }
+        }
+    }
+
+    /// Forget handles for files that are no longer part of the dataset.
+    #[cfg(feature = "server")]
+    fn retain_paths(&mut self, keep: &HashSet<PathBuf>) {
+        self.entries.retain(|path, _| keep.contains(path));
+    }
+}
+
+/// The loaded graphs a query runs against, with the per-query lookups already
+/// resolved.
+///
+/// `spareval` calls `internal_quads_for_pattern` once per binding of the outer
+/// pattern in a nested-loop join, so anything this type recomputes per call is
+/// multiplied by the size of the intermediate result. Graph selection and the
+/// `Arc<str>` form of each graph IRI are therefore resolved once here, at
+/// snapshot time, rather than on every probe.
 pub struct AggregateHdtSnapshot {
-    // Map graph names (URIs) to HDT instances. Each value can be either the
+    // The loaded graphs, in a stable order. Each entry can be either the
     // hybrid (mmap+cache) or fully in-memory backend; HdtAny picks the right
     // one per file (see hdt::HdtAny::open).
-    pub hdts: HashMap<String, hdt::HdtAny>,
-    // Optional explicit default graph membership. If None, all loaded graphs are used as default.
-    pub default_graphs: Option<HashSet<String>>,
-    // Optional explicit named graph membership. If None, all loaded graphs are named.
-    pub named_graphs: Option<HashSet<String>>,
+    graphs: Vec<LoadedGraph>,
+    // Indices into `graphs` that make up the default graph: the explicitly
+    // configured membership when there is one, else every loaded graph.
+    default_graph: Box<[usize]>,
+    // Indices into `graphs` that are visible as named graphs, under the same
+    // rule.
+    named_graph: Box<[usize]>,
+    // Graph IRI to index, for resolving a GRAPH <iri> pattern.
+    by_iri: HashMap<Arc<str>, usize>,
+}
+
+/// One loaded graph, with its IRI pre-wrapped so that yielding it with a quad
+/// is a refcount increment rather than an allocation.
+struct LoadedGraph {
+    iri: Arc<str>,
+    hdt: Arc<hdt::HdtAny>,
+}
+
+/// Which graphs one `internal_quads_for_pattern` call has to visit.
+///
+/// Borrowed from the snapshot rather than collected, so that the common cases
+/// -- the default graph, or one named graph -- allocate nothing per call.
+#[derive(Clone, Copy)]
+enum GraphSelection<'a> {
+    /// Every graph at these indices, in order.
+    Many(&'a [usize]),
+    /// Exactly one graph.
+    One(usize),
+    /// No graph matches; the pattern yields nothing.
+    Empty,
+}
+
+impl GraphSelection<'_> {
+    fn get(self, position: usize) -> Option<usize> {
+        match self {
+            Self::Many(indices) => indices.get(position).copied(),
+            Self::One(index) if position == 0 => Some(index),
+            Self::One(_) | Self::Empty => None,
+        }
+    }
+}
+
+impl AggregateHdtSnapshot {
+    /// Build a snapshot from loaded graphs and the configured memberships.
+    ///
+    /// `default_graphs` and `named_graphs` are `None` when the dataset was
+    /// discovered from the filesystem, which means "every loaded graph".
+    fn new(
+        loaded: Vec<(String, Arc<hdt::HdtAny>)>,
+        default_graphs: Option<&HashSet<String>>,
+        named_graphs: Option<&HashSet<String>>,
+    ) -> Self {
+        let graphs: Vec<LoadedGraph> = loaded
+            .into_iter()
+            .map(|(iri, hdt)| LoadedGraph {
+                iri: Arc::from(iri),
+                hdt,
+            })
+            .collect();
+        let select = |members: Option<&HashSet<String>>| -> Box<[usize]> {
+            graphs
+                .iter()
+                .enumerate()
+                .filter(|(_, graph)| members.is_none_or(|m| m.contains(graph.iri.as_ref())))
+                .map(|(index, _)| index)
+                .collect()
+        };
+        let default_graph = select(default_graphs);
+        let named_graph = select(named_graphs);
+        let by_iri = graphs
+            .iter()
+            .enumerate()
+            .map(|(index, graph)| (Arc::clone(&graph.iri), index))
+            .collect();
+        Self {
+            graphs,
+            default_graph,
+            named_graph,
+            by_iri,
+        }
+    }
+
+    /// The graphs a pattern with this `graph_name` has to be answered from.
+    ///
+    /// Mirrors `spareval`'s encoding: `Some(None)` is the default graph,
+    /// `Some(Some(iri))` one named graph, and `None` every named graph. The
+    /// nested `Option` is that trait's parameter shape, not a choice made here.
+    #[allow(clippy::option_option)]
+    fn select(&self, graph_name: Option<Option<&Arc<str>>>) -> GraphSelection<'_> {
+        match graph_name {
+            Some(None) => GraphSelection::Many(&self.default_graph),
+            Some(Some(target)) => match self.by_iri.get(target) {
+                Some(&index) if self.named_graph.contains(&index) => GraphSelection::One(index),
+                _ => GraphSelection::Empty,
+            },
+            None => GraphSelection::Many(&self.named_graph),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,6 +346,7 @@ impl AggregateHdt {
     pub fn empty() -> Self {
         Self {
             file_paths: Arc::new(RwLock::new(HashMap::new())),
+            handles: new_handle_cache(),
             default_graphs: None,
             named_graphs: None,
         }
@@ -86,6 +361,7 @@ impl AggregateHdt {
 
         Ok(Self {
             file_paths: Arc::new(RwLock::new(file_paths)),
+            handles: new_handle_cache(),
             default_graphs: None,
             named_graphs: None,
         })
@@ -113,9 +389,48 @@ impl AggregateHdt {
 
         Ok(Self {
             file_paths: Arc::new(RwLock::new(file_paths)),
+            handles: new_handle_cache(),
             default_graphs: Some(default_graphs),
             named_graphs: Some(named_graph_set),
         })
+    }
+
+    /// Cap what the handle cache retains between queries, in bytes of decoded
+    /// HDT structure.
+    ///
+    /// Defaults to a quarter of system memory. Lower it when the process shares
+    /// a machine, raise it when the dataset is larger than that and every graph
+    /// is queried often. A budget smaller than a single package does not break
+    /// anything -- that package is simply reopened per request, as it was
+    /// before this cache existed.
+    #[must_use]
+    pub fn with_handle_cache_budget(self, bytes: usize) -> Self {
+        self.lock_handles().budget = bytes;
+        self
+    }
+
+    /// How many HDT packages are currently held open.
+    #[must_use]
+    pub fn cached_handle_count(&self) -> usize {
+        self.lock_handles().entries.len()
+    }
+
+    /// Bytes of decoded HDT structure currently held open. Memory-mapped file
+    /// pages are not counted; see [`CachedHandle::bytes`].
+    #[must_use]
+    pub fn cached_handle_bytes(&self) -> usize {
+        self.lock_handles().bytes()
+    }
+
+    /// Take the handle-cache lock, recovering from poisoning.
+    ///
+    /// A panic elsewhere must not make the store permanently unqueryable, and
+    /// there is no invariant here for a panicking thread to leave half-applied:
+    /// entries are inserted and removed one at a time, the byte total is
+    /// derived rather than tracked, and a handle whose file has changed is
+    /// rejected by its own key.
+    fn lock_handles(&self) -> MutexGuard<'_, HandleCache> {
+        self.handles.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Create a snapshot of HDT instances for querying.
@@ -126,8 +441,11 @@ impl AggregateHdt {
     ///   If Some(vec), only graphs in the vec are loaded.
     ///
     /// # Performance
-    /// Filtering graphs before loading can significantly reduce memory usage and load time
-    /// when you only need to query a subset of available graphs.
+    /// Packages already open are handed straight back, so a snapshot over an
+    /// unchanged dataset costs a stat per graph and a refcount increment. Only
+    /// the first request after a package appears or is rebuilt pays to decode
+    /// it. Filtering still matters for the first request and for the cache
+    /// budget: a graph never asked for is never opened.
     ///
     /// # Example
     /// ```ignore
@@ -165,29 +483,80 @@ impl AggregateHdt {
             .collect();
         drop(file_paths_guard);
 
-        // Load filtered HDTs in parallel. HdtAny::open prefers the hybrid
+        // Identify each package before consulting the cache, so a file that has
+        // been rebuilt since it was opened is reopened rather than answered
+        // from a stale handle.
+        let keyed: Vec<(String, PathBuf, Option<FileKey>)> = paths_vec
+            .into_iter()
+            .map(|(graph_name, path)| {
+                let key = FileKey::for_path(&path);
+                (graph_name, path, key)
+            })
+            .collect();
+
+        // Cache hits in one pass, so the lock is never held across an open.
+        let mut handles: Vec<Option<Arc<hdt::HdtAny>>> = {
+            let mut cache = self.lock_handles();
+            keyed
+                .iter()
+                .map(|(_, path, key)| key.and_then(|key| cache.get(path, key)))
+                .collect()
+        };
+
+        // Open what is left in parallel. HdtAny::open prefers the hybrid
         // (mmap+cache) backend but falls back to in-memory for files where
         // the hybrid cache cannot be built (e.g. zero-triple HDTs that the
         // wavelet-tree library refuses to index).
-        let hdts: HashMap<String, hdt::HdtAny> = paths_vec
+        //
+        // Two requests racing on the same missing package both open it and the
+        // second insert wins. That wastes one decode and is not worth a
+        // per-path lock to avoid: the alternative is making every request wait
+        // on whichever one got there first.
+        let opened: Vec<(usize, Arc<hdt::HdtAny>)> = handles
+            .iter()
+            .enumerate()
+            .filter(|(_, handle)| handle.is_none())
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>()
             .par_iter()
-            .map(
-                |(graph_name, path)| -> anyhow::Result<(String, hdt::HdtAny)> {
-                    let hdt = hdt::HdtAny::open_with_threshold(path, None).map_err(|e| {
-                        anyhow::anyhow!("Failed to load HDT from {}: {e}", path.display())
-                    })?;
-                    Ok((graph_name.clone(), hdt))
-                },
-            )
-            .collect::<anyhow::Result<Vec<_>>>()?
+            .map(|&index| -> anyhow::Result<(usize, Arc<hdt::HdtAny>)> {
+                let path = &keyed[index].1;
+                let hdt = hdt::HdtAny::open_with_threshold(path, None).map_err(|e| {
+                    anyhow::anyhow!("Failed to load HDT from {}: {e}", path.display())
+                })?;
+                Ok((index, Arc::new(hdt)))
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+
+        {
+            let mut cache = self.lock_handles();
+            for (index, hdt) in &opened {
+                let (_, path, key) = &keyed[*index];
+                if let Some(key) = *key {
+                    cache.insert(path.clone(), key, Arc::clone(hdt));
+                }
+            }
+            let in_use: HashSet<PathBuf> = keyed.iter().map(|(_, path, _)| path.clone()).collect();
+            cache.evict(&in_use);
+        }
+        for (index, hdt) in opened {
+            handles[index] = Some(hdt);
+        }
+
+        let hdts: Vec<(String, Arc<hdt::HdtAny>)> = keyed
             .into_iter()
+            .zip(handles)
+            .map(|((graph_name, _, _), handle)| {
+                let hdt = handle.expect("every selected graph was either cached or opened above");
+                (graph_name, hdt)
+            })
             .collect();
 
-        Ok(AggregateHdtSnapshot {
+        Ok(AggregateHdtSnapshot::new(
             hdts,
-            default_graphs: self.default_graphs.clone(),
-            named_graphs: self.named_graphs.clone(),
-        })
+            self.default_graphs.as_ref(),
+            self.named_graphs.as_ref(),
+        ))
     }
 
     /// Returns `true` if the given graph IRI is registered in the path map.
@@ -262,12 +631,22 @@ impl AggregateHdt {
             }
         }
 
-        let mut file_paths = lock_write_file_paths(&self.file_paths, "modifying HDT paths")?;
-        // Build set of existing paths for comparison
-        let existing_paths: HashSet<PathBuf> = file_paths.values().cloned().collect();
-        let added = current_files.difference(&existing_paths).count();
-        let removed = existing_paths.difference(&current_files).count();
-        *file_paths = discovered_mappings;
+        let (added, removed) = {
+            let mut file_paths = lock_write_file_paths(&self.file_paths, "modifying HDT paths")?;
+            // Build set of existing paths for comparison
+            let existing_paths: HashSet<PathBuf> = file_paths.values().cloned().collect();
+            let added = current_files.difference(&existing_paths).count();
+            let removed = existing_paths.difference(&current_files).count();
+            *file_paths = discovered_mappings;
+            (added, removed)
+        };
+
+        // Let go of packages that are no longer part of the dataset. A file
+        // that is still here but was rebuilt needs no action: its cached handle
+        // carries the old modification time and will be rejected on next use.
+        // Taken after the path-map guard is dropped, so the two locks are never
+        // held at once.
+        self.lock_handles().retain_paths(&current_files);
 
         Ok((added, removed))
     }
@@ -321,18 +700,18 @@ pub fn term_to_hdt_bgp_str(term: Term) -> String {
 }
 
 struct StreamingInternalQuadIter<'a> {
-    graphs: Vec<(&'a String, &'a hdt::HdtAny)>,
+    graphs: &'a [LoadedGraph],
+    selection: GraphSelection<'a>,
     subject: Option<Arc<str>>,
     predicate: Option<Arc<str>>,
     object: Option<Arc<str>>,
     emit_default_graph: bool,
-    current_graph: usize,
+    position: usize,
     current_iter: Option<StreamingInternalQuadIterator<'a>>,
 }
 
 type StreamingInternalQuadIterator<'a> =
     Box<dyn Iterator<Item = Result<InternalQuad<Arc<str>>, Error>> + 'a>;
-type StringTriple = [Arc<str>; 3];
 
 fn scoped_blank_node(term: Arc<str>, graph_name: &Arc<str>) -> Arc<str> {
     if !term.starts_with("_:") {
@@ -361,166 +740,74 @@ fn unscoped_pattern_term(term: &Arc<str>, graph_name: &Arc<str>) -> Option<Arc<s
     Some(Arc::from(format!("_:{original}")))
 }
 
-// TODO: Delete this function once `hdt::HdtGeneric::triples_with_pattern`
-// relaxes its input lifetime constraints. Today upstream's signature is
-// `triples_with_pattern<'a>(&'a self, sp: Option<&'a str>, ...)`, tying the
-// input `&str` lifetime to the returned iterator's lifetime — even though the
-// body internally clones each input to `Arc<str>` and never borrows from the
-// originals past the call. That tight lifetime forces us to keep this owned
-// `Arc<str>` shaped wrapper because our filter terms (computed locally in
-// `StreamingInternalQuadIter::ensure_current_iter` after blank-node
-// unscoping) don't outlive the iterator. When upstream relaxes the signature
-// (e.g. `Option<&str>` with an unrelated lifetime), this whole function
-// collapses to `hdt.triples_with_pattern(s.as_deref(), p.as_deref(),
-// o.as_deref())` and we additionally pick up upstream's `TripleCache` for
-// repeated id->string lookups.
-fn indexed_triples_with_pattern<'a>(
-    hdt: &'a hdt::HdtAny,
-    subject: Option<Arc<str>>,
-    predicate: Option<Arc<str>>,
-    object: Option<Arc<str>>,
-) -> Box<dyn Iterator<Item = StringTriple> + 'a> {
-    match hdt {
-        hdt::HdtAny::Hybrid(h) => {
-            indexed_triples_with_pattern_generic(h, subject, predicate, object)
-        }
-        hdt::HdtAny::InMemory(h) => {
-            indexed_triples_with_pattern_generic(h, subject, predicate, object)
+/// Rewrite the three pattern positions into one graph's own term space.
+///
+/// `None` means the pattern cannot match in this graph at all, because a bound
+/// term is a blank node scoped to a different one.
+fn unscoped_pattern(
+    pattern: [Option<&Arc<str>>; 3],
+    graph_name: &Arc<str>,
+) -> Option<[Option<Arc<str>>; 3]> {
+    let mut unscoped: [Option<Arc<str>>; 3] = [None, None, None];
+    for (slot, term) in unscoped.iter_mut().zip(pattern) {
+        if let Some(term) = term {
+            *slot = Some(unscoped_pattern_term(term, graph_name)?);
         }
     }
+    Some(unscoped)
 }
 
-fn indexed_triples_with_pattern_generic<'a, D, S, B>(
-    hdt: &'a hdt::HdtGeneric<D, S, B>,
-    subject: Option<Arc<str>>,
-    predicate: Option<Arc<str>>,
-    object: Option<Arc<str>>,
-) -> Box<dyn Iterator<Item = StringTriple> + 'a>
-where
-    D: hdt::DictSectPfcAccess + 'a,
-    S: hdt::containers::SequenceAccess + 'a,
-    B: hdt::containers::BitmapAccess + 'a,
-{
-    use hdt::IdKind;
-    use hdt::triples::{ObjectIter, PredicateIter, PredicateObjectIter, SubjectIter};
+/// How many times as much a triple costs to read when only its predicate is
+/// bound.
+///
+/// HDT reads a predicate-only pattern (`?s <p> ?o`) through the predicate's
+/// wavelet index, one `select` per triple, while a pattern with its subject or
+/// object bound reads a contiguous range of an adjacency list. On `WatDiv` scale
+/// 10 the predicate path took 1.84 µs a triple against 0.77 µs for an
+/// object-anchored pattern, about 2.4 times as much. Counting rows alone, the
+/// optimiser started `WatDiv`'s S3 from 137 `publisher` triples rather than 162
+/// products of one category, and S3 ran about 40% slower for it. 3 is the
+/// weight that was measured end to end: it recovered most of that without
+/// losing the plans the counts improved.
+const PREDICATE_INDEX_ROW_COST: usize = 3;
 
-    let pattern: [Option<(Arc<str>, usize)>; 3] = [
-        subject.map(|term| {
-            let id = hdt.dict.string_to_id(term.as_ref(), IdKind::Subject);
-            (term, id)
-        }),
-        predicate.map(|term| {
-            let id = hdt.dict.string_to_id(term.as_ref(), IdKind::Predicate);
-            (term, id)
-        }),
-        object.map(|term| {
-            let id = hdt.dict.string_to_id(term.as_ref(), IdKind::Object);
-            (term, id)
-        }),
-    ];
-
-    if pattern.iter().flatten().any(|entry| entry.1 == 0) {
-        return Box::new(iter::empty());
-    }
-
-    match pattern {
-        [Some(s), Some(p), Some(o)] => {
-            if SubjectIter::with_pattern(&hdt.triples, [s.1, p.1, o.1])
-                .next()
-                .is_some()
-            {
-                Box::new(iter::once([s.0, p.0, o.0]))
-            } else {
-                Box::new(iter::empty())
-            }
-        }
-        [Some(s), Some(p), None] => Box::new(
-            SubjectIter::with_pattern(&hdt.triples, [s.1, p.1, 0]).map(move |triple| {
-                [
-                    s.0.clone(),
-                    p.0.clone(),
-                    Arc::from(hdt.dict.id_to_string(triple[2], IdKind::Object).unwrap()),
-                ]
-            }),
-        ),
-        [Some(s), None, Some(o)] => Box::new(
-            SubjectIter::with_pattern(&hdt.triples, [s.1, 0, o.1]).map(move |triple| {
-                [
-                    s.0.clone(),
-                    Arc::from(hdt.dict.id_to_string(triple[1], IdKind::Predicate).unwrap()),
-                    o.0.clone(),
-                ]
-            }),
-        ),
-        [Some(s), None, None] => Box::new(
-            SubjectIter::with_pattern(&hdt.triples, [s.1, 0, 0]).map(move |triple| {
-                [
-                    s.0.clone(),
-                    Arc::from(hdt.dict.id_to_string(triple[1], IdKind::Predicate).unwrap()),
-                    Arc::from(hdt.dict.id_to_string(triple[2], IdKind::Object).unwrap()),
-                ]
-            }),
-        ),
-        [None, Some(p), Some(o)] => Box::new(PredicateObjectIter::new(&hdt.triples, p.1, o.1).map(
-            move |subject_id| {
-                [
-                    Arc::from(hdt.dict.id_to_string(subject_id, IdKind::Subject).unwrap()),
-                    p.0.clone(),
-                    o.0.clone(),
-                ]
-            },
-        )),
-        [None, Some(p), None] => {
-            Box::new(PredicateIter::new(&hdt.triples, p.1).map(move |triple| {
-                [
-                    Arc::from(hdt.dict.id_to_string(triple[0], IdKind::Subject).unwrap()),
-                    p.0.clone(),
-                    Arc::from(hdt.dict.id_to_string(triple[2], IdKind::Object).unwrap()),
-                ]
-            }))
-        }
-        [None, None, Some(o)] => Box::new(ObjectIter::new(&hdt.triples, o.1).map(move |triple| {
-            [
-                Arc::from(hdt.dict.id_to_string(triple[0], IdKind::Subject).unwrap()),
-                Arc::from(hdt.dict.id_to_string(triple[1], IdKind::Predicate).unwrap()),
-                o.0.clone(),
-            ]
-        })),
-        [None, None, None] => Box::new(hdt.triples_all()),
+/// The relative cost of reading one triple of a pattern whose subject,
+/// predicate and object are bound as given.
+fn row_cost(subject_bound: bool, predicate_bound: bool, object_bound: bool) -> usize {
+    if predicate_bound && !subject_bound && !object_bound {
+        PREDICATE_INDEX_ROW_COST
+    } else {
+        1
     }
 }
 
 impl StreamingInternalQuadIter<'_> {
     fn ensure_current_iter(&mut self) -> bool {
-        while self.current_iter.is_none() && self.current_graph < self.graphs.len() {
-            let (graph_name, hdt) = self.graphs[self.current_graph];
-            self.current_graph += 1;
-            let graph_name: Arc<str> = Arc::from(graph_name.as_str());
-            let subject_filter = match self.subject.as_ref() {
-                Some(term) => match unscoped_pattern_term(term, &graph_name) {
-                    Some(term) => Some(term),
-                    None => continue,
-                },
-                None => None,
+        while self.current_iter.is_none() {
+            let Some(index) = self.selection.get(self.position) else {
+                break;
             };
-            let predicate_filter = match self.predicate.as_ref() {
-                Some(term) => match unscoped_pattern_term(term, &graph_name) {
-                    Some(term) => Some(term),
-                    None => continue,
-                },
-                None => None,
-            };
-            let object_filter = match self.object.as_ref() {
-                Some(term) => match unscoped_pattern_term(term, &graph_name) {
-                    Some(term) => Some(term),
-                    None => continue,
-                },
-                None => None,
+            self.position += 1;
+            let LoadedGraph { iri, hdt } = &self.graphs[index];
+            let graph_name = Arc::clone(iri);
+            let Some([subject_filter, predicate_filter, object_filter]) = unscoped_pattern(
+                [
+                    self.subject.as_ref(),
+                    self.predicate.as_ref(),
+                    self.object.as_ref(),
+                ],
+                &graph_name,
+            ) else {
+                continue;
             };
             let emit_default_graph = self.emit_default_graph;
 
+            // Upstream owns the pattern dispatch, and with it the
+            // `TripleCache` that materialises each dictionary id in a single
+            // `Arc` allocation and reuses the previous one when consecutive
+            // triples repeat a term -- which, in SPO order, most of them do.
             self.current_iter = Some(Box::new(
-                indexed_triples_with_pattern(hdt, subject_filter, predicate_filter, object_filter)
+                hdt.triples_with_arc_pattern(subject_filter, predicate_filter, object_filter)
                     .map(move |[subject, predicate, object]| {
                         let output_graph_name = if emit_default_graph {
                             None
@@ -569,52 +856,24 @@ impl<'a> QueryableDataset<'a> for &'a AggregateHdtSnapshot {
         object: Option<&Arc<str>>,
         graph_name: Option<Option<&Arc<str>>>,
     ) -> impl Iterator<Item = Result<InternalQuad<Self::InternalTerm>, Error>> + use<'a> {
-        let graph_name_owned = graph_name.map(|inner: Option<&Arc<str>>| inner.cloned());
-        let emit_default_graph = matches!(graph_name_owned, Some(None));
-
-        // Optimization: Pre-filter graphs to reduce unnecessary work
-        // Note: get_snapshot() already filtered graphs at load time,
-        // so self.hdts contains only the required graphs. This filter
-        // handles additional runtime graph name matching from the query.
-        let graphs_to_query: Vec<(&String, &hdt::HdtAny)> = self
-            .hdts
-            .iter()
-            .filter(|(g, _h)| {
-                match &graph_name_owned {
-                    // Query for default graph: Some(None)
-                    // Default graph is explicit when configured, else union of all loaded graphs
-                    Some(None) => self
-                        .default_graphs
-                        .as_ref()
-                        .is_none_or(|defaults| defaults.contains(g.as_str())),
-                    // Query for specific named graph: Some(Some(graph))
-                    Some(Some(target_graph)) => {
-                        g.as_str() == target_graph.as_ref()
-                            && self
-                                .named_graphs
-                                .as_ref()
-                                .is_none_or(|named| named.contains(g.as_str()))
-                    }
-                    // Query across all graphs: None
-                    None => self
-                        .named_graphs
-                        .as_ref()
-                        .is_none_or(|named| named.contains(g.as_str())),
-                }
-            })
-            .collect();
+        let emit_default_graph = matches!(graph_name, Some(None));
+        // Graph membership was resolved when the snapshot was built, so this is
+        // a slice borrow (or, for GRAPH <iri>, one hash lookup) rather than a
+        // filtered scan of every loaded graph on every probe.
+        let selection = self.select(graph_name);
 
         let subject = subject.cloned();
         let predicate = predicate.cloned();
         let object = object.cloned();
 
         StreamingInternalQuadIter::<'a> {
-            graphs: graphs_to_query,
+            graphs: &self.graphs,
+            selection,
             subject,
             predicate,
             object,
             emit_default_graph,
-            current_graph: 0,
+            position: 0,
             current_iter: None,
         }
     }
@@ -630,24 +889,62 @@ impl<'a> QueryableDataset<'a> for &'a AggregateHdtSnapshot {
     fn internal_named_graphs(
         &self,
     ) -> impl Iterator<Item = Result<Self::InternalTerm, Self::Error>> + use<'a> {
-        let keys: Vec<Arc<str>> = match &self.named_graphs {
-            Some(named) => self
-                .hdts
-                .keys()
-                .filter(|k| named.contains(k.as_str()))
-                .map(|k| Arc::from(k.as_str()))
-                .collect(),
-            None => self.hdts.keys().map(|k| Arc::from(k.as_str())).collect(),
-        };
+        let keys: Vec<Arc<str>> = self
+            .named_graph
+            .iter()
+            .map(|&index| Arc::clone(&self.graphs[index].iri))
+            .collect();
         keys.into_iter().map(Ok)
     }
 
+    /// Count the triples matching a pattern, summed over the graphs it reads, and
+    /// weighted by what each one costs to read ([`row_cost`]).
+    ///
+    /// Comunica's HDT source does the same thing through `countTriples`, and for
+    /// the same reason: without it the optimiser scores every `?s <p> ?o`
+    /// pattern alike and, when two tie, leaves them in the order the query was
+    /// written -- which for a nested-loop join decides whether the selective
+    /// pattern drives the scan or is driven by it.
+    ///
+    /// Most shapes cost O(1) here because the HDT index already knows the extent
+    /// of the range a pattern walks, so this stays far cheaper than the plan it
+    /// improves. `?P?` and `S?O` come back as approximations, which is fine:
+    /// the number is only ever compared against other patterns' numbers. That is
+    /// also why the weight belongs here: the optimiser ranks patterns by these
+    /// numbers alone, so a count is only comparable once it reflects how
+    /// expensive its triples are to produce.
+    fn estimated_cardinality(
+        &self,
+        subject: Option<&Arc<str>>,
+        predicate: Option<&Arc<str>>,
+        object: Option<&Arc<str>>,
+        graph_name: Option<Option<&Arc<str>>>,
+    ) -> Option<usize> {
+        let selection = self.select(graph_name);
+        let mut total: usize = 0;
+        let mut position = 0;
+        while let Some(index) = selection.get(position) {
+            position += 1;
+            let LoadedGraph { iri, hdt } = &self.graphs[index];
+            let Some([subject, predicate, object]) =
+                unscoped_pattern([subject, predicate, object], iri)
+            else {
+                continue;
+            };
+            let count = hdt
+                .cardinality(subject.as_deref(), predicate.as_deref(), object.as_deref())
+                .value;
+            let cost = row_cost(subject.is_some(), predicate.is_some(), object.is_some());
+            total = total.saturating_add(count.saturating_mul(cost));
+        }
+        Some(total)
+    }
+
     fn contains_internal_graph_name(&self, graph_name: &Arc<str>) -> Result<bool, Self::Error> {
-        Ok(self.hdts.contains_key(graph_name.as_ref())
-            && self
-                .named_graphs
-                .as_ref()
-                .is_none_or(|named| named.contains(graph_name.as_ref())))
+        Ok(matches!(
+            self.select(Some(Some(graph_name))),
+            GraphSelection::One(_)
+        ))
     }
 }
 
@@ -788,7 +1085,8 @@ mod tests {
     use super::*;
     #[cfg(not(feature = "server"))]
     use super::{
-        AggregateHdtSnapshot, QueryEvaluationError, query, scoped_blank_node, unscoped_pattern_term,
+        AggregateHdtSnapshot, PREDICATE_INDEX_ROW_COST, QueryEvaluationError, query, row_cost,
+        scoped_blank_node, unscoped_pattern_term,
     };
     #[cfg(feature = "server")]
     use spareval::QueryableDataset;
@@ -811,6 +1109,186 @@ mod tests {
             .prefix("de-tests-")
             .tempdir_in(std::env::current_dir()?)
             .map_err(anyhow::Error::from)
+    }
+
+    /// A package opened once is handed back, not decoded again.
+    #[test]
+    #[cfg(feature = "server")]
+    fn test_handle_is_reused_across_snapshots() -> anyhow::Result<()> {
+        let hdt_path = get_test_hdt_path("apple.hdt");
+        let store = AggregateHdt::new(std::slice::from_ref(&hdt_path))?;
+
+        let first = store
+            .get_snapshot(None)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        assert_eq!(store.cached_handle_count(), 1);
+        assert!(store.cached_handle_bytes() > 0);
+
+        let second = store
+            .get_snapshot(None)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        assert!(
+            Arc::ptr_eq(&first.graphs[0].hdt, &second.graphs[0].hdt),
+            "the second snapshot should share the first snapshot's handle"
+        );
+        assert_eq!(store.cached_handle_count(), 1, "no second copy was opened");
+        Ok(())
+    }
+
+    /// Rebuilding a package in place invalidates its handle.
+    ///
+    /// The cache key is the file's modification time and length, so a rebuild
+    /// is noticed without the store being told about it.
+    #[test]
+    #[cfg(feature = "server")]
+    fn test_rebuilt_package_is_reopened() -> anyhow::Result<()> {
+        let work_dir = utf8_tempdir()?;
+        let hdt_path = work_dir.path().join("fruit.hdt");
+        std::fs::copy(get_test_hdt_path("apple.hdt"), &hdt_path)?;
+        let hdt_path_str = hdt_path.to_string_lossy().into_owned();
+        let store = AggregateHdt::new(std::slice::from_ref(&hdt_path_str))?;
+
+        let first = store
+            .get_snapshot(None)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let first_handle = Arc::clone(&first.graphs[0].hdt);
+        drop(first);
+
+        // Rewrite the file with different content so both halves of the key
+        // change, then make sure the modification time really moved: a copy
+        // finishing inside the filesystem's timestamp granularity would
+        // otherwise leave the key looking unchanged.
+        std::fs::copy(get_test_hdt_path("apple.hdt"), &hdt_path)?;
+        let bumped = SystemTime::now() + std::time::Duration::from_secs(1);
+        fs_set_times(&hdt_path, bumped)?;
+
+        let second = store
+            .get_snapshot(None)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        assert!(
+            !Arc::ptr_eq(&first_handle, &second.graphs[0].hdt),
+            "a rebuilt package must not be answered from the old handle"
+        );
+        assert_eq!(
+            store.cached_handle_count(),
+            1,
+            "the stale entry was replaced"
+        );
+        Ok(())
+    }
+
+    /// The cache stays inside its budget by dropping what was used least
+    /// recently, and never drops a package the caller is still using.
+    #[test]
+    #[cfg(feature = "server")]
+    fn test_handle_cache_evicts_to_budget() -> anyhow::Result<()> {
+        let work_dir = utf8_tempdir()?;
+        let first_path = work_dir.path().join("first.hdt");
+        let second_path = work_dir.path().join("second.hdt");
+        std::fs::copy(get_test_hdt_path("apple.hdt"), &first_path)?;
+        std::fs::copy(get_test_hdt_path("apple.hdt"), &second_path)?;
+        let first_str = first_path.to_string_lossy().into_owned();
+        let second_str = second_path.to_string_lossy().into_owned();
+
+        // Room for one package but not two.
+        let store = AggregateHdt::new(&[first_str.clone(), second_str.clone()])?;
+        let one_package_bytes = {
+            let probe = AggregateHdt::new(std::slice::from_ref(&first_str))?;
+            drop(
+                probe
+                    .get_snapshot(None)
+                    .map_err(|e| anyhow::anyhow!("{e}"))?,
+            );
+            probe.cached_handle_bytes()
+        };
+        let store = store.with_handle_cache_budget(one_package_bytes);
+
+        let first_graph = store
+            .graph_names()?
+            .into_iter()
+            .find(|name| name.contains("first.hdt"));
+        let first_graph = first_graph.expect("first.hdt should be registered");
+        let second_graph = store
+            .graph_names()?
+            .into_iter()
+            .find(|name| name.contains("second.hdt"));
+        let second_graph = second_graph.expect("second.hdt should be registered");
+
+        drop(
+            store
+                .get_snapshot(Some(vec![first_graph]))
+                .map_err(|e| anyhow::anyhow!("{e}"))?,
+        );
+        assert_eq!(store.cached_handle_count(), 1);
+
+        drop(
+            store
+                .get_snapshot(Some(vec![second_graph]))
+                .map_err(|e| anyhow::anyhow!("{e}"))?,
+        );
+        assert_eq!(
+            store.cached_handle_count(),
+            1,
+            "the older package should have been evicted to stay inside the budget"
+        );
+        assert!(store.cached_handle_bytes() <= one_package_bytes);
+
+        // Both at once: the budget does not apply to the working set of a
+        // single snapshot, which is alive through its own Arcs regardless.
+        let both = store
+            .get_snapshot(None)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        assert_eq!(both.graphs.len(), 2);
+        assert_eq!(
+            store.cached_handle_count(),
+            2,
+            "packages in use must not be evicted out from under the snapshot"
+        );
+        Ok(())
+    }
+
+    /// A file that leaves the dataset takes its handle with it.
+    #[test]
+    #[cfg(feature = "server")]
+    fn test_sync_drops_handles_for_removed_files() -> anyhow::Result<()> {
+        let work_dir = utf8_tempdir()?;
+        let sync_dir = work_dir.path().join("sync");
+        std::fs::create_dir(&sync_dir)?;
+        let kept = sync_dir.join("kept.hdt");
+        let removed = sync_dir.join("removed.hdt");
+        std::fs::copy(get_test_hdt_path("apple.hdt"), &kept)?;
+        std::fs::copy(get_test_hdt_path("apple.hdt"), &removed)?;
+
+        let store = AggregateHdt::new(&[
+            kept.to_string_lossy().into_owned(),
+            removed.to_string_lossy().into_owned(),
+        ])?;
+        drop(
+            store
+                .get_snapshot(None)
+                .map_err(|e| anyhow::anyhow!("{e}"))?,
+        );
+        assert_eq!(store.cached_handle_count(), 2);
+
+        std::fs::remove_file(&removed)?;
+        let (added, removed_count) = store.sync(&sync_dir)?;
+        assert_eq!(added, 0);
+        assert_eq!(removed_count, 1);
+        assert_eq!(
+            store.cached_handle_count(),
+            1,
+            "sync should let go of the package that is no longer in the dataset"
+        );
+        Ok(())
+    }
+
+    /// Set a file's modification time, so a test can make a rewrite visible to
+    /// the cache key regardless of filesystem timestamp granularity.
+    #[cfg(feature = "server")]
+    fn fs_set_times(path: &Path, modified: SystemTime) -> anyhow::Result<()> {
+        let file = std::fs::File::options().write(true).open(path)?;
+        file.set_modified(modified)?;
+        Ok(())
     }
 
     #[test]
@@ -1121,11 +1599,7 @@ mod tests {
 
     #[test]
     fn test_query_rejects_invalid_base_iri_without_panic() {
-        let snapshot = AggregateHdtSnapshot {
-            hdts: std::collections::HashMap::new(),
-            default_graphs: None,
-            named_graphs: None,
-        };
+        let snapshot = AggregateHdtSnapshot::new(Vec::new(), None, None);
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             query(
                 "SELECT ?s ?p ?o WHERE { ?s ?p ?o }",
@@ -1166,5 +1640,25 @@ mod tests {
             unscoped_pattern_term(&scoped, &graph_b).is_none(),
             "scoped blank nodes should stay graph-local"
         );
+    }
+
+    #[test]
+    fn test_row_cost_weights_only_predicate_only_patterns() {
+        assert_eq!(row_cost(false, true, false), PREDICATE_INDEX_ROW_COST);
+        for (subject, predicate, object) in [
+            (false, false, false),
+            (true, false, false),
+            (false, false, true),
+            (true, true, false),
+            (false, true, true),
+            (true, false, true),
+            (true, true, true),
+        ] {
+            assert_eq!(
+                row_cost(subject, predicate, object),
+                1,
+                "subject {subject}, predicate {predicate}, object {object}"
+            );
+        }
     }
 }

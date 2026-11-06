@@ -9,5 +9,11 @@
 
 Cargo.lock
 
-# Downloaded benchmark fixtures (see scripts/fetch-watdiv-data.sh).
+# Downloaded/generated benchmark fixtures (see scripts/fetch-watdiv-data.sh
+# and scripts/gen-bsbm-data.py).
 /benches/watdiv/
+/benches/bsbm/
+
+# Local dev override pointing hdt and the oxigraph fork at working trees
+# (see the file itself, and SPARQL-QUERY-PERFORMANCE.md).
+/.cargo/config.toml
