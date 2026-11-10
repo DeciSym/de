@@ -27,6 +27,15 @@ name: Benchmarks
 # To add a target, add a matrix entry with the command that prepares its
 # fixtures. A base commit that predates the target measures nothing, and the
 # comparison says so.
+#
+# The memory job measures heap memory the same way, on the change and on its
+# base: scripts/bench-memory.py runs a release build of de under heaptrack, one
+# process per workload, on the same fixtures. Heap figures depend on the code
+# and on RAYON_NUM_THREADS rather than on the CPU, so its thresholds,
+# MEMORY_THRESHOLD and MEMORY_FAIL_ABOVE, are much tighter. The script also
+# ignores changes under 256 KB of heap or 1,000 allocations. It uploads the
+# change's heaptrack recordings as `memory-<target>`; open one with
+# `heaptrack --analyze` to see where the memory goes.
 on:
   push:
     branches: [main]
@@ -77,6 +86,9 @@ env:
   BASE_SHA: ${{ github.event.pull_request.base.sha || (github.event.before != '0000000000000000000000000000000000000000' && github.event.before) || inputs.base }}
   BENCH_THRESHOLD: 15
   BENCH_FAIL_ABOVE: 25
+  # Peak heap and calls to allocation functions, in percent (see the memory job).
+  MEMORY_THRESHOLD: 5
+  MEMORY_FAIL_ABOVE: 15
 
 jobs:
   bench:
@@ -178,3 +190,91 @@ jobs:
         run: |
           head/scripts/bench-compare.py compare "$CARGO_TARGET_DIR/criterion:base" "$CARGO_TARGET_DIR/criterion:head" \
             --base-commit "$BASE_SHA" --threshold "$BENCH_THRESHOLD" ${BENCH_FAIL_ABOVE:+--fail-above "$BENCH_FAIL_ABOVE"}
+
+  memory:
+    name: ${{ matrix.bench }} memory
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - bench: trainmarks
+            fixtures: python3 scripts/gen-trainmarks-data.py "$DE_BENCH_SCALE"
+          - bench: watdiv
+            fixtures: scripts/fetch-watdiv-data.sh "$DE_WATDIV_SCALE"
+    env:
+      # As in the bench job: one target directory for both checkouts.
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+    steps:
+      - name: Check out this commit
+        uses: actions/checkout@v7
+        with:
+          path: head
+          submodules: recursive
+      - name: Check out the base commit
+        if: env.BASE_SHA != ''
+        uses: actions/checkout@v7
+        with:
+          path: base
+          ref: ${{ env.BASE_SHA }}
+          submodules: recursive
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+      # A release build of de shares its dependencies with the benchmarks'
+      # build, so it restores their cache. The bench job writes it.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: head -> ../target
+          shared-key: bench
+          save-if: false
+      - name: Install heaptrack
+        run: sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends heaptrack
+
+      # As in the bench job, the base goes first and its failures are
+      # tolerated. This commit's script measures both builds, so the base is
+      # measured the same way even when it predates the script.
+      - name: Prepare fixtures
+        working-directory: head
+        run: ${{ matrix.fixtures }}
+      - name: Prepare fixtures for the base
+        id: base-fixtures
+        if: env.BASE_SHA != ''
+        continue-on-error: true
+        working-directory: base
+        run: ${{ matrix.fixtures }}
+      - name: Build and measure the base
+        if: steps.base-fixtures.outcome == 'success'
+        continue-on-error: true
+        working-directory: base
+        run: |
+          cargo build --release --locked --bin de
+          ../head/scripts/bench-memory.py run ${{ matrix.bench }} --de "$CARGO_TARGET_DIR/release/de" --out "$RUNNER_TEMP/memory-base"
+      # See the same step in the bench job.
+      - name: Remove the base's build of the workspace
+        if: env.BASE_SHA != ''
+        working-directory: head
+        run: |
+          mapfile -t packages < <(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | "-p", .name')
+          cargo clean --release "${packages[@]}"
+      - name: Build
+        working-directory: head
+        run: cargo build --release --locked --bin de
+      - name: Measure
+        working-directory: head
+        run: scripts/bench-memory.py run ${{ matrix.bench }} --de "$CARGO_TARGET_DIR/release/de" --out "$RUNNER_TEMP/memory-head"
+
+      # Upload before comparing, so the recordings survive a failed comparison.
+      - uses: actions/upload-artifact@v7
+        with:
+          name: memory-${{ matrix.bench }}
+          path: ${{ runner.temp }}/memory-head/
+          retention-days: ${{ github.ref == 'refs/heads/main' && 90 || 14 }}
+          if-no-files-found: error
+          overwrite: true
+
+      - name: Compare with the base
+        run: |
+          head/scripts/bench-memory.py compare "$RUNNER_TEMP/memory-base" "$RUNNER_TEMP/memory-head" \
+            --base-commit "$BASE_SHA" --threshold "$MEMORY_THRESHOLD" --fail-above "$MEMORY_FAIL_ABOVE"

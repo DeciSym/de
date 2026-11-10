@@ -210,3 +210,38 @@ DE_BENCH_SCALE=large cargo bench --bench trainmarks -- --save-baseline main   # 
 DE_BENCH_SCALE=large cargo bench --bench trainmarks -- --save-baseline mine   # on your branch
 scripts/bench-compare.py compare target/criterion:main target/criterion:mine
 ```
+
+### Memory
+
+`make bench-memory` measures the heap memory a release build of `de` uses on
+the same fixtures, under [heaptrack](https://github.com/KDE/heaptrack)
+(`apt install heaptrack`). Each workload runs as a `de` process of its own,
+because peak heap is a high-water mark for the whole process:
+
+- `create` from the trainmarks N-Triples, and from the Turtle;
+- each trainmarks query, and `q1_count` straight from the Turtle;
+- each WatDiv template's five instances.
+
+`scripts/bench-memory.py` records what heaptrack reports for each workload:
+peak heap, calls to allocation functions, temporary allocations, memory leaked
+and peak RSS (which includes heaptrack's own overhead).
+
+```sh
+make bench-memory                                  # writes target/bench-memory/
+scripts/bench-memory.py compare target/bench-memory/trainmarks /tmp/mem-main/trainmarks
+heaptrack --analyze target/bench-memory/trainmarks/create_hdt_from_nt.gz   # where the memory goes
+```
+
+CI measures memory alongside the timings, on the change and on its base, and
+compares the two in the run's summary. It flags a change over 5% in peak heap
+or in allocation calls, and fails when a workload's peak heap grows more than
+15%. A change counts only if it is also over 256 KB of heap or 1,000
+allocations, because a WatDiv query peaks at about 0.5 MB, so 5% of that is
+just a small buffer. Heap figures depend on the code and on
+`RAYON_NUM_THREADS`, not on the runner's CPU. Two runs of the same build agree
+to within 0.1% on allocations, and to within 2% on peak heap, where only the
+parallel HDT builds vary. So these thresholds are much tighter than the
+timing ones. Each
+run keeps the change's recordings as the `memory-trainmarks` and
+`memory-watdiv` artifacts. `heaptrack_print -f NEW -d OLD` shows what changed
+between two of them.
