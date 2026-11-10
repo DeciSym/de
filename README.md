@@ -237,11 +237,13 @@ compares the two in the run's summary. It flags a change over 5% in peak heap
 or in allocation calls, and fails when a workload's peak heap grows more than
 15%. A change counts only if it is also over 256 KB of heap or 1,000
 allocations, because a WatDiv query peaks at about 0.5 MB, so 5% of that is
-just a small buffer. Heap figures depend on the code and on
-`RAYON_NUM_THREADS`, not on the runner's CPU. Two runs of the same build agree
-to within 0.1% on allocations, and to within 2% on peak heap, where only the
-parallel HDT builds vary. So these thresholds are much tighter than the
-timing ones. Each
-run keeps the change's recordings as the `memory-trainmarks` and
+just a small buffer. Two runs of the same build on one machine agree to within
+0.1% on allocations, and to within 2% on peak heap, where only the parallel HDT
+builds vary. So these thresholds are much tighter than the timing ones.
+
+Allocation counts are the same on any machine. Peak heap isn't. On a GitHub
+runner it came out up to 11% lower than on a developer machine, so compare peak
+heap only between runs on the same machine, as CI does. Each run keeps the
+change's recordings as the `memory-trainmarks` and
 `memory-watdiv` artifacts. `heaptrack_print -f NEW -d OLD` shows what changed
 between two of them.

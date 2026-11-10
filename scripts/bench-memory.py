@@ -32,9 +32,12 @@ shows what changed between two of them.
 
 Each workload gets its own process because peak heap is a high-water mark for
 the whole process, which criterion's repeated in-process iterations would blur.
-Unlike timings, the figures depend on the code rather than on the CPU, so runs
-from different runners compare well, as long as RAYON_NUM_THREADS matches: the
-size of rayon's thread pool changes how much memory is live at once.
+Two runs on one machine agree to within 0.1% on allocations and 2% on peak
+heap, far closer than timings. Allocation counts are the same on any machine,
+but peak heap isn't: a GitHub runner measured up to 11% less than a developer
+machine. So compare peak heap only between runs on one machine, as CI does,
+with the same RAYON_NUM_THREADS: the size of rayon's thread pool changes how
+much memory is live at once.
 """
 
 import argparse

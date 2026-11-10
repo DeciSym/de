@@ -30,9 +30,9 @@ name: Benchmarks
 #
 # The memory job measures heap memory the same way, on the change and on its
 # base: scripts/bench-memory.py runs a release build of de under heaptrack, one
-# process per workload, on the same fixtures. Heap figures depend on the code
-# and on RAYON_NUM_THREADS rather than on the CPU, so its thresholds,
-# MEMORY_THRESHOLD and MEMORY_FAIL_ABOVE, are much tighter. The script also
+# process per workload, on the same fixtures. Two runs on one machine agree
+# far more closely than timings do, so its thresholds, MEMORY_THRESHOLD and
+# MEMORY_FAIL_ABOVE, are much tighter. The script also
 # ignores changes under 256 KB of heap or 1,000 allocations. It uploads the
 # change's heaptrack recordings as `memory-<target>`; open one with
 # `heaptrack --analyze` to see where the memory goes.
