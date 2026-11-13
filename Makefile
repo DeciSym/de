@@ -43,6 +43,16 @@ bench-watdiv:
 	scripts/fetch-watdiv-data.sh $(WATDIV_SCALE)
 	DE_WATDIV_SCALE=$(WATDIV_SCALE) cargo bench --bench watdiv
 
+# Measure the heap memory a release build of de uses on both benchmarks'
+# fixtures, under heaptrack (apt install heaptrack): one de process per
+# workload. Writes the recordings and memory.json to target/bench-memory;
+# scripts/bench-memory.py compares two such runs.
+bench-memory: bench-init
+	scripts/fetch-watdiv-data.sh $(WATDIV_SCALE)
+	cargo build --release --bin de
+	DE_BENCH_SCALE=$(BENCH_SCALE) scripts/bench-memory.py run trainmarks --de target/release/de --out target/bench-memory/trainmarks
+	DE_WATDIV_SCALE=$(WATDIV_SCALE) scripts/bench-memory.py run watdiv --de target/release/de --out target/bench-memory/watdiv
+
 build:
 	cargo build --features=server
 
