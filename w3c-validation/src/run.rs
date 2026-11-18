@@ -306,12 +306,10 @@ fn run_entailment_case(
 
     if expected.is_none() {
         let datatypes_recognized = !recognized_datatypes.is_empty();
-        let inconsistent = reasoner.errors().iter().any(|error| {
-            if !datatypes_recognized && error.rule().starts_with("rdfs-datatype") {
-                return false;
-            }
-            true
-        });
+        let inconsistent = reasoner
+            .errors()
+            .iter()
+            .any(|error| datatypes_recognized || !error.rule().starts_with("rdfs-datatype"));
         return match (positive, inconsistent) {
             (true, true) | (false, false) => CaseStatus::Pass,
             (true, false) => CaseStatus::Fail(format!(
@@ -353,7 +351,7 @@ fn run_entailment_case(
 
 /// Formats the optional entailment regime for failure diagnostics.
 fn regime_suffix(regime: Option<&str>) -> String {
-    regime.map(|r| format!(" [regime={r}]")).unwrap_or_default()
+    regime.map_or_default(|r| format!(" [regime={r}]"))
 }
 
 /// Drops graph-name information and converts a dataset into triples for reasoner input.
