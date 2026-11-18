@@ -1,7 +1,7 @@
 // Copyright (c) 2025, Decisym, LLC
 // Licensed under the BSD 3-Clause License (see LICENSE file in the project root).
 
-use crate::enrich::{EnrichCtx, EnrichOutcome, EnrichResult, Enricher};
+use crate::enrich::{EnrichError, EnrichResult, Enricher, EnricherSet, RunResult, RunStatus};
 use crate::hdt_meta;
 use crate::rdf2nt::ConvertResult;
 use crate::rdf2nt::OxRdfConvert;
@@ -28,9 +28,28 @@ pub struct FilesToRdfResult {
     pub combined_rdf_path: String,
     pub unknown_files: Vec<String>,
     pub named_graphs: Vec<String>,
-    /// Source files that were handled by an enricher. Callers can apply their
-    /// own policy (e.g. preserve as a blob alongside the extracted triples).
+    /// Source files that were handled by at least one enricher. Callers can
+    /// apply their own policy (e.g. preserve as a blob alongside the
+    /// extracted triples).
     pub enriched_sources: Vec<String>,
+    /// What the enrichers did with each file one of them claimed, in input
+    /// order.
+    pub enrichments: Vec<FileEnrichment>,
+}
+
+/// The enricher runs over one file, in the order they ran.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileEnrichment {
+    pub file: String,
+    pub runs: Vec<RunSummary>,
+}
+
+/// What one enricher did with a file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunSummary {
+    /// The enricher's [`Enricher::name`].
+    pub enricher: String,
+    pub status: RunStatus,
 }
 
 /// Creates a HDT file from RDF source
@@ -241,8 +260,13 @@ fn ensure_nt_line_boundary(out_file: &NamedTempFile) -> anyhow::Result<()> {
 /// returns the name of the file containing combined `NTriple` RDF, the names of any unhandled files,
 /// and any files that should be preserved as blobs.
 ///
-/// `file_id_fn` is invoked exactly once per file that matches an enricher, so
-/// the produced `NamedNode` can be reused inside the enricher without
+/// Every enricher that claims a file's extension runs on it (see
+/// [`EnricherSet`]), and the file goes to `converter` only if none of them
+/// enriched it. If any enricher fails on a file, the call fails, naming every
+/// enricher that failed on it.
+///
+/// `file_id_fn` is invoked exactly once per file that some enricher claims,
+/// so the produced `NamedNode` can be shared by the enrichers without
 /// re-hashing the file contents. It must be `Some(_)` whenever `enrichers`
 /// is non-empty; `files_to_rdf` returns `Err` upfront on the inconsistent
 /// combination rather than letting an enricher dispatch run into a missing
@@ -273,25 +297,14 @@ pub async fn files_to_rdf(
             "files_to_rdf: file_id_fn was provided but no enrichers are registered"
         ));
     }
-    // Reject ambiguous enricher configurations up front: a single extension
-    // claimed by more than one enricher is a caller bug. The previous
-    // Vec-order-wins dispatch silently masked this — here we fail explicitly
-    // so a misconfigured default set can't ship undetected.
-    let mut claimed: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
-    for (idx, enricher) in enrichers.iter().enumerate() {
-        for ext in enricher.supported_extensions() {
-            if let Some(prev_idx) = claimed.insert(ext, idx) {
-                return Err(anyhow::anyhow!(
-                    "ambiguous enricher configuration: extension \"{ext}\" \
-                     claimed by enrichers at positions {prev_idx} and {idx}"
-                ));
-            }
-        }
-    }
+    // Reject enricher configurations that can't run together up front:
+    // duplicate names, and enrichers that supersede each other in a cycle.
+    let enricher_set = EnricherSet::new(enrichers).context("invalid enricher configuration")?;
     let mut nt_files = vec![];
     let mut files_to_convert = vec![];
     let mut unrecognized_files = vec![];
     let mut enriched_sources: Vec<String> = vec![];
+    let mut enrichments: Vec<FileEnrichment> = vec![];
 
     for file in data {
         let path = Path::new(&file);
@@ -300,15 +313,7 @@ pub async fn files_to_rdf(
             continue;
         }
 
-        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-
-        // Check if any enricher handles this extension
-        let matched_enricher = enrichers
-            .iter()
-            .find(|e| e.supported_extensions().contains(&ext));
-
-        if let Some(enricher) = matched_enricher {
-            debug!("Enriching file {file} with {}", enricher.name());
+        if enricher_set.accepts(file) {
             // Safe `expect` — the enricher/file_id_fn invariant was checked
             // upfront, so reaching this branch with `enrichers` non-empty
             // implies `file_id_fn` is `Some(_)`.
@@ -316,35 +321,52 @@ pub async fn files_to_rdf(
                 .expect("enricher/file_id_fn invariant: non-empty enrichers require file_id_fn");
             let file_id =
                 file_id_fn(file).with_context(|| format!("error computing file id for {file}"))?;
-            let ctx = EnrichCtx {
-                file_path: file,
-                file_id: &file_id,
-                root_id,
-            };
-            let outcome = enricher
-                .enrich(&ctx)
-                .await
-                .with_context(|| format!("error enriching file {file}"))?;
-            match outcome {
-                EnrichOutcome::Enriched {
-                    content,
-                    provenance,
-                } => {
-                    for triple in content.iter().chain(&provenance) {
-                        writeln!(out_file, "{triple} .").with_context(|| {
-                            format!("error writing enriched triples for {file}")
-                        })?;
+            let runs = enricher_set.enrich_file(file, &file_id, root_id).await;
+
+            let mut summaries = Vec::with_capacity(runs.len());
+            let mut failures = vec![];
+            let mut enriched = false;
+            for run in runs {
+                let status = RunStatus::from(&run.result);
+                match run.result {
+                    RunResult::Enriched {
+                        content,
+                        provenance,
+                    } => {
+                        debug!("{} enriched {file}", run.enricher);
+                        for triple in content.iter().chain(&provenance) {
+                            writeln!(out_file, "{triple} .").with_context(|| {
+                                format!("error writing enriched triples for {file}")
+                            })?;
+                        }
+                        enriched = true;
                     }
-                    enriched_sources.push(file.clone());
+                    RunResult::Failed(e) => failures.push((run.enricher.clone(), e)),
+                    RunResult::Declined | RunResult::Superseded { .. } => {
+                        debug!("{} on {file}: {status:?}", run.enricher);
+                    }
                 }
-                EnrichOutcome::Declined => {
-                    debug!("Enricher declined {file}, routing to converter");
-                    files_to_convert.push(file.clone());
-                }
+                summaries.push(RunSummary {
+                    enricher: run.enricher,
+                    status,
+                });
             }
+            if !failures.is_empty() {
+                return Err(enrichment_failure(file, failures));
+            }
+            enrichments.push(FileEnrichment {
+                file: file.clone(),
+                runs: summaries,
+            });
+            if enriched {
+                enriched_sources.push(file.clone());
+                continue;
+            }
+            debug!("No enricher handled {file}, routing to converter");
         }
+
         // Check for triples, this is the preferred RDF format and no additional conversion is required
-        else if Path::new(file)
+        if Path::new(file)
             .extension()
             .is_some_and(|ext| ext.eq_ignore_ascii_case("nt"))
         {
@@ -426,7 +448,25 @@ Use --allow-merge-named-graphs to explicitly merge these graphs into the output 
         unknown_files: unrecognized_files,
         named_graphs,
         enriched_sources,
+        enrichments,
     })
+}
+
+/// The error for enrichers that failed on `file`, each paired with its name.
+/// The first failure is the error's source, so callers can still downcast to
+/// its [`EnrichError`]; the message names the others too.
+fn enrichment_failure(file: &str, failures: Vec<(String, EnrichError)>) -> anyhow::Error {
+    let mut failures = failures.into_iter();
+    let Some((name, first)) = failures.next() else {
+        return anyhow::anyhow!("error enriching file {file}");
+    };
+    let others: Vec<String> = failures
+        .map(|(name, e)| format!("; {name} also failed: {e}"))
+        .collect();
+    anyhow::Error::new(first).context(format!(
+        "error enriching file {file} with {name}{}",
+        others.join("")
+    ))
 }
 
 #[cfg(test)]
@@ -1101,47 +1141,207 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn test_files_to_rdf_rejects_duplicate_extension_claims() {
-        // Two enrichers both claim ".mock". Dispatch must refuse to proceed
-        // rather than let Vec ordering silently pick a winner.
-        let tmp = Builder::new().suffix(".mock").tempfile().unwrap();
-        let mock_path = tmp.path().to_str().unwrap().to_string();
+    /// Claims ".mock" and supersedes `MockEnricher`.
+    struct SupersedingEnricher;
 
-        let mut out_file = Builder::new()
-            .suffix(".nt")
-            .append(true)
-            .tempfile()
-            .unwrap();
-        let enrichers: Vec<Box<dyn Enricher>> =
-            vec![Box::new(MockEnricher), Box::new(DeclineEnricher)];
+    #[async_trait]
+    impl Enricher for SupersedingEnricher {
+        fn supported_extensions(&self) -> Vec<&str> {
+            vec!["mock"]
+        }
+
+        fn name(&self) -> &'static str {
+            "specific"
+        }
+
+        fn supersedes(&self) -> &[&str] {
+            &["mock"]
+        }
+
+        async fn enrich(&self, _ctx: &EnrichCtx<'_>) -> EnrichResult<EnrichOutcome> {
+            Ok(EnrichOutcome::enriched(vec![Triple::new(
+                NamedNode::new("http://example.org/specific-subject")?,
+                NamedNode::new("http://example.org/type")?,
+                NamedNode::new("http://example.org/Specific")?,
+            )]))
+        }
+    }
+
+    /// Fails on every ".mock" file, under the given name.
+    struct NamedFailingEnricher(&'static str);
+
+    #[async_trait]
+    impl Enricher for NamedFailingEnricher {
+        fn supported_extensions(&self) -> Vec<&str> {
+            vec!["mock"]
+        }
+
+        fn name(&self) -> &str {
+            self.0
+        }
+
+        async fn enrich(&self, ctx: &EnrichCtx<'_>) -> EnrichResult<EnrichOutcome> {
+            Err(EnrichError::unsupported(ctx.file_path, "synthetic failure"))
+        }
+    }
+
+    /// Runs `files_to_rdf` over `files` with `enrichers` and no package root.
+    async fn enrich_files(
+        files: &[String],
+        enrichers: &[Box<dyn Enricher>],
+    ) -> anyhow::Result<(FilesToRdfResult, String)> {
+        let mut out_file = Builder::new().suffix(".nt").append(true).tempfile()?;
         let file_id_fn: Option<FileIdFn> = Some(&test_file_id);
-
-        let err = files_to_rdf(
-            std::slice::from_ref(&mock_path),
+        let result = files_to_rdf(
+            files,
             &mut out_file,
             Arc::new(OxRdfConvert {}),
-            &enrichers,
+            enrichers,
             None,
             file_id_fn,
             true,
         )
-        .await
-        .expect_err("duplicate extension claim must be rejected");
+        .await?;
+        let written = fs::read_to_string(out_file.path())?;
+        Ok((result, written))
+    }
 
+    fn summary(enricher: &str, status: RunStatus) -> RunSummary {
+        RunSummary {
+            enricher: enricher.to_string(),
+            status,
+        }
+    }
+
+    #[tokio::test]
+    async fn files_to_rdf_runs_every_enricher_that_claims_an_extension() -> anyhow::Result<()> {
+        let tmp = Builder::new().suffix(".mock").tempfile()?;
+        let mock_path = tmp.path().to_str().unwrap().to_string();
+        let enrichers: Vec<Box<dyn Enricher>> =
+            vec![Box::new(MockEnricher), Box::new(DescribingEnricher)];
+
+        let (result, written) = enrich_files(std::slice::from_ref(&mock_path), &enrichers).await?;
+
+        assert!(written.contains("<http://example.org/Mock>"), "{written}");
+        assert!(
+            written.contains("<http://example.org/content>"),
+            "{written}"
+        );
+        assert_eq!(result.enriched_sources, vec![mock_path.clone()]);
+        assert_eq!(
+            result.enrichments,
+            vec![FileEnrichment {
+                file: mock_path,
+                runs: vec![
+                    summary(
+                        "mock",
+                        RunStatus::Enriched {
+                            content: 1,
+                            provenance: 0
+                        }
+                    ),
+                    summary(
+                        "describing",
+                        RunStatus::Enriched {
+                            content: 1,
+                            provenance: 1
+                        }
+                    ),
+                ],
+            }]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn files_to_rdf_rejects_duplicate_enricher_names() -> anyhow::Result<()> {
+        let tmp = Builder::new().suffix(".mock").tempfile()?;
+        let mock_path = tmp.path().to_str().unwrap().to_string();
+        let enrichers: Vec<Box<dyn Enricher>> =
+            vec![Box::new(MockEnricher), Box::new(MockEnricher)];
+
+        let err = enrich_files(&[mock_path], &enrichers)
+            .await
+            .expect_err("two enrichers with one name must be rejected");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("\"mock\""),
+            "error should name the enricher: {msg}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn files_to_rdf_skips_superseded_enrichers() -> anyhow::Result<()> {
+        let tmp = Builder::new().suffix(".mock").tempfile()?;
+        let mock_path = tmp.path().to_str().unwrap().to_string();
+        // Listed before the enricher that supersedes it, but run after it.
+        let enrichers: Vec<Box<dyn Enricher>> =
+            vec![Box::new(MockEnricher), Box::new(SupersedingEnricher)];
+
+        let (result, written) = enrich_files(std::slice::from_ref(&mock_path), &enrichers).await?;
+
+        assert!(
+            written.contains("<http://example.org/Specific>"),
+            "{written}"
+        );
+        assert!(!written.contains("<http://example.org/Mock>"), "{written}");
+        assert_eq!(
+            result.enrichments[0].runs,
+            vec![
+                summary(
+                    "specific",
+                    RunStatus::Enriched {
+                        content: 1,
+                        provenance: 0
+                    }
+                ),
+                summary(
+                    "mock",
+                    RunStatus::Superseded {
+                        by: "specific".to_string()
+                    }
+                ),
+            ]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn files_to_rdf_names_every_failed_enricher() -> anyhow::Result<()> {
+        let tmp = Builder::new().suffix(".mock").tempfile()?;
+        let mock_path = tmp.path().to_str().unwrap().to_string();
+        let enrichers: Vec<Box<dyn Enricher>> = vec![
+            Box::new(NamedFailingEnricher("first")),
+            Box::new(MockEnricher),
+            Box::new(NamedFailingEnricher("second")),
+        ];
+
+        let err = enrich_files(&[mock_path], &enrichers)
+            .await
+            .expect_err("a failing enricher must fail the call");
         let msg = err.to_string();
+        assert!(msg.contains("with first"), "{msg}");
+        assert!(msg.contains("second also failed"), "{msg}");
         assert!(
-            msg.contains("ambiguous"),
-            "error should flag ambiguity: {msg}"
+            err.chain()
+                .any(|e| e.downcast_ref::<EnrichError>().is_some()),
+            "the first EnrichError must survive as a source"
         );
-        assert!(
-            msg.contains("mock"),
-            "error should name the conflicting extension: {msg}"
-        );
-        assert!(
-            msg.contains('0') && msg.contains('1'),
-            "error should point at both enricher positions: {msg}"
-        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn files_to_rdf_matches_extensions_case_insensitively() -> anyhow::Result<()> {
+        let tmp = Builder::new().suffix(".MOCK").tempfile()?;
+        let mock_path = tmp.path().to_str().unwrap().to_string();
+        let enrichers: Vec<Box<dyn Enricher>> = vec![Box::new(MockEnricher)];
+
+        let (result, written) = enrich_files(std::slice::from_ref(&mock_path), &enrichers).await?;
+
+        assert!(written.contains("<http://example.org/Mock>"), "{written}");
+        assert_eq!(result.enriched_sources, vec![mock_path]);
+        Ok(())
     }
 
     #[tokio::test]
