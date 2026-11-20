@@ -1,17 +1,18 @@
 // Copyright (c) 2025, Decisym, LLC
 // Licensed under the BSD 3-Clause License (see LICENSE file in the project root).
 
+use anyhow::Context;
 use bzip2::bufread::MultiBzDecoder;
 use flate2::bufread::MultiGzDecoder;
 use log::{debug, error, warn};
 use oxrdf::GraphName::DefaultGraph;
-use oxrdf::TripleRef;
+use oxrdf::{Graph, Triple, TripleRef};
 use oxrdfio::RdfFormat::{self, NTriples};
 use oxrdfio::RdfSerializer;
 use oxrdfio::{RdfParseError, RdfParser};
 use std::collections::BTreeSet;
 use std::fs::File;
-use std::io::{self, BufReader, BufWriter, Read, Write};
+use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use url::Url;
 
@@ -55,6 +56,34 @@ pub trait Rdf2Nt: Send + Sync {
         file_paths: Vec<String>,
         output_file: &std::fs::File,
     ) -> anyhow::Result<ConvertResult>;
+
+    /// [`Rdf2Nt::convert_to_nt`], also adding each triple it writes to
+    /// `graph`, for reconcilers to read. By default the triples are read back
+    /// from what `convert_to_nt` appended to `output_file`; a converter that
+    /// parses the files itself adds them as it goes instead.
+    fn convert_to_nt_into(
+        &self,
+        file_paths: Vec<String>,
+        output_file: &std::fs::File,
+        graph: &mut Graph,
+    ) -> anyhow::Result<ConvertResult> {
+        let start = output_file.metadata()?.len();
+        let result = self.convert_to_nt(file_paths, output_file)?;
+        let mut written = output_file.try_clone()?;
+        written.seek(SeekFrom::Start(start))?;
+        read_nt_into(BufReader::new(&mut written), graph)
+            .context("error reading back the converted triples")?;
+        written.seek(SeekFrom::End(0))?;
+        Ok(result)
+    }
+}
+
+/// Adds every triple in the N-Triples `reader` holds to `graph`.
+pub(crate) fn read_nt_into(reader: impl Read, graph: &mut Graph) -> anyhow::Result<()> {
+    for quad in RdfParser::from_format(NTriples).for_reader(reader) {
+        graph.insert(&Triple::from(quad?));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Default)]
@@ -80,9 +109,30 @@ impl Rdf2Nt for OxRdfConvert {
         file_paths: Vec<String>,
         output_file: &std::fs::File,
     ) -> anyhow::Result<ConvertResult> {
+        Self::convert(&file_paths, output_file, None)
+    }
+
+    fn convert_to_nt_into(
+        &self,
+        file_paths: Vec<String>,
+        output_file: &std::fs::File,
+        graph: &mut Graph,
+    ) -> anyhow::Result<ConvertResult> {
+        Self::convert(&file_paths, output_file, Some(graph))
+    }
+}
+
+impl OxRdfConvert {
+    /// Converts `file_paths` into N-Triples in `output_file`, adding each
+    /// triple written to `graph` if there is one.
+    fn convert(
+        file_paths: &[String],
+        output_file: &std::fs::File,
+        mut graph: Option<&mut Graph>,
+    ) -> anyhow::Result<ConvertResult> {
         let mut res = ConvertResult::default();
         let mut dest_writer = BufWriter::new(output_file);
-        for file in &file_paths {
+        for file in file_paths {
             let path = Path::new(file);
             let source_reader = open_rdf_reader(path)
                 .map_err(|e| anyhow::anyhow!("Error opening file {file:?}: {e:?}"))?;
@@ -147,11 +197,12 @@ impl Rdf2Nt for OxRdfConvert {
                     }
                     res.named_graphs.insert(q.graph_name.to_string());
                 }
-                serializer.serialize_triple(TripleRef::new(
-                    q.subject.as_ref(),
-                    q.predicate.as_ref(),
-                    q.object.as_ref(),
-                ))?;
+                let triple =
+                    TripleRef::new(q.subject.as_ref(), q.predicate.as_ref(), q.object.as_ref());
+                serializer.serialize_triple(triple)?;
+                if let Some(graph) = graph.as_deref_mut() {
+                    graph.insert(triple);
+                }
             }
 
             serializer.finish()?;
@@ -242,6 +293,78 @@ mod tests {
         assert_eq!(res.converted, 1);
         assert_eq!(res.unhandled, [] as [std::string::String; 0]);
         assert_eq!(count_triples_in(&out), APPLE_TRIPLES);
+        Ok(())
+    }
+
+    /// Writes one triple without parsing anything, like a converter that
+    /// runs another program.
+    struct OneTripleConvert;
+
+    impl Rdf2Nt for OneTripleConvert {
+        fn convert_to_nt(
+            &self,
+            _file_paths: Vec<String>,
+            mut output_file: &File,
+        ) -> anyhow::Result<ConvertResult> {
+            output_file.write_all(
+                b"<http://example.org/s> <http://example.org/p> <http://example.org/o> .\n",
+            )?;
+            Ok(ConvertResult {
+                converted: 1,
+                ..ConvertResult::default()
+            })
+        }
+    }
+
+    #[test]
+    fn convert_to_nt_into_reads_back_only_what_was_converted() -> anyhow::Result<()> {
+        let out = Builder::new().suffix(".nt").tempfile()?;
+        let mut file = out.as_file();
+        file.write_all(
+            b"<http://example.org/before> <http://example.org/p> <http://example.org/o> .\n",
+        )?;
+        let mut graph = Graph::new();
+
+        let result = OneTripleConvert.convert_to_nt_into(Vec::new(), out.as_file(), &mut graph)?;
+
+        assert_eq!(result.converted, 1);
+        let mut converted = Graph::new();
+        read_nt_into(
+            &b"<http://example.org/s> <http://example.org/p> <http://example.org/o> .\n"[..],
+            &mut converted,
+        )?;
+        assert_eq!(graph, converted);
+        // What's written next still goes after it
+        file.write_all(
+            b"<http://example.org/after> <http://example.org/p> <http://example.org/o> .\n",
+        )?;
+        let written = fs::read_to_string(out.path())?;
+        let lines: Vec<&str> = written.lines().collect();
+        assert_eq!(lines.len(), 3, "{written}");
+        assert!(lines[1].starts_with("<http://example.org/s>"), "{written}");
+        assert!(
+            lines[2].starts_with("<http://example.org/after>"),
+            "{written}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn ox_convert_to_nt_into_adds_the_triples_it_writes() -> anyhow::Result<()> {
+        let out = Builder::new().suffix(".nt").tempfile()?;
+        let mut graph = Graph::new();
+
+        let result = OxRdfConvert {}.convert_to_nt_into(
+            vec![APPLE_TTL.to_string()],
+            out.as_file(),
+            &mut graph,
+        )?;
+
+        assert_eq!(result.converted, 1);
+        assert_eq!(graph.len(), APPLE_TRIPLES);
+        let mut written = Graph::new();
+        read_nt_into(File::open(out.path())?, &mut written)?;
+        assert_eq!(graph, written);
         Ok(())
     }
 }
