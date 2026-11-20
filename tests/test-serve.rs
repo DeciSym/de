@@ -218,6 +218,68 @@ mod server_tests {
         Ok(())
     }
 
+    /// The default graph is the merge of the store's files, so a triple two
+    /// files share is in it once, whether `default-graph-uri` names the files
+    /// or not. `GRAPH ?g` still finds it in each file.
+    #[tokio::test]
+    async fn test_sparql_query_default_graph_holds_shared_triple_once() -> anyhow::Result<()> {
+        let tmp_dir = tempdir()?;
+        let book1 = format!("{BOOK1_IRI} {DC_TITLE} \"SPARQL Tutorial\" .\n");
+        let book2 = format!("{BOOK2_IRI} {DC_TITLE} \"The Semantic Web\" .\n");
+        let mut hdts = Vec::new();
+        for (name, ntriples) in [("book1", book1.clone()), ("books", book1 + &book2)] {
+            let nt = tmp_dir.path().join(format!("{name}.nt"));
+            let hdt = tmp_dir.path().join(format!("{name}.hdt"));
+            std::fs::write(&nt, ntriples)?;
+            de::create::do_create(&hdt.to_string_lossy(), &[nt.to_string_lossy().to_string()])
+                .await?;
+            hdts.push(hdt.to_string_lossy().to_string());
+        }
+        let store = AggregateHdt::new(&hdts)?;
+
+        let encode = |value: &str| {
+            url::form_urlencoded::byte_serialize(value.as_bytes()).collect::<String>()
+        };
+        let select = |query: &str, dataset: &str| -> anyhow::Result<Vec<Vec<String>>> {
+            let mut request = Request::builder()
+                .method(Method::GET)
+                .uri(format!(
+                    "http://localhost/query?query={}{dataset}",
+                    encode(query)
+                ))
+                .header("Accept", "application/sparql-results+json")
+                .body(Body::empty())?;
+            let response = handle_response(de::serve::handle_request(
+                &mut request,
+                &store,
+                true,
+                &tmp_dir.path().to_string_lossy(),
+            ))?;
+            Ok(parse_solution_rows_json(&read_body(response)?)?.1)
+        };
+
+        let both_files = ["book1.hdt", "books.hdt"]
+            .map(|name| {
+                format!(
+                    "&default-graph-uri={}",
+                    encode(&file_graph_uri(tmp_dir.path(), name))
+                )
+            })
+            .concat();
+        let titles = format!("SELECT ?title WHERE {{ ?book {DC_TITLE} ?title }}");
+        for dataset in ["", both_files.as_str()] {
+            assert_eq!(
+                select(&titles, dataset)?,
+                [["\"SPARQL Tutorial\""], ["\"The Semantic Web\""]],
+                "dataset {dataset:?}"
+            );
+        }
+
+        let graphs = format!("SELECT ?g WHERE {{ GRAPH ?g {{ {BOOK1_IRI} {DC_TITLE} ?title }} }}");
+        assert_eq!(select(&graphs, "")?.len(), 2);
+        Ok(())
+    }
+
     #[tokio::test]
     async fn test_sparql_query_ask() -> anyhow::Result<()> {
         let (tmp_dir, store) = setup_test_store().await?;

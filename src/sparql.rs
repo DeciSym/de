@@ -320,6 +320,14 @@ pub fn term_to_hdt_bgp_str(term: Term) -> String {
     }
 }
 
+/// Streams the quads that match a pattern, one graph after another.
+///
+/// The default graph is the merge of the graphs it is made of, and an RDF graph
+/// is a set: a triple that two files both hold is in it once. So when it reads
+/// the default graph, the iterator skips a triple that a graph it has already
+/// read holds, since that graph returned it. To check, it looks the triple up
+/// in each such graph, rather than remembering what it returned, so memory
+/// stays flat however many triples match.
 struct StreamingInternalQuadIter<'a> {
     graphs: Vec<(&'a String, &'a hdt::HdtAny)>,
     subject: Option<Arc<str>>,
@@ -327,12 +335,115 @@ struct StreamingInternalQuadIter<'a> {
     object: Option<Arc<str>>,
     emit_default_graph: bool,
     current_graph: usize,
-    current_iter: Option<StreamingInternalQuadIterator<'a>>,
+    current_iter: Option<GraphTriples<'a>>,
+    // When reading the default graph from more than one graph: the graphs read
+    // so far that hold triples matching the pattern.
+    read_graphs: Vec<ReadGraph<'a>>,
 }
 
-type StreamingInternalQuadIterator<'a> =
-    Box<dyn Iterator<Item = Result<InternalQuad<Arc<str>>, Error>> + 'a>;
+/// The triples of one graph that match the pattern, before blank node scoping.
+struct GraphTriples<'a> {
+    graph_name: Arc<str>,
+    triples: Box<dyn Iterator<Item = StringTriple> + 'a>,
+    graph: ReadGraph<'a>,
+}
+
+/// A graph, with the constants of the pattern resolved against its dictionary.
+struct ReadGraph<'a> {
+    hdt: &'a hdt::HdtAny,
+    // The dictionary IDs of the constants, by position: 0 where the pattern has
+    // a variable.
+    ids: [usize; 3],
+    // The term last looked up in each position the pattern leaves open, with
+    // its ID, 0 if this graph doesn't have it there. Consecutive triples often
+    // share a term: a scan returns the triples of a subject together.
+    last: [Option<(Arc<str>, usize)>; 3],
+}
+
+impl<'a> ReadGraph<'a> {
+    fn new(hdt: &'a hdt::HdtAny, ids: [usize; 3]) -> Self {
+        Self {
+            hdt,
+            ids,
+            last: [None, None, None],
+        }
+    }
+
+    /// Whether this graph holds `triple`, which matches the pattern.
+    fn holds(&mut self, triple: &StringTriple) -> bool {
+        let mut ids = self.ids;
+        // Settle the terms that were just looked up first, since one this graph
+        // doesn't have rules the triple out for free.
+        for (position, last) in self.last.iter().enumerate() {
+            if ids[position] == 0
+                && let Some((term, id)) = last
+                && *term == triple[position]
+            {
+                if *id == 0 {
+                    return false;
+                }
+                ids[position] = *id;
+            }
+        }
+        // Then look up the others, the predicate first: its dictionary is the
+        // smallest, and it is the term that is missing when files are split by
+        // predicate.
+        for position in [1, 0, 2] {
+            if ids[position] == 0 {
+                let term = &triple[position];
+                let id = self.hdt.string_to_id(term, hdt::IdKind::KINDS[position]);
+                self.last[position] = Some((term.clone(), id));
+                if id == 0 {
+                    return false;
+                }
+                ids[position] = id;
+            }
+        }
+        contains_triple_ids(self.hdt, ids)
+    }
+}
+
+/// Whether one of `graphs` holds `triple`.
+fn held_by_any(graphs: &mut [ReadGraph<'_>], triple: &StringTriple) -> bool {
+    let [subject, _, object] = triple;
+    // A blank node is scoped to its graph (see `scoped_blank_node`), so no
+    // other graph holds a triple that has one.
+    if subject.starts_with("_:") || object.starts_with("_:") {
+        return false;
+    }
+    graphs.iter_mut().any(|graph| graph.holds(triple))
+}
+
+/// Whether `hdt` holds the triple with these dictionary IDs.
+fn contains_triple_ids(hdt: &hdt::HdtAny, ids: [usize; 3]) -> bool {
+    use hdt::triples::SubjectIter;
+    match hdt {
+        hdt::HdtAny::Hybrid(h) => SubjectIter::with_pattern(&h.triples, ids).next().is_some(),
+        hdt::HdtAny::InMemory(h) => SubjectIter::with_pattern(&h.triples, ids).next().is_some(),
+    }
+}
+
 type StringTriple = [Arc<str>; 3];
+/// The terms of a pattern by position, each constant with its ID in one HDT's
+/// dictionary, and `None` for a variable.
+type ResolvedPattern = [Option<(Arc<str>, usize)>; 3];
+
+/// Resolves the constants of a pattern against the dictionary of `hdt`.
+/// Returns `None` if one of them is not in it, in its position: then no triple
+/// of `hdt` matches.
+fn resolve_pattern(hdt: &hdt::HdtAny, terms: [Option<Arc<str>>; 3]) -> Option<ResolvedPattern> {
+    let mut pattern: ResolvedPattern = [None, None, None];
+    for ((term, kind), resolved) in terms.into_iter().zip(hdt::IdKind::KINDS).zip(&mut pattern) {
+        if let Some(term) = term {
+            let id = hdt.string_to_id(&term, kind);
+            if id == 0 {
+                return None;
+            }
+            *resolved = Some((term, id));
+        }
+    }
+    Some(pattern)
+}
 
 fn scoped_blank_node(term: Arc<str>, graph_name: &Arc<str>) -> Arc<str> {
     if !term.starts_with("_:") {
@@ -361,40 +472,29 @@ fn unscoped_pattern_term(term: &Arc<str>, graph_name: &Arc<str>) -> Option<Arc<s
     Some(Arc::from(format!("_:{original}")))
 }
 
-// TODO: Delete this function once `hdt::HdtGeneric::triples_with_pattern`
-// relaxes its input lifetime constraints. Today upstream's signature is
-// `triples_with_pattern<'a>(&'a self, sp: Option<&'a str>, ...)`, tying the
-// input `&str` lifetime to the returned iterator's lifetime — even though the
-// body internally clones each input to `Arc<str>` and never borrows from the
-// originals past the call. That tight lifetime forces us to keep this owned
-// `Arc<str>` shaped wrapper because our filter terms (computed locally in
-// `StreamingInternalQuadIter::ensure_current_iter` after blank-node
-// unscoping) don't outlive the iterator. When upstream relaxes the signature
-// (e.g. `Option<&str>` with an unrelated lifetime), this whole function
-// collapses to `hdt.triples_with_pattern(s.as_deref(), p.as_deref(),
-// o.as_deref())` and we additionally pick up upstream's `TripleCache` for
-// repeated id->string lookups.
-fn indexed_triples_with_pattern<'a>(
-    hdt: &'a hdt::HdtAny,
-    subject: Option<Arc<str>>,
-    predicate: Option<Arc<str>>,
-    object: Option<Arc<str>>,
-) -> Box<dyn Iterator<Item = StringTriple> + 'a> {
+// Upstream's `hdt::HdtGeneric::triples_with_pattern` does what this function
+// does, but from strings. It looks the constants up itself, while
+// `StreamingInternalQuadIter` needs their IDs too, to look triples up in the
+// graphs it has read. And its signature,
+// `triples_with_pattern<'a>(&'a self, sp: Option<&'a str>, ...)`, ties the
+// input `&str` lifetime to the returned iterator's, which our filter terms
+// (computed locally in `StreamingInternalQuadIter::ensure_current_iter` after
+// blank-node unscoping) don't outlive. TODO: switch to upstream if it gains a
+// variant that takes resolved IDs, which would also pick up its `TripleCache`
+// for repeated id->string lookups.
+fn indexed_triples_with_pattern(
+    hdt: &hdt::HdtAny,
+    pattern: ResolvedPattern,
+) -> Box<dyn Iterator<Item = StringTriple> + '_> {
     match hdt {
-        hdt::HdtAny::Hybrid(h) => {
-            indexed_triples_with_pattern_generic(h, subject, predicate, object)
-        }
-        hdt::HdtAny::InMemory(h) => {
-            indexed_triples_with_pattern_generic(h, subject, predicate, object)
-        }
+        hdt::HdtAny::Hybrid(h) => indexed_triples_with_pattern_generic(h, pattern),
+        hdt::HdtAny::InMemory(h) => indexed_triples_with_pattern_generic(h, pattern),
     }
 }
 
 fn indexed_triples_with_pattern_generic<'a, D, S, B>(
     hdt: &'a hdt::HdtGeneric<D, S, B>,
-    subject: Option<Arc<str>>,
-    predicate: Option<Arc<str>>,
-    object: Option<Arc<str>>,
+    pattern: ResolvedPattern,
 ) -> Box<dyn Iterator<Item = StringTriple> + 'a>
 where
     D: hdt::DictSectPfcAccess + 'a,
@@ -403,25 +503,6 @@ where
 {
     use hdt::IdKind;
     use hdt::triples::{ObjectIter, PredicateIter, PredicateObjectIter, SubjectIter};
-
-    let pattern: [Option<(Arc<str>, usize)>; 3] = [
-        subject.map(|term| {
-            let id = hdt.dict.string_to_id(term.as_ref(), IdKind::Subject);
-            (term, id)
-        }),
-        predicate.map(|term| {
-            let id = hdt.dict.string_to_id(term.as_ref(), IdKind::Predicate);
-            (term, id)
-        }),
-        object.map(|term| {
-            let id = hdt.dict.string_to_id(term.as_ref(), IdKind::Object);
-            (term, id)
-        }),
-    ];
-
-    if pattern.iter().flatten().any(|entry| entry.1 == 0) {
-        return Box::new(iter::empty());
-    }
 
     match pattern {
         [Some(s), Some(p), Some(o)] => {
@@ -490,7 +571,26 @@ where
     }
 }
 
-impl StreamingInternalQuadIter<'_> {
+impl<'a> StreamingInternalQuadIter<'a> {
+    /// Reads `graphs` in the order given. With `emit_default_graph`, they make
+    /// up the default graph; otherwise each quad names the graph it is from.
+    fn new(
+        graphs: Vec<(&'a String, &'a hdt::HdtAny)>,
+        [subject, predicate, object]: [Option<Arc<str>>; 3],
+        emit_default_graph: bool,
+    ) -> Self {
+        Self {
+            graphs,
+            subject,
+            predicate,
+            object,
+            emit_default_graph,
+            current_graph: 0,
+            current_iter: None,
+            read_graphs: Vec::new(),
+        }
+    }
+
     fn ensure_current_iter(&mut self) -> bool {
         while self.current_iter.is_none() && self.current_graph < self.graphs.len() {
             let (graph_name, hdt) = self.graphs[self.current_graph];
@@ -517,26 +617,28 @@ impl StreamingInternalQuadIter<'_> {
                 },
                 None => None,
             };
-            let emit_default_graph = self.emit_default_graph;
+            let Some(pattern) =
+                resolve_pattern(hdt, [subject_filter, predicate_filter, object_filter])
+            else {
+                continue;
+            };
+            let ids = pattern
+                .each_ref()
+                .map(|term| term.as_ref().map_or(0, |(_, id)| *id));
 
-            self.current_iter = Some(Box::new(
-                indexed_triples_with_pattern(hdt, subject_filter, predicate_filter, object_filter)
-                    .map(move |[subject, predicate, object]| {
-                        let output_graph_name = if emit_default_graph {
-                            None
-                        } else {
-                            Some(graph_name.clone())
-                        };
-                        Ok(InternalQuad {
-                            subject: scoped_blank_node(subject, &graph_name),
-                            predicate,
-                            object: scoped_blank_node(object, &graph_name),
-                            graph_name: output_graph_name,
-                        })
-                    }),
-            ));
+            self.current_iter = Some(GraphTriples {
+                graph_name,
+                triples: indexed_triples_with_pattern(hdt, pattern),
+                graph: ReadGraph::new(hdt, ids),
+            });
         }
         self.current_iter.is_some()
+    }
+
+    /// Whether the triples of the graphs read so far are skipped when a later
+    /// graph holds them too.
+    fn dedups_default_graph(&self) -> bool {
+        self.emit_default_graph && self.graphs.len() > 1
     }
 }
 
@@ -544,17 +646,28 @@ impl Iterator for StreamingInternalQuadIter<'_> {
     type Item = Result<InternalQuad<Arc<str>>, Error>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        loop {
-            if !self.ensure_current_iter() {
-                return None;
-            }
-            if let Some(current_iter) = self.current_iter.as_mut() {
-                if let Some(item) = current_iter.next() {
-                    return Some(item);
+        while self.ensure_current_iter() {
+            let current = self.current_iter.as_mut()?;
+            let Some(triple) = current.triples.next() else {
+                let finished = self.current_iter.take()?;
+                if self.dedups_default_graph() && self.current_graph < self.graphs.len() {
+                    self.read_graphs.push(finished.graph);
                 }
-                self.current_iter = None;
+                continue;
+            };
+            // Only the default graph keeps read graphs; see `dedups_default_graph`.
+            if !self.read_graphs.is_empty() && held_by_any(&mut self.read_graphs, &triple) {
+                continue;
             }
+            let [subject, predicate, object] = triple;
+            return Some(Ok(InternalQuad {
+                subject: scoped_blank_node(subject, &current.graph_name),
+                predicate,
+                object: scoped_blank_node(object, &current.graph_name),
+                graph_name: (!self.emit_default_graph).then(|| current.graph_name.clone()),
+            }));
         }
+        None
     }
 }
 
@@ -604,19 +717,11 @@ impl<'a> QueryableDataset<'a> for &'a AggregateHdtSnapshot {
             })
             .collect();
 
-        let subject = subject.cloned();
-        let predicate = predicate.cloned();
-        let object = object.cloned();
-
-        StreamingInternalQuadIter::<'a> {
-            graphs: graphs_to_query,
-            subject,
-            predicate,
-            object,
+        StreamingInternalQuadIter::new(
+            graphs_to_query,
+            [subject.cloned(), predicate.cloned(), object.cloned()],
             emit_default_graph,
-            current_graph: 0,
-            current_iter: None,
-        }
+        )
     }
 
     fn internalize_term(&self, term: Term) -> Result<Arc<str>, Error> {
@@ -788,10 +893,12 @@ mod tests {
     use super::*;
     #[cfg(not(feature = "server"))]
     use super::{
-        AggregateHdtSnapshot, QueryEvaluationError, query, scoped_blank_node, unscoped_pattern_term,
+        AggregateHdt, AggregateHdtSnapshot, QueryEvaluationError, StreamingInternalQuadIter,
+        quads_for_pattern_strings, query, scoped_blank_node, unscoped_pattern_term,
     };
     #[cfg(feature = "server")]
     use spareval::QueryableDataset;
+    use std::collections::HashSet;
 
     /// Helper function to get the path to a test HDT file
     #[cfg(feature = "server")]
@@ -1166,5 +1273,234 @@ mod tests {
             unscoped_pattern_term(&scoped, &graph_b).is_none(),
             "scoped blank nodes should stay graph-local"
         );
+    }
+
+    /// Two files that share two ground triples and the blank node label `_:x`.
+    /// Each also holds a triple whose terms the other file has too, in the same
+    /// positions, so only looking the whole triple up shows it isn't shared,
+    /// and two triples of a subject the other file doesn't have, which a scan
+    /// reads one after the other.
+    const FILE_A: &str = r#"<http://ex/alice> <http://ex/knows> <http://ex/bob> .
+<http://ex/alice> <http://ex/name> "Alice" .
+<http://ex/bob> <http://ex/knows> <http://ex/carol> .
+<http://ex/erin> <http://ex/knows> <http://ex/bob> .
+<http://ex/erin> <http://ex/name> "Erin" .
+_:x <http://ex/label> "blank" .
+"#;
+    const FILE_B: &str = r#"<http://ex/alice> <http://ex/knows> <http://ex/bob> .
+<http://ex/alice> <http://ex/name> "Alice" .
+<http://ex/alice> <http://ex/knows> <http://ex/carol> .
+<http://ex/bob> <http://ex/name> "Bob" .
+<http://ex/dave> <http://ex/knows> <http://ex/alice> .
+<http://ex/dave> <http://ex/name> "Dave" .
+_:x <http://ex/label> "blank" .
+"#;
+
+    /// The default graph of `FILE_A` and `FILE_B`, as HDT strings: the shared
+    /// triples once, and the `_:x` triple twice, since each file's `_:x` is a
+    /// blank node of its own.
+    const MERGED: [[&str; 3]; 11] = [
+        ["http://ex/alice", "http://ex/knows", "http://ex/bob"],
+        ["http://ex/alice", "http://ex/name", "\"Alice\""],
+        ["http://ex/bob", "http://ex/knows", "http://ex/carol"],
+        ["http://ex/erin", "http://ex/knows", "http://ex/bob"],
+        ["http://ex/erin", "http://ex/name", "\"Erin\""],
+        ["http://ex/alice", "http://ex/knows", "http://ex/carol"],
+        ["http://ex/bob", "http://ex/name", "\"Bob\""],
+        ["http://ex/dave", "http://ex/knows", "http://ex/alice"],
+        ["http://ex/dave", "http://ex/name", "\"Dave\""],
+        ["_:x", "http://ex/label", "\"blank\""],
+        ["_:x", "http://ex/label", "\"blank\""],
+    ];
+
+    /// A pattern of each shape, then ones with a constant that only one file
+    /// has, or neither.
+    const PATTERNS: [[Option<&str>; 3]; 12] = [
+        [None, None, None],
+        [Some("http://ex/alice"), None, None],
+        [None, Some("http://ex/knows"), None],
+        [None, None, Some("http://ex/carol")],
+        [Some("http://ex/alice"), Some("http://ex/knows"), None],
+        [Some("http://ex/alice"), None, Some("http://ex/bob")],
+        [None, Some("http://ex/knows"), Some("http://ex/bob")],
+        [
+            Some("http://ex/alice"),
+            Some("http://ex/knows"),
+            Some("http://ex/bob"),
+        ],
+        [Some("http://ex/bob"), Some("http://ex/name"), None],
+        [None, None, Some("\"Bob\"")],
+        [None, Some("http://ex/label"), None],
+        [Some("http://ex/carol"), None, None],
+    ];
+
+    /// Converts `ntriples` to `<dir>/<name>.hdt`.
+    fn hdt_from_ntriples(
+        dir: &std::path::Path,
+        name: &str,
+        ntriples: &str,
+    ) -> anyhow::Result<std::path::PathBuf> {
+        let nt = dir.join(format!("{name}.nt"));
+        let hdt = dir.join(format!("{name}.hdt"));
+        std::fs::write(&nt, ntriples)?;
+        crate::create::nt_file_to_hdt(&nt, &hdt, false)?;
+        Ok(hdt)
+    }
+
+    /// The triples of `MERGED` that match `pattern`, sorted.
+    fn merged_matches(pattern: [Option<&str>; 3]) -> Vec<[String; 3]> {
+        let mut matches: Vec<[String; 3]> = MERGED
+            .iter()
+            .filter(|triple| {
+                triple
+                    .iter()
+                    .zip(pattern)
+                    .all(|(term, constant)| constant.is_none_or(|constant| constant == *term))
+            })
+            .map(|triple| triple.map(String::from))
+            .collect();
+        matches.sort();
+        matches
+    }
+
+    /// The triples that match `pattern` in the default graph made of `graphs`,
+    /// read in that order, sorted. Blank nodes come back as `_:x`, once it is
+    /// checked that no two triples have the same one: each file's `_:x` is in
+    /// one triple, so two would mean the files' blank nodes were merged.
+    fn default_graph_matches(
+        graphs: &[(&String, &hdt::HdtAny)],
+        pattern: [Option<&str>; 3],
+    ) -> anyhow::Result<Vec<[String; 3]>> {
+        let mut blank_nodes = HashSet::new();
+        let mut matches = Vec::new();
+        let terms = pattern.map(|term| term.map(Arc::from));
+        for quad in StreamingInternalQuadIter::new(graphs.to_vec(), terms, true) {
+            let quad = quad?;
+            assert!(quad.graph_name.is_none(), "the default graph has no name");
+            let mut triple =
+                [quad.subject, quad.predicate, quad.object].map(|term| term.to_string());
+            if triple[0].starts_with("_:") {
+                assert!(
+                    blank_nodes.insert(triple[0].clone()),
+                    "two triples have the blank node {}",
+                    triple[0]
+                );
+                triple[0] = "_:x".to_string();
+            }
+            matches.push(triple);
+        }
+        matches.sort();
+        Ok(matches)
+    }
+
+    /// The values `variable` takes in the solutions of `sparql`, sorted.
+    fn select_values(
+        snapshot: &AggregateHdtSnapshot,
+        sparql: &str,
+        variable: &str,
+    ) -> anyhow::Result<Vec<String>> {
+        let spareval::QueryResults::Solutions(solutions) = query(sparql, snapshot, None)? else {
+            anyhow::bail!("expected solutions for {sparql}");
+        };
+        let mut values = Vec::new();
+        for solution in solutions {
+            values.push(
+                solution?
+                    .get(variable)
+                    .map_or_else(String::new, ToString::to_string),
+            );
+        }
+        values.sort();
+        Ok(values)
+    }
+
+    /// The default graph is the merge of its files, and an RDF graph is a set,
+    /// so a triple two files share is in it once: whichever file is read
+    /// first, and whichever backend each is opened with.
+    #[test]
+    fn test_default_graph_holds_a_shared_triple_once() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let a = hdt_from_ntriples(dir.path(), "a", FILE_A)?;
+        let b = hdt_from_ntriples(dir.path(), "b", FILE_B)?;
+        let (name_a, name_b) = ("file:///a.hdt".to_string(), "file:///b.hdt".to_string());
+        // A threshold of 0 opens the hybrid backend, and usize::MAX the
+        // in-memory one.
+        for (threshold_a, threshold_b) in [(0, 0), (usize::MAX, usize::MAX), (0, usize::MAX)] {
+            let hdt_a = hdt::HdtAny::open_with_threshold(&a, Some(threshold_a))?;
+            let hdt_b = hdt::HdtAny::open_with_threshold(&b, Some(threshold_b))?;
+            assert_eq!(
+                (hdt_a.is_hybrid(), hdt_b.is_hybrid()),
+                (threshold_a == 0, threshold_b == 0)
+            );
+            for graphs in [
+                [(&name_a, &hdt_a), (&name_b, &hdt_b)],
+                [(&name_b, &hdt_b), (&name_a, &hdt_a)],
+            ] {
+                for pattern in PATTERNS {
+                    assert_eq!(
+                        default_graph_matches(&graphs, pattern)?,
+                        merged_matches(pattern),
+                        "pattern {pattern:?} reading {} first, hybrid {}/{}",
+                        graphs[0].0,
+                        hdt_a.is_hybrid(),
+                        hdt_b.is_hybrid()
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Named graphs aren't merged: `GRAPH ?g` finds a shared triple in each.
+    #[test]
+    fn test_named_graphs_each_hold_a_shared_triple() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let paths = [("a", FILE_A), ("b", FILE_B)]
+            .map(|(name, ntriples)| hdt_from_ntriples(dir.path(), name, ntriples));
+        let paths = paths
+            .into_iter()
+            .map(|path| Ok(path?.to_string_lossy().into_owned()))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        let snapshot = AggregateHdt::new(&paths)?.get_snapshot(None)?;
+        let (s, p, o) = (
+            Some("http://ex/alice"),
+            Some("http://ex/knows"),
+            Some("http://ex/bob"),
+        );
+
+        let named = quads_for_pattern_strings(&snapshot, s, p, o, None)?;
+        let graph_names: HashSet<_> = named.iter().map(|quad| &quad.graph_name).collect();
+        assert_eq!((named.len(), graph_names.len()), (2, 2), "{named:?}");
+
+        let default = quads_for_pattern_strings(&snapshot, s, p, o, Some(None))?;
+        assert_eq!(default.len(), 1, "{default:?}");
+        Ok(())
+    }
+
+    /// Through SPARQL, as `de query` builds the dataset: a shared triple counts
+    /// once, and a join through it doesn't double what it reaches.
+    #[test]
+    fn test_query_counts_a_shared_triple_once() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let mut paths = Vec::new();
+        for (name, ntriples) in [("a", FILE_A), ("b", FILE_B)] {
+            let path = hdt_from_ntriples(dir.path(), name, ntriples)?;
+            paths.push(path.to_string_lossy().into_owned());
+        }
+        let snapshot = AggregateHdt::new_with_mappings(&paths, &[])?.get_snapshot(None)?;
+
+        assert_eq!(
+            select_values(&snapshot, "SELECT (COUNT(*) AS ?n) WHERE { ?s ?p ?o }", "n")?,
+            [r#""11"^^<http://www.w3.org/2001/XMLSchema#integer>"#]
+        );
+        assert_eq!(
+            select_values(
+                &snapshot,
+                "SELECT ?o WHERE { <http://ex/alice> <http://ex/knows> ?x . ?x <http://ex/knows> ?o }",
+                "o"
+            )?,
+            ["<http://ex/carol>"]
+        );
+        Ok(())
     }
 }
