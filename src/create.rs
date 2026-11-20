@@ -8,10 +8,10 @@ use crate::hdt_meta;
 use crate::rdf2nt::ConvertResult;
 use crate::rdf2nt::OxRdfConvert;
 use crate::rdf2nt::Rdf2Nt;
+use crate::rdf2nt::read_nt_into;
 use anyhow::Context;
 use log::{debug, error, warn};
-use oxrdf::{Graph, NamedNode, Triple};
-use oxrdfio::{RdfFormat, RdfParser};
+use oxrdf::{Graph, NamedNode};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write, copy};
 use std::path::Path;
@@ -313,6 +313,8 @@ pub async fn files_to_rdf(
     // Reject enricher configurations that can't run together up front:
     // duplicate names, and enrichers that supersede each other in a cycle.
     let enricher_set = EnricherSet::new(enrichers).context("invalid enricher configuration")?;
+    // What reconcilers read: every triple written, added as it's written
+    let mut graph = enricher_set.has_reconcilers().then(Graph::new);
     let mut nt_files = vec![];
     let mut files_to_convert = vec![];
     let mut unrecognized_files = vec![];
@@ -353,6 +355,9 @@ pub async fn files_to_rdf(
                             writeln!(out_file, "{triple} .").with_context(|| {
                                 format!("error writing enriched triples for {file}")
                             })?;
+                            if let Some(graph) = graph.as_mut() {
+                                graph.insert(triple);
+                            }
                         }
                         enriched = true;
                     }
@@ -405,9 +410,13 @@ pub async fn files_to_rdf(
     let conv_res = if files_to_convert.is_empty() {
         ConvertResult::default()
     } else {
-        let r = converter
-            .convert_to_nt(files_to_convert, out_file.as_file())
-            .map_err(|e| anyhow::anyhow!("Error converting file(s) to NT: {e}"))?;
+        let r = match graph.as_mut() {
+            Some(graph) => {
+                converter.convert_to_nt_into(files_to_convert, out_file.as_file(), graph)
+            }
+            None => converter.convert_to_nt(files_to_convert, out_file.as_file()),
+        }
+        .map_err(|e| anyhow::anyhow!("Error converting file(s) to NT: {e}"))?;
         unrecognized_files.extend(r.unhandled.iter().cloned());
         r
     };
@@ -439,8 +448,8 @@ Use --allow-merge-named-graphs to explicitly merge these graphs into the output 
         ));
     }
 
-    // Reconcilers read everything written, so with any to run, it all goes
-    // to `out_file`
+    // With reconcilers to run, everything goes to `out_file`, since their
+    // triples are added to it
     let wrote_anything = have_enriched_output || conv_res.converted != 0 || !nt_files.is_empty();
     let combined_rdf_path = if nt_files.len() > 1
         || conv_res.converted != 0
@@ -455,6 +464,12 @@ Use --allow-merge-named-graphs to explicitly merge these graphs into the output 
 
             copy(&mut source_reader, out_file)
                 .with_context(|| format!("error copying file {nt_file:?}"))?;
+            if let Some(graph) = graph.as_mut() {
+                let source = File::open(&nt_file)
+                    .map_err(|e| anyhow::anyhow!("Error opening file {nt_file:?}: {e:?}"))?;
+                read_nt_into(BufReader::new(source), graph)
+                    .with_context(|| format!("error reading {nt_file}"))?;
+            }
         }
         out_file
             .path()
@@ -472,8 +487,7 @@ Use --allow-merge-named-graphs to explicitly merge these graphs into the output 
     };
 
     let mut reconciliations = vec![];
-    if enricher_set.has_reconcilers() {
-        let graph = read_graph(out_file.path())?;
+    if let Some(graph) = graph {
         let runs = enricher_set.reconcile(&graph, root_id).await;
         ensure_nt_line_boundary(out_file)?;
         for run in runs {
@@ -523,17 +537,6 @@ Use --allow-merge-named-graphs to explicitly merge these graphs into the output 
         enrichments,
         reconciliations,
     })
-}
-
-/// Every triple in the N-Triples file at `path`, as a graph.
-fn read_graph(path: &Path) -> anyhow::Result<Graph> {
-    let file = File::open(path).with_context(|| format!("error opening {}", path.display()))?;
-    let mut graph = Graph::new();
-    for quad in RdfParser::from_format(RdfFormat::NTriples).for_reader(BufReader::new(file)) {
-        let quad = quad.with_context(|| format!("error reading {}", path.display()))?;
-        graph.insert(&Triple::from(quad));
-    }
-    Ok(graph)
 }
 
 /// The error for a call in which enrichers failed, each with its file and
@@ -1523,11 +1526,14 @@ mod tests {
             Stage::File(Box::new(MockEnricher)),
         ];
 
-        let (result, written) = enrich_files(&[mock_path, nt_path.clone()], &enrichers).await?;
+        let ttl_path = "tests/resources/apple.ttl".to_string();
+        let (result, written) =
+            enrich_files(&[mock_path, nt_path.clone(), ttl_path], &enrichers).await?;
 
-        // The enriched triple and the copied one, both read by the reconciler
+        // The enriched triple, the copied one and the 9 converted ones, all
+        // read by the reconciler
         assert!(
-            written.contains("<http://example.org/package> <http://example.org/triples> \"2\" ."),
+            written.contains("<http://example.org/package> <http://example.org/triples> \"11\" ."),
             "{written}"
         );
         assert_eq!(
@@ -1547,6 +1553,59 @@ mod tests {
         let (result, written) = enrich_files(std::slice::from_ref(&nt_path), &enrichers).await?;
         assert_ne!(result.combined_rdf_path, nt_path);
         assert!(written.contains("\"1\""), "{written}");
+        Ok(())
+    }
+
+    /// Keeps the graph it reconciles.
+    struct CapturingReconciler(Arc<std::sync::Mutex<Option<Graph>>>);
+
+    impl Enricher for CapturingReconciler {
+        fn name(&self) -> &'static str {
+            "capture"
+        }
+    }
+
+    #[async_trait]
+    impl Reconciler for CapturingReconciler {
+        async fn reconcile(&self, ctx: &ReconcileCtx<'_>) -> EnrichResult<EnrichOutcome> {
+            *self.0.lock().expect("not poisoned") = Some(ctx.graph.clone());
+            Ok(EnrichOutcome::enriched(Vec::new()))
+        }
+    }
+
+    #[tokio::test]
+    async fn files_to_rdf_reconciles_exactly_what_was_written() -> anyhow::Result<()> {
+        let mock = Builder::new().suffix(".mock").tempfile()?;
+        let nt = Builder::new().suffix(".nt").tempfile()?;
+        fs::write(
+            nt.path(),
+            "<http://example.org/s> <http://example.org/p> _:b0 .\n\
+             _:b0 <http://example.org/q> \"o\" .\n",
+        )?;
+        let captured = Arc::new(std::sync::Mutex::new(None));
+        let enrichers: Vec<Stage> = vec![
+            Stage::File(Box::new(MockEnricher)),
+            Stage::Reconcile(Box::new(CapturingReconciler(Arc::clone(&captured)))),
+        ];
+        let files = [
+            mock.path().to_str().unwrap().to_string(),
+            nt.path().to_str().unwrap().to_string(),
+            "tests/resources/apple.ttl".to_string(),
+        ];
+
+        let (_, written) = enrich_files(&files, &enrichers).await?;
+
+        // The graph is built as the triples are written, not read back from
+        // the file, so it must hold exactly what the file does
+        let mut expected = Graph::new();
+        read_nt_into(written.as_bytes(), &mut expected)?;
+        let reconciled = captured
+            .lock()
+            .expect("not poisoned")
+            .take()
+            .expect("reconciled");
+        assert_eq!(reconciled, expected);
+        assert_eq!(reconciled.len(), 12);
         Ok(())
     }
 
