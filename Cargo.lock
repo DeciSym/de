@@ -535,12 +535,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "disjoint-sets"
-version = "0.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4ccbbca7d6a247007ca2535c616d4bb4a5fcad176ef0218671f96b88c52c3d34"
-
-[[package]]
 name = "displaydoc"
 version = "0.2.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1709,11 +1703,10 @@ dependencies = [
 
 [[package]]
 name = "reasonable"
-version = "0.5.0-a1"
-source = "git+https://github.com/DeciSym/reasonable.git?rev=ae5510f7d0ed0d97a90a7d26b6b89e71c21529ae#ae5510f7d0ed0d97a90a7d26b6b89e71c21529ae"
+version = "0.5.0-a2"
+source = "git+https://github.com/DeciSym/reasonable.git?rev=0279bf90c459761ca8d15c903fbcdd0d895fa1f1#0279bf90c459761ca8d15c903fbcdd0d895fa1f1"
 dependencies = [
  "datafrog",
- "disjoint-sets",
  "hashbrown 0.15.5",
  "log",
  "oxrdf",
