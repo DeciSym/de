@@ -1710,7 +1710,7 @@ dependencies = [
 [[package]]
 name = "reasonable"
 version = "0.5.0-a1"
-source = "git+https://github.com/DeciSym/reasonable.git?rev=902359aaf98e8c455c9e283f1db708894a45d66e#902359aaf98e8c455c9e283f1db708894a45d66e"
+source = "git+https://github.com/DeciSym/reasonable.git?rev=ae5510f7d0ed0d97a90a7d26b6b89e71c21529ae#ae5510f7d0ed0d97a90a7d26b6b89e71c21529ae"
 dependencies = [
  "datafrog",
  "disjoint-sets",
