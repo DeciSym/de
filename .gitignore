@@ -9,5 +9,7 @@
 
 Cargo.lock
 
-# Downloaded benchmark fixtures (see scripts/fetch-watdiv-data.sh).
+# Downloaded/generated benchmark fixtures (see scripts/fetch-watdiv-data.sh
+# and scripts/gen-bsbm-data.py).
 /benches/watdiv/
+/benches/bsbm/
