@@ -236,16 +236,20 @@ instance gets the same answer over HTTP as in process. Then it times:
 - `sparql_http_format`: one 50,000-row `SELECT` in JSON, XML, CSV and TSV;
 - `sparql_http_concurrent`: four clients sending the whole mix at once.
 
-CI runs all three suites, trainmarks at `large`, WatDiv at scale 10 and
-`sparql_http` at 1,000 products, on pushes to `main` and on pull requests that
-change code. It runs each twice on one runner, on the change and on its base
-commit, and compares the two in the run's summary. It flags changes over 15%,
-and fails when a benchmark is more than 25% slower than on the base, except
-`sparql_http_concurrent`, which contention makes too noisy to fail on: it is
-reported only. Each run's results are also kept as the `bench-trainmarks`,
-`bench-watdiv` and `bench-sparql_http` artifacts, but runners differ in CPU
-from run to run, so compare those only with others from the same CPU model. To
-compare two runs on your own machine, save each as a criterion baseline:
+CI runs the suites a change can affect, trainmarks at `large`, WatDiv at scale
+10 and `sparql_http` at 1,000 products, on pushes to `main` and on pull
+requests that change code. `scripts/bench-targets.py` picks them from the files
+the change touches: a change to the endpoint alone runs only `sparql_http`, and
+one to `de create` alone only trainmarks. A file it doesn't know runs every
+suite, and so does a run started by hand. CI runs each suite twice on one
+runner, on the change and on its base commit, and compares the two in the run's
+summary. It flags changes over 15%, and fails when a benchmark is more than 25%
+slower than on the base, except `sparql_http_concurrent`, which contention
+makes too noisy to fail on: it is reported only. Each run's results are also
+kept as the `bench-trainmarks`, `bench-watdiv` and `bench-sparql_http`
+artifacts, but runners differ in CPU from run to run, so compare those only
+with others from the same CPU model. To compare two runs on your own machine,
+save each as a criterion baseline:
 
 ```sh
 DE_BENCH_SCALE=large cargo bench --bench trainmarks -- --save-baseline main   # on main
