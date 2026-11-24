@@ -1,0 +1,196 @@
+// Copyright (c) 2026, Decisym, LLC
+// Licensed under the BSD 3-Clause License (see LICENSE file in the project root).
+
+//! Runs the `endpoint-kit` cases against `de serve`: once by calling
+//! `de::serve::handle_request` directly, once against the `de` binary over a
+//! socket.
+//!
+//! The cases live in the `endpoint-kit` workspace crate so that servers built
+//! on `de` can run them too. This file loads the kit's fixture graphs into
+//! HDT files, one per graph with its IRI in the header, and lists the cases
+//! `de` fails today. Each entry names the fix that should remove it; the
+//! report is written to `target/endpoint-kit-*.txt`.
+//!
+//! The suite is a single test so that nothing else runs while the memory and
+//! CPU-time contracts measure this process.
+
+#![cfg(feature = "server")]
+
+use de::sparql::AggregateHdt;
+use endpoint_kit::{
+    FixtureSet, InProcess, KitResponse, PeakAlloc, Report, ServiceSettings, SpawnedServer, Suite,
+    Target,
+};
+use http::header::CONTENT_TYPE;
+use http::{HeaderValue, Response, StatusCode};
+use oxhttp::model::Body;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::time::Duration;
+
+#[global_allocator]
+static ALLOCATOR: PeakAlloc = PeakAlloc::new();
+
+/// The cases `de serve` fails today, and why.
+const EXPECTED_FAILURES: &[(&str, &str)] = &[
+    (
+        "w3c/query_dataset_full",
+        "default-graph-uri limits which files are loaded, so the named-graph-uri graphs sent with it are never loaded",
+    ),
+    (
+        "w3c/query_multiple_dataset",
+        "the protocol's dataset doesn't replace the query's FROM",
+    ),
+    (
+        "w3c/query_content_type_describe",
+        "graph results default to N-Quads",
+    ),
+    (
+        "w3c/query_content_type_construct",
+        "graph results default to N-Quads",
+    ),
+    (
+        "oxigraph/get_query_union_graph_and_default_graph",
+        "union-default-graph together with explicit graphs isn't rejected",
+    ),
+    (
+        "de/named_graph_uri_alone_leaves_default_graph_empty",
+        "graphs named with named-graph-uri are also put in the default graph",
+    ),
+    (
+        "de/evaluation_error_has_error_status",
+        "the 200 is sent before the worker thread has evaluated anything",
+    ),
+    (
+        "de/wrong_method_is_405",
+        "an unsupported method is 404, without an Allow header",
+    ),
+    (
+        "contract/timeout_stops_evaluation",
+        "de serve has no query timeout",
+    ),
+    (
+        "contract/disconnect_stops_evaluation",
+        "the worker thread only notices the client left when it next sends results",
+    ),
+];
+
+fn suite(label: &str) -> Suite {
+    EXPECTED_FAILURES
+        .iter()
+        .fold(Suite::new(label), |suite, (id, reason)| {
+            suite.expect_failure(id, reason)
+        })
+}
+
+/// Builds one HDT per fixture graph in `<fixtures>/store`, with the graph's
+/// IRI in its header so that `de` serves it under that IRI.
+fn build_store(fixtures: &FixtureSet) -> anyhow::Result<PathBuf> {
+    let store = fixtures.dir.join("store");
+    std::fs::create_dir_all(&store)?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    for graph in &fixtures.graphs {
+        let hdt = store.join(format!("{}.hdt", graph.name));
+        runtime.block_on(de::create::do_create_with_options(
+            Some(&hdt.to_string_lossy()),
+            &[graph.ntriples.to_string_lossy().into_owned()],
+            false,
+            Some(&graph.iri),
+            &[],
+            None,
+            None,
+        ))?;
+    }
+    Ok(store)
+}
+
+fn hdt_paths(store: &Path) -> anyhow::Result<Vec<String>> {
+    let mut paths = Vec::new();
+    for entry in std::fs::read_dir(store)? {
+        let path = entry?.path();
+        if path.extension().is_some_and(|ext| ext == "hdt") {
+            paths.push(path.to_string_lossy().into_owned());
+        }
+    }
+    paths.sort();
+    Ok(paths)
+}
+
+/// What `de serve` sends for an error, as its private `error` helper does.
+fn error_response(status: StatusCode, message: &str) -> Response<Body> {
+    let mut response = Response::new(Body::from(message.to_string()));
+    *response.status_mut() = status;
+    response.headers_mut().insert(
+        CONTENT_TYPE,
+        HeaderValue::from_static("text/plain; charset=utf-8"),
+    );
+    response
+}
+
+fn in_process(fixtures: &FixtureSet) -> anyhow::Result<Box<dyn Target>> {
+    let store_dir = build_store(fixtures)?;
+    let store = AggregateHdt::new(&hdt_paths(&store_dir)?)?;
+    let location = store_dir.to_string_lossy().into_owned();
+    Ok(Box::new(InProcess::new(
+        move |request: http::Request<Vec<u8>>| {
+            let mut request = request.map(Body::from);
+            let response = de::serve::handle_request(&mut request, &store, true, &location)
+                .unwrap_or_else(|(status, message)| error_response(status, &message));
+            let (parts, body) = response.into_parts();
+            Ok(KitResponse {
+                status: parts.status,
+                headers: parts.headers,
+                body: Box::new(body),
+            })
+        },
+    )))
+}
+
+fn spawned(fixtures: &FixtureSet) -> anyhow::Result<Box<dyn Target>> {
+    let store_dir = build_store(fixtures)?;
+    let port = endpoint_kit::free_port()?;
+    let bind = format!("127.0.0.1:{port}");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_de"));
+    command
+        .arg("serve")
+        .arg("--location")
+        .arg(&store_dir)
+        .arg("--bind")
+        .arg(&bind);
+    let server = SpawnedServer::start(
+        command,
+        &format!("http://{bind}"),
+        "/query",
+        &fixtures.dir.join("server.log"),
+        Duration::from_secs(30),
+    )?;
+    Ok(Box::new(server))
+}
+
+fn finish(report: &Report, file: &str) -> anyhow::Result<()> {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join(file);
+    report.write(&path)?;
+    eprintln!("{}", report.render());
+    report.check()
+}
+
+#[test]
+fn endpoint_kit() -> anyhow::Result<()> {
+    let settings = ServiceSettings::default();
+    let in_process = suite("de::serve::handle_request, in process")
+        .allocator(&ALLOCATOR)
+        .settings(settings.clone())
+        .run(|fixtures, _settings| in_process(fixtures))?;
+    let over_http = suite("de serve, over HTTP")
+        .settings(settings)
+        .run(|fixtures, _settings| spawned(fixtures))?;
+    // Both reports are written before either is checked, so a failure in
+    // one doesn't hide the other's.
+    let first = finish(&in_process, "endpoint-kit-in-process.txt");
+    let second = finish(&over_http, "endpoint-kit-http.txt");
+    first.and(second)
+}
