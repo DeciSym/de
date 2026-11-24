@@ -1,0 +1,22 @@
+[package]
+name = "endpoint-kit"
+version = "0.1.0"
+edition = "2024"
+license = "BSD-3-Clause"
+description = "SPARQL endpoint conformance cases and runtime contracts, shared by de and the servers built on it"
+repository = "https://github.com/DeciSym/de"
+publish = false
+
+# Deliberately no dependency on `de`: the kit talks to a server only through
+# HTTP messages, so it can test any server, whichever HTTP stack it runs on.
+# Depending on `de` with its `server` feature would also turn that feature on
+# for every workspace build that includes this crate, which would hide the
+# default-feature build from `make lint`.
+[dependencies]
+anyhow = { version = "1.0", default-features = false }
+http = "1.4"
+oxhttp = { version = "0.3", default-features = false, features = ["client"] }
+oxrdfio = "0.2"
+sparesults = "0.3"
+tempfile = "3.27"
+url = "2.5"

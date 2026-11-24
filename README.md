@@ -136,6 +136,23 @@ Run W3C RDF/SPARQL integration tests:
 cargo test --all-features --test w3c-sparql
 ```
 
+Run the SPARQL endpoint cases against `de serve`, in process and against the
+`de` binary over a socket:
+
+```sh
+cargo test --all-features --test endpoint-kit
+```
+
+The cases live in the `endpoint-kit` workspace crate, so that servers built on
+`de` can run the same ones. They are the query cases of the W3C SPARQL 1.1
+Protocol tests, the HTTP tests of `oxigraph serve` that apply to a read-only
+endpoint, and runtime contracts: results stream rather than being held in
+memory, joins run in a good order, and a query stops when its timeout passes or
+its client goes away. `tests/endpoint-kit.rs` lists the cases `de` fails today,
+with the reason for each. A listed case that starts to pass fails the run until
+it is removed from the list. Each run writes a report of every case to
+`target/endpoint-kit-in-process.txt` and `target/endpoint-kit-http.txt`.
+
 ## Benchmarks
 
 The `trainmarks` criterion suite covers `create` and `query` over the synthetic

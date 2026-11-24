@@ -490,6 +490,7 @@ dependencies = [
  "clap",
  "clap-verbosity-flag",
  "criterion",
+ "endpoint-kit",
  "env_logger",
  "exitcode",
  "flate2",
@@ -562,6 +563,19 @@ name = "either"
 version = "1.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0e9c71c2167ca323c882b99918929403426e2373ea17242ff5653e0d5e1058be"
+
+[[package]]
+name = "endpoint-kit"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "http",
+ "oxhttp",
+ "oxrdfio",
+ "sparesults",
+ "tempfile",
+ "url",
+]
 
 [[package]]
 name = "env_filter"

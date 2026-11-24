@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "w3c-validation"]
+members = [".", "w3c-validation", "endpoint-kit"]
 resolver = "2"
 
 [package]
@@ -59,6 +59,7 @@ url = { version = "2.5" }
 [dev-dependencies]
 urlencoding = "2.1"
 criterion = { version = "0.5", features = ["async_tokio"] }
+endpoint-kit = { path = "endpoint-kit" }
 futures = "0.3"
 w3c-validation = { path = "w3c-validation" }
 
