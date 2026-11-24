@@ -5,6 +5,13 @@ use spareval::{QueryEvaluationError, QueryResults, QueryableDataset};
 use spargebra::Query;
 
 /// The dataset a request asks for, from the SPARQL protocol's parameters.
+///
+/// When the request names graphs, they are the whole dataset: the default
+/// graph is the merge of `default_graph_uris` (empty if there are none), and
+/// the named graphs are `named_graph_uris`. The query's own `FROM` and
+/// `FROM NAMED` don't apply. When it names none, every graph is a named graph,
+/// and the default graph is their union if `union_default_graph` is set, or
+/// empty if it isn't; the query's `FROM` and `FROM NAMED` then apply as usual.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct DatasetSelection {

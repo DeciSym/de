@@ -189,8 +189,17 @@ pub(super) fn evaluate_sparql_query(
 ) -> Result<Response<ResponseBody>, HttpError> {
     debug!("query: {query}");
     let base = base_url(request);
-    let parsed_query = crate::sparql::parse_query(query, &base)
+    let mut parsed_query = crate::sparql::parse_query(query, &base)
         .map_err(|e| bad_request(format!("parse query: {e}")))?;
+    if !selection.default_graph_uris.is_empty() || !selection.named_graph_uris.is_empty() {
+        // The protocol's dataset replaces the query's FROM and FROM NAMED.
+        match &mut parsed_query {
+            spargebra::Query::Select { dataset, .. }
+            | spargebra::Query::Construct { dataset, .. }
+            | spargebra::Query::Describe { dataset, .. }
+            | spargebra::Query::Ask { dataset, .. } => *dataset = None,
+        }
+    }
     let is_rdf_result = matches!(
         &parsed_query,
         spargebra::Query::Construct { .. } | spargebra::Query::Describe { .. }
