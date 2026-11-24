@@ -40,6 +40,7 @@ mod alloc;
 mod cases;
 mod contracts;
 mod fixtures;
+mod http1;
 mod report;
 mod target;
 
@@ -54,6 +55,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 /// What the server under test offers beyond SPARQL queries.
+// Independent yes-or-no capabilities, which a set of flags describes best.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Debug)]
 pub struct Capabilities {
     /// With no dataset in the request, the default graph is the union of
@@ -63,6 +66,9 @@ pub struct Capabilities {
     pub update: bool,
     /// The Graph Store Protocol on `/store`. Without it, `/store` must answer 501.
     pub graph_store: bool,
+    /// CORS: requests from web pages on other origins are allowed. Only
+    /// checked when set, since it's off by default in `de serve`.
+    pub cors: bool,
 }
 
 impl Default for Capabilities {
@@ -73,6 +79,7 @@ impl Default for Capabilities {
             union_default_graph: true,
             update: false,
             graph_store: false,
+            cors: false,
         }
     }
 }

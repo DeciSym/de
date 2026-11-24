@@ -56,19 +56,23 @@ enum Commands {
         #[clap(short, long, default_value_t, value_enum)]
         output: query::DeOutput,
     },
-    /// Start a server to listen for /sparql, /update and /store API's. HDT's are read-only
-    /// per spec, so new graphs (i.e. files) can be uploaded, but existing graphs can NOT be
-    /// modified or deleted through /update or /store overwrite/delete requests.
+    /// Serve the HDT files in a directory as a read-only SPARQL endpoint
+    ///
+    /// Queries go to /query, by the SPARQL 1.1 Protocol (GET, or POST as a form or as a
+    /// query), and / is a query page. HDT files added to the directory, replaced or removed
+    /// are picked up between queries. /update and /store answer 501 Not Implemented, since
+    /// HDT files are read-only.
     #[cfg(feature = "server")]
     Serve {
-        /// Directory in which the data should be persisted
-        ///
-        /// If not present, an in-memory storage will be used.
+        /// Directory holding the .hdt files to serve
         #[arg(short, long, value_hint = clap::ValueHint::DirPath)]
         location: String,
         /// Host and port to listen to
         #[arg(short, long, default_value = "localhost:7878", value_hint = clap::ValueHint::Hostname)]
         bind: String,
+        /// Allow requests from web pages on any origin (CORS)
+        #[arg(long)]
+        cors: bool,
     },
     /// Use to view info about an HDT file
     View {
@@ -148,8 +152,14 @@ async fn run_command<W: Write>(
         .map(|_| ()),
         Commands::View { data } => view::view_hdt(data, stdout_writer),
         #[cfg(feature = "server")]
-        Commands::Serve { location, bind } => {
-            serve_until_stopped(location.to_owned(), bind.to_owned()).await
+        Commands::Serve {
+            location,
+            bind,
+            cors,
+        } => {
+            let mut options = de::serve::ServiceOptions::default();
+            options.cors = *cors;
+            serve_until_stopped(location.to_owned(), bind.to_owned(), options).await
         }
     }
 }
@@ -162,8 +172,12 @@ async fn run_command<W: Write>(
 /// and tools that record a process until it exits, such as heaptrack in
 /// `scripts/bench-memory.py`, get a complete recording.
 #[cfg(feature = "server")]
-async fn serve_until_stopped(location: String, bind: String) -> anyhow::Result<()> {
-    let server = tokio::task::spawn_blocking(move || de::serve::serve(location, &bind));
+async fn serve_until_stopped(
+    location: String,
+    bind: String,
+    options: de::serve::ServiceOptions,
+) -> anyhow::Result<()> {
+    let server = tokio::task::spawn_blocking(move || de::serve::serve(&location, &bind, options));
     tokio::select! {
         result = server => result?,
         () = shutdown_signal() => Ok(()),

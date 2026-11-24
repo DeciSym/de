@@ -1,13 +1,124 @@
-//! The HDT files in the data directory, and noticing when they change.
+//! The HDT files in a directory, as a [`DatasetSource`]: what `de serve` serves.
 
-use super::error::{HttpError, internal_server_error};
+use super::{
+    dataset::{DatasetSelection, DatasetSource, ServeDataset},
+    error::{HttpError, internal_server_error},
+};
 use crate::sparql::AggregateHdt;
+use http::StatusCode;
+use log::debug;
 use std::{
-    collections::HashMap,
     path::{Path, PathBuf},
-    sync::{Mutex, OnceLock},
+    sync::Mutex,
     time::SystemTime,
 };
+
+/// The `.hdt` files directly in a directory, served as one dataset.
+///
+/// Before each query it checks the files' paths, sizes and modification
+/// times, and re-reads their graph IRIs when anything changed, so files
+/// added, replaced or removed while the server runs are picked up.
+pub struct HdtDirectory {
+    store: AggregateHdt,
+    location: PathBuf,
+    /// The directory, canonicalized, and its files when last read.
+    synced: Mutex<Option<(PathBuf, StoreFingerprint)>>,
+}
+
+impl HdtDirectory {
+    /// Serves the `.hdt` files in `location`.
+    pub fn new(location: impl Into<PathBuf>) -> anyhow::Result<Self> {
+        let location = location.into();
+        let hdt_paths = collect_hdt_paths(&location)?;
+        let store = if hdt_paths.is_empty() {
+            AggregateHdt::empty()
+        } else {
+            AggregateHdt::new(&hdt_paths)?
+        };
+        Ok(Self::with_store(store, location))
+    }
+
+    /// Serves `store`, which holds the `.hdt` files in `location`, and
+    /// re-reads it from there when they change.
+    pub fn with_store(store: AggregateHdt, location: impl Into<PathBuf>) -> Self {
+        Self {
+            store,
+            location: location.into(),
+            synced: Mutex::new(None),
+        }
+    }
+}
+
+impl DatasetSource for HdtDirectory {
+    fn refresh(&self) -> Result<(), HttpError> {
+        let canonical_location = self
+            .location
+            .canonicalize()
+            .map_err(|e| internal_server_error(format!("error resolving data location: {e}")))?;
+        let fingerprint = compute_store_fingerprint(&canonical_location)?;
+        {
+            let guard = self
+                .synced
+                .lock()
+                .map_err(|_| internal_server_error("sync cache lock poisoned"))?;
+            if guard.as_ref().is_some_and(|(location, cached)| {
+                *location == canonical_location && *cached == fingerprint
+            }) {
+                return Ok(());
+            }
+        }
+        self.store
+            .sync(&canonical_location)
+            .map_err(|e| internal_server_error(format!("error loading data files: {e}")))?;
+        let mut guard = self
+            .synced
+            .lock()
+            .map_err(|_| internal_server_error("sync cache lock poisoned"))?;
+        *guard = Some((canonical_location, fingerprint));
+        Ok(())
+    }
+
+    fn open(&self, selection: &DatasetSelection) -> Result<Box<dyn ServeDataset + '_>, HttpError> {
+        // Optimization: Filter graphs BEFORE loading into memory by passing an explicit list.
+        // This significantly reduces memory usage and load time when only a subset of graphs are
+        // needed for the query.
+        let graph_filter = graph_filter(selection);
+        if let Some(graph_filter_ref) = graph_filter.as_ref() {
+            debug!("using graph filter for query: {graph_filter_ref:?}");
+        } else {
+            debug!("using default graph filter for query: all graphs");
+        }
+        let snapshot = self.store.get_snapshot(graph_filter).map_err(|_| {
+            HttpError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "data temporarily unavailable",
+            )
+        })?;
+        Ok(Box::new(snapshot))
+    }
+}
+
+/// The graphs to open for a query, or `None` for all of them.
+fn graph_filter(selection: &DatasetSelection) -> Option<Vec<String>> {
+    let mut selected_graphs: Vec<String> = if selection.union_default_graph {
+        let mut selected = selection.default_graph_uris.clone();
+        selected.extend_from_slice(&selection.named_graph_uris);
+        selected
+    } else if selection.default_graph_uris.is_empty() {
+        selection.named_graph_uris.clone()
+    } else {
+        selection.default_graph_uris.clone()
+    };
+
+    selected_graphs.sort_unstable();
+    selected_graphs.dedup();
+
+    if selected_graphs.is_empty() {
+        None
+    } else {
+        Some(selected_graphs)
+    }
+}
 
 #[derive(Clone, Eq, PartialEq)]
 struct HdtFileFingerprint {
@@ -20,8 +131,6 @@ struct HdtFileFingerprint {
 struct StoreFingerprint {
     files: Vec<HdtFileFingerprint>,
 }
-
-static STORE_SYNC_CACHE: OnceLock<Mutex<HashMap<PathBuf, StoreFingerprint>>> = OnceLock::new();
 
 pub(super) fn collect_hdt_paths(location: &Path) -> anyhow::Result<Vec<String>> {
     let mut hdt_paths: Vec<String> = std::fs::read_dir(location)?
@@ -82,34 +191,4 @@ fn compute_store_fingerprint(location: &Path) -> Result<StoreFingerprint, HttpEr
     }
     files.sort_unstable_by(|left, right| left.path.cmp(&right.path));
     Ok(StoreFingerprint { files })
-}
-
-pub(super) fn maybe_sync_store(store: &AggregateHdt, location: &Path) -> Result<(), HttpError> {
-    let canonical_location = location
-        .canonicalize()
-        .map_err(|e| internal_server_error(format!("error resolving data location: {e}")))?;
-    let fingerprint = compute_store_fingerprint(&canonical_location)?;
-
-    let cache = STORE_SYNC_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    {
-        let guard = cache
-            .lock()
-            .map_err(|_| internal_server_error("sync cache lock poisoned"))?;
-        if guard
-            .get(&canonical_location)
-            .is_some_and(|cached| *cached == fingerprint)
-        {
-            return Ok(());
-        }
-    }
-
-    store
-        .sync(&canonical_location)
-        .map_err(|e| internal_server_error(format!("error loading data files: {e}")))?;
-
-    let mut guard = cache
-        .lock()
-        .map_err(|_| internal_server_error("sync cache lock poisoned"))?;
-    guard.insert(canonical_location, fingerprint);
-    Ok(())
 }

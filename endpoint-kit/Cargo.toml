@@ -15,7 +15,6 @@ publish = false
 [dependencies]
 anyhow = { version = "1.0", default-features = false }
 http = "1.4"
-oxhttp = { version = "0.3", default-features = false, features = ["client"] }
 oxrdfio = "0.2"
 sparesults = "0.3"
 tempfile = "3.27"

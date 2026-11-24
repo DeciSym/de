@@ -1,19 +1,21 @@
 //! The SPARQL protocol's request side: the URL, the body, and the query parameters.
 
 use super::{
+    body::{RequestBody, ResponseBody},
+    dataset::{DatasetSelection, DatasetSource},
     error::{HttpError, bad_request, internal_server_error},
     stream::evaluate_sparql_query,
 };
-use crate::sparql::AggregateHdt;
-use http::{Request, Response, header::CONTENT_TYPE, uri::PathAndQuery};
+use http::{
+    Request, Response,
+    header::{CONTENT_LENGTH, CONTENT_TYPE},
+    uri::PathAndQuery,
+};
 use log::debug;
-use oxhttp::model::Body;
-use std::io::Read;
+use std::{io::Read, sync::Arc};
 use url::form_urlencoded;
 
-const MAX_SPARQL_BODY_SIZE: u64 = 1024 * 1024 * 128; // 128MB
-
-pub(super) fn base_url(request: &Request<Body>) -> String {
+pub(super) fn base_url(request: &Request<RequestBody>) -> String {
     let uri = request.uri();
     if uri.query().is_some() {
         // We remove the query
@@ -34,56 +36,60 @@ pub(super) fn base_url(request: &Request<Body>) -> String {
     }
 }
 
-pub(super) fn url_query(request: &Request<Body>) -> &[u8] {
+pub(super) fn url_query(request: &Request<RequestBody>) -> &[u8] {
     request.uri().query().unwrap_or_default().as_bytes()
 }
 
-pub(super) fn limited_string_body(request: &mut Request<Body>) -> Result<String, HttpError> {
-    String::from_utf8(limited_body(request)?)
+pub(super) fn limited_string_body(
+    request: &mut Request<RequestBody>,
+    max_bytes: u64,
+) -> Result<String, HttpError> {
+    String::from_utf8(limited_body(request, max_bytes)?)
         .map_err(|e| bad_request(format!("Invalid UTF-8 body: {e}")))
 }
 
-pub(super) fn limited_body(request: &mut Request<Body>) -> Result<Vec<u8>, HttpError> {
-    let body = request.body_mut();
-    if let Some(body_len) = body.len() {
-        if body_len > MAX_SPARQL_BODY_SIZE {
-            // it's too big
-            return Err(bad_request(format!(
-                "SPARQL body payloads are limited to {MAX_SPARQL_BODY_SIZE} bytes, found {body_len} bytes"
-            )));
-        }
-        let mut payload = Vec::with_capacity(
-            body_len
-                .try_into()
-                .map_err(|_| bad_request("Huge body size"))?,
-        );
-        body.read_to_end(&mut payload)
-            .map_err(internal_server_error)?;
-        Ok(payload)
-    } else {
-        let mut payload = Vec::new();
-        body.take(MAX_SPARQL_BODY_SIZE + 1)
-            .read_to_end(&mut payload)
-            .map_err(internal_server_error)?;
-        let max_len =
-            usize::try_from(MAX_SPARQL_BODY_SIZE).map_err(|_| bad_request("Huge body size"))?;
-        if payload.len() > max_len {
-            return Err(bad_request(format!(
-                "SPARQL body payloads are limited to {MAX_SPARQL_BODY_SIZE} bytes"
-            )));
-        }
-        Ok(payload)
+pub(super) fn limited_body(
+    request: &mut Request<RequestBody>,
+    max_bytes: u64,
+) -> Result<Vec<u8>, HttpError> {
+    let declared = request
+        .headers()
+        .get(CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse::<u64>().ok());
+    if let Some(body_len) = declared
+        && body_len > max_bytes
+    {
+        // it's too big
+        return Err(bad_request(format!(
+            "SPARQL body payloads are limited to {max_bytes} bytes, found {body_len} bytes"
+        )));
     }
+    let capacity = declared
+        .map_or(Ok(0), usize::try_from)
+        .map_err(|_| bad_request("Huge body size"))?;
+    let mut payload = Vec::with_capacity(capacity);
+    request
+        .body_mut()
+        .take(max_bytes.saturating_add(1))
+        .read_to_end(&mut payload)
+        .map_err(internal_server_error)?;
+    let max_len = usize::try_from(max_bytes).map_err(|_| bad_request("Huge body size"))?;
+    if payload.len() > max_len {
+        return Err(bad_request(format!(
+            "SPARQL body payloads are limited to {max_bytes} bytes"
+        )));
+    }
+    Ok(payload)
 }
 
 pub(super) fn configure_and_evaluate_sparql_query(
-    store: &AggregateHdt,
+    source: &Arc<dyn DatasetSource>,
     encoded: &[&[u8]],
     mut query: Option<String>,
-    request: &Request<Body>,
+    request: &Request<RequestBody>,
     default_use_default_graph_as_union: bool,
-    // timeout: Option<Duration>,
-) -> Result<Response<Body>, HttpError> {
+) -> Result<Response<ResponseBody>, HttpError> {
     let mut default_graph_uris = Vec::new();
     let mut named_graph_uris = Vec::new();
     let mut use_default_graph_as_union = false;
@@ -107,18 +113,15 @@ pub(super) fn configure_and_evaluate_sparql_query(
         use_default_graph_as_union |= default_use_default_graph_as_union;
     }
     let query = query.ok_or_else(|| bad_request("You should set the 'query' parameter"))?;
-    evaluate_sparql_query(
-        store,
-        &query,
-        use_default_graph_as_union,
-        &default_graph_uris,
-        &named_graph_uris,
-        request,
-        // timeout,
-    )
+    let selection = DatasetSelection {
+        default_graph_uris,
+        named_graph_uris,
+        union_default_graph: use_default_graph_as_union,
+    };
+    evaluate_sparql_query(source, &query, selection, request)
 }
 
-pub(super) fn content_type(request: &Request<Body>) -> Option<String> {
+pub(super) fn content_type(request: &Request<RequestBody>) -> Option<String> {
     let value = request.headers().get(CONTENT_TYPE)?.to_str().ok()?;
     debug!("request content_type: {value}");
     Some(

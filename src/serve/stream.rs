@@ -1,20 +1,20 @@
 //! Evaluating a query on a worker thread, and streaming its results as the body.
 
 use super::{
+    body::{RequestBody, ResponseBody},
+    dataset::{DatasetSelection, DatasetSource},
     error::{HttpError, bad_request, internal_server_error},
     negotiate::{query_results_content_negotiation, rdf_content_negotiation},
     protocol::base_url,
 };
-use crate::sparql::AggregateHdt;
 use http::{Request, Response, header::CONTENT_TYPE};
 use log::debug;
-use oxhttp::model::Body;
 use oxrdfio::{RdfFormat, RdfSerializer};
 use sparesults::{QueryResultsFormat, QueryResultsSerializer};
 use spareval::QueryResults;
 use std::{
     io::{self, Read, Write},
-    sync::mpsc,
+    sync::{Arc, mpsc},
 };
 
 const QUERY_STREAM_CHUNK_SIZE: usize = 32 * 1024;
@@ -182,14 +182,11 @@ fn stream_query_graph_results(
 
 #[allow(clippy::too_many_lines)]
 pub(super) fn evaluate_sparql_query(
-    store: &AggregateHdt,
+    source: &Arc<dyn DatasetSource>,
     query: &str,
-    use_default_graph_as_union: bool,
-    default_graph_uris: &[String],
-    named_graph_uris: &[String],
-    request: &Request<Body>,
-    // timeout: Option<Duration>,
-) -> Result<Response<Body>, HttpError> {
+    selection: DatasetSelection,
+    request: &Request<RequestBody>,
+) -> Result<Response<ResponseBody>, HttpError> {
     debug!("query: {query}");
     let base = base_url(request);
     let parsed_query = crate::sparql::parse_query(query, &base)
@@ -199,53 +196,18 @@ pub(super) fn evaluate_sparql_query(
         spargebra::Query::Construct { .. } | spargebra::Query::Describe { .. }
     );
 
-    // Get snapshot with optional graph filtering
-    // Optimization: Filter graphs BEFORE loading into memory by passing an explicit list.
-    // This significantly reduces memory usage and load time when only a subset of graphs are
-    // needed for the query.
-    let graph_filter = {
-        let mut selected_graphs: Vec<String> = if use_default_graph_as_union {
-            let mut selected = default_graph_uris.to_vec();
-            selected.extend_from_slice(named_graph_uris);
-            selected
-        } else if default_graph_uris.is_empty() {
-            named_graph_uris.to_vec()
-        } else {
-            default_graph_uris.to_vec()
-        };
-
-        selected_graphs.sort_unstable();
-        selected_graphs.dedup();
-
-        if selected_graphs.is_empty() {
-            None
-        } else {
-            Some(selected_graphs)
-        }
-    };
-    if let Some(graph_filter_ref) = graph_filter.as_ref() {
-        debug!("using graph filter for query: {graph_filter_ref:?}");
-    } else {
-        debug!("using default graph filter for query: all graphs");
-    }
-
     let (tx, rx) = mpsc::sync_channel::<QueryStreamItem>(4);
-    let store = store.clone();
+    let source = Arc::clone(source);
     let output_media_type = if is_rdf_result {
         let graph_format = rdf_content_negotiation(request)?;
         let _ = std::thread::spawn(move || {
             let tx_result = (|| -> io::Result<()> {
-                let snapshot = store.get_snapshot(graph_filter).map_err(|_| {
-                    io::Error::new(io::ErrorKind::InvalidData, "data temporarily unavailable")
+                let dataset = source.open(&selection).map_err(|e| {
+                    io::Error::new(io::ErrorKind::InvalidData, e.message().to_string())
                 })?;
-                let results =
-                    crate::sparql::query_parsed_with_debug_plan(&parsed_query, &snapshot, false)
-                        .map_err(|e| {
-                            io::Error::new(
-                                io::ErrorKind::InvalidData,
-                                format!("query execution: {e}"),
-                            )
-                        })?;
+                let results = dataset.evaluate(&parsed_query).map_err(|e| {
+                    io::Error::new(io::ErrorKind::InvalidData, format!("query execution: {e}"))
+                })?;
                 match results {
                     QueryResults::Graph(triples) => {
                         stream_query_graph_results(graph_format, &tx, triples)?;
@@ -266,17 +228,12 @@ pub(super) fn evaluate_sparql_query(
         let solutions_format = query_results_content_negotiation(request)?;
         let _ = std::thread::spawn(move || {
             let tx_result = (|| -> io::Result<()> {
-                let snapshot = store.get_snapshot(graph_filter).map_err(|_| {
-                    io::Error::new(io::ErrorKind::InvalidData, "data temporarily unavailable")
+                let dataset = source.open(&selection).map_err(|e| {
+                    io::Error::new(io::ErrorKind::InvalidData, e.message().to_string())
                 })?;
-                let results =
-                    crate::sparql::query_parsed_with_debug_plan(&parsed_query, &snapshot, false)
-                        .map_err(|e| {
-                            io::Error::new(
-                                io::ErrorKind::InvalidData,
-                                format!("query execution: {e}"),
-                            )
-                        })?;
+                let results = dataset.evaluate(&parsed_query).map_err(|e| {
+                    io::Error::new(io::ErrorKind::InvalidData, format!("query execution: {e}"))
+                })?;
                 match results {
                     QueryResults::Solutions(solutions) => {
                         let variables = solutions.variables().to_vec();
@@ -312,6 +269,6 @@ pub(super) fn evaluate_sparql_query(
 
     Response::builder()
         .header(CONTENT_TYPE, output_media_type)
-        .body(Body::from_read(QueryStreamReader::new(rx)))
+        .body(ResponseBody::Stream(Box::new(QueryStreamReader::new(rx))))
         .map_err(internal_server_error)
 }

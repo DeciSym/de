@@ -35,16 +35,16 @@
 //!   at once. Contention makes it noisy, so the comparison reports it without
 //!   failing on it (`--report-only` in `.github/workflows/bench.yml`).
 //!
-//! The server is set up here the way `de::serve::serve` sets it up, because
-//! that function blocks; this setup is the only part that knows the HTTP stack.
-//! The target needs the `server` feature (`required-features` in Cargo.toml).
+//! The server is `de::serve::spawn`, which `de serve` runs too. The target
+//! needs the `server` feature (`required-features` in Cargo.toml).
 
 use criterion::{
     BenchmarkId, Criterion, SamplingMode, Throughput, criterion_group, criterion_main,
 };
+use de::serve::{HdtDirectory, RequestBody, ServerConfig, SparqlService};
 use de::sparql::{AggregateHdt, parse_query, query_parsed_with_debug_plan};
-use http::header::{ACCEPT, CONTENT_TYPE, HeaderValue};
-use http::{Method, Request, Response, StatusCode};
+use http::header::ACCEPT;
+use http::{Method, Request, StatusCode};
 use oxhttp::model::Body;
 use oxrdfio::{RdfFormat, RdfParser};
 use sparesults::{
@@ -53,10 +53,9 @@ use sparesults::{
 use spareval::QueryResults;
 use std::collections::BTreeMap;
 use std::io::{Read, sink};
-use std::net::{Ipv4Addr, SocketAddr, TcpListener};
+use std::net::{Ipv4Addr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::thread::available_parallelism;
 use std::time::{Duration, Instant};
 
 const PRODUCT_COUNT_VAR: &str = "DE_BSBM_PRODUCT_COUNT";
@@ -135,34 +134,18 @@ fn ensure_hdt(dir: &Path) -> String {
     hdt_path
 }
 
-fn error_response(status: StatusCode, message: &str) -> Response<Body> {
-    let mut response = Response::new(Body::from(message.to_string()));
-    *response.status_mut() = status;
-    response.headers_mut().insert(
-        CONTENT_TYPE,
-        HeaderValue::from_static("text/plain; charset=utf-8"),
-    );
-    response
-}
-
-/// Starts the endpoint on a free loopback port, configured as `de serve`
-/// configures it, and returns its base URL. The server runs until the
-/// process exits.
-fn start_server(store: AggregateHdt, location: String) -> String {
+/// Starts `service` on a free loopback port, as `de serve` runs it, and
+/// returns its base URL. The server runs until the process exits.
+fn start_server(service: SparqlService) -> String {
     let port = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
         .and_then(|listener| listener.local_addr())
         .expect("failed to find a free port")
         .port();
-    let server = oxhttp::Server::new(move |request| {
-        de::serve::handle_request(request, &store, true, &location)
-            .unwrap_or_else(|(status, message)| error_response(status, &message))
-    })
-    .with_global_timeout(Duration::from_secs(60))
-    .with_max_concurrent_connections(
-        available_parallelism().map_or(1, std::num::NonZero::get) * 128,
+    let server = de::serve::spawn(
+        service,
+        &format!("127.0.0.1:{port}"),
+        &ServerConfig::default(),
     )
-    .bind(SocketAddr::from((Ipv4Addr::LOCALHOST, port)))
-    .spawn()
     .expect("failed to start the endpoint");
     // The listener threads stay up for the rest of the process.
     std::mem::forget(server);
@@ -328,7 +311,7 @@ fn bench_overhead(
     client: &oxhttp::Client,
     base: &str,
     store: &AggregateHdt,
-    location: &str,
+    handler: &SparqlService,
 ) {
     let ask = parse_query("ASK {}", BASE_IRI).expect("ASK {} parses");
     let mut group = c.benchmark_group(format!("sparql_http_overhead/{scale}"));
@@ -351,11 +334,13 @@ fn bench_overhead(
                 .method(Method::GET)
                 .uri("http://localhost/query?query=ASK%20%7B%7D")
                 .header(ACCEPT, "application/sparql-results+json")
-                .body(Body::empty())
+                .body(RequestBody::empty())
                 .expect("valid request");
-            let response = de::serve::handle_request(&mut request, store, true, location)
-                .unwrap_or_else(|(status, message)| panic!("{status}: {message}"));
-            std::io::copy(&mut response.into_body(), &mut sink()).expect("body cut off");
+            let response = handler
+                .try_handle(&mut request)
+                .unwrap_or_else(|error| panic!("{error}"));
+            std::io::copy(&mut response.into_body().into_reader(), &mut sink())
+                .expect("body cut off");
         });
     });
     group.bench_function("inproc_ask", |b| {
@@ -480,15 +465,20 @@ fn sparql_http(c: &mut Criterion) {
     }
     let hdt = ensure_hdt(&dir);
     let store = AggregateHdt::new(std::slice::from_ref(&hdt)).expect("failed to open the BSBM HDT");
-    let location = dir.to_string_lossy().into_owned();
-    let base = start_server(store.clone(), location.clone());
+    // Two services over one store: one behind the HTTP server, one called
+    // directly for `handler_ask`.
+    let base = start_server(SparqlService::new(HdtDirectory::with_store(
+        store.clone(),
+        &dir,
+    )));
+    let handler = SparqlService::new(HdtDirectory::with_store(store.clone(), &dir));
     let client = oxhttp::Client::new();
     let workload = Arc::new(load_workload(&queries_dir));
 
     // Untimed: builds the HDT's index sidecar on first use, and checks answers.
     check_answers(&client, &base, &store, &workload);
 
-    bench_overhead(c, &scale, &client, &base, &store, &location);
+    bench_overhead(c, &scale, &client, &base, &store, &handler);
     bench_templates(c, &scale, &client, &base, &workload);
     bench_formats(c, &scale, &client, &base);
     bench_concurrent(c, &scale, &base, &workload);

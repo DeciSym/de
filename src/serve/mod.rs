@@ -1,15 +1,36 @@
-//! The SPARQL endpoint behind `de serve`.
+//! The SPARQL endpoint behind `de serve`, for other servers to reuse.
+//!
+//! A [`SparqlService`] answers requests from a [`DatasetSource`], such as an
+//! [`HdtDirectory`], with [`Routes`] of its own tried first, such as the
+//! [`Yasgui`] query page. It takes and returns its own [`RequestBody`] and
+//! [`ResponseBody`], so it runs on any HTTP server: [`spawn`] and [`serve`]
+//! run it on oxhttp.
+//!
+//! ```no_run
+//! use de::serve::{HdtDirectory, ServerConfig, ServiceOptions, SparqlService, Yasgui};
+//!
+//! let mut options = ServiceOptions::default();
+//! options.cors = true;
+//! let service = SparqlService::new(HdtDirectory::new("data")?)
+//!     .with_options(options)
+//!     .with_routes(Yasgui);
+//! de::serve::spawn(service, "localhost:7878", &ServerConfig::default())?.join()?;
+//! # Ok::<(), anyhow::Error>(())
+//! ```
 //!
 //! The request handling started as a copy of `oxigraph serve`
 //! (oxigraph's `cli/src/main.rs`), adapted to a store of read-only HDT files.
 //!
-//! * `server` runs the HTTP server; `service` routes each request.
+//! * `service` routes each request, and adds CORS headers.
 //! * `protocol` reads the request (URL, body, query parameters), and
 //!   `negotiate` picks the result format from the Accept header.
 //! * `stream` evaluates the query on a worker thread and streams the results.
-//! * `hdt_dir` finds the HDT files in the data directory, and notices changes.
-//! * `ui` is the query page; `error` builds the error responses.
+//! * `dataset` is what a data source implements; `hdt_dir` is de's.
+//! * `server` runs a service on oxhttp; `ui` is the query page.
+//! * `body` and `error` are the request and response types.
 
+mod body;
+mod dataset;
 mod error;
 mod hdt_dir;
 mod negotiate;
@@ -19,5 +40,10 @@ mod service;
 mod stream;
 mod ui;
 
-pub use server::serve;
-pub use service::handle_request;
+pub use body::{RequestBody, ResponseBody};
+pub use dataset::{DatasetSelection, DatasetSource, ServeDataset};
+pub use error::HttpError;
+pub use hdt_dir::HdtDirectory;
+pub use server::{ServerConfig, serve, spawn};
+pub use service::{Routes, ServiceOptions, SparqlService};
+pub use ui::Yasgui;

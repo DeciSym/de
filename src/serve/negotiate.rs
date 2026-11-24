@@ -1,14 +1,18 @@
 //! Choosing the result format from the Accept header.
 
-use super::error::{HttpError, bad_request};
+use super::{
+    body::RequestBody,
+    error::{HttpError, bad_request},
+};
 use http::{Request, StatusCode, header::ACCEPT};
 use log::debug;
-use oxhttp::model::Body;
 use oxrdfio::RdfFormat;
 use sparesults::QueryResultsFormat;
 use std::str::FromStr;
 
-pub(super) fn rdf_content_negotiation(request: &Request<Body>) -> Result<RdfFormat, HttpError> {
+pub(super) fn rdf_content_negotiation(
+    request: &Request<RequestBody>,
+) -> Result<RdfFormat, HttpError> {
     content_negotiation(
         request,
         RdfFormat::from_media_type,
@@ -22,7 +26,7 @@ pub(super) fn rdf_content_negotiation(request: &Request<Body>) -> Result<RdfForm
 }
 
 pub(super) fn query_results_content_negotiation(
-    request: &Request<Body>,
+    request: &Request<RequestBody>,
 ) -> Result<QueryResultsFormat, HttpError> {
     content_negotiation(
         request,
@@ -37,7 +41,7 @@ pub(super) fn query_results_content_negotiation(
 }
 
 fn content_negotiation<F: Copy>(
-    request: &Request<Body>,
+    request: &Request<RequestBody>,
     parse: impl Fn(&str) -> Option<F>,
     default: F,
     default_by_base: &[(&str, F)],
@@ -101,7 +105,7 @@ fn content_negotiation<F: Copy>(
         eprintln!(
             "Not Acceptable: the accept header does not provide any accepted format like {example}"
         );
-        (
+        HttpError::new(
             StatusCode::NOT_ACCEPTABLE,
             format!("The accept header does not provide any accepted format like {example}"),
         )
