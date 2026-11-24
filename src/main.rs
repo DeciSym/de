@@ -148,8 +148,42 @@ async fn run_command<W: Write>(
         .map(|_| ()),
         Commands::View { data } => view::view_hdt(data, stdout_writer),
         #[cfg(feature = "server")]
-        Commands::Serve { location, bind } => de::serve::serve(location.to_owned(), bind),
+        Commands::Serve { location, bind } => {
+            serve_until_stopped(location.to_owned(), bind.to_owned()).await
+        }
     }
+}
+
+/// Runs the server until it fails, or until SIGINT or SIGTERM ends the
+/// process with exit status 0.
+///
+/// The server has no shutdown of its own, so the signal handler is what makes
+/// the exit clean rather than a kill: systemd's stop then reports success,
+/// and tools that record a process until it exits, such as heaptrack in
+/// `scripts/bench-memory.py`, get a complete recording.
+#[cfg(feature = "server")]
+async fn serve_until_stopped(location: String, bind: String) -> anyhow::Result<()> {
+    let server = tokio::task::spawn_blocking(move || de::serve::serve(location, &bind));
+    tokio::select! {
+        result = server => result?,
+        () = shutdown_signal() => Ok(()),
+    }
+}
+
+#[cfg(feature = "server")]
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        if let Ok(mut terminate) = signal(SignalKind::terminate()) {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {}
+                _ = terminate.recv() => {}
+            }
+            return;
+        }
+    }
+    let _ = tokio::signal::ctrl_c().await;
 }
 
 fn flush_stdout_writer<W: Write>(writer: &mut W) -> std::io::Result<()> {

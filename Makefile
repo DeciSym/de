@@ -7,6 +7,10 @@ BENCH_SCALE ?= large
 # WatDiv dataset scale: 10 (~1M triples) or 100 (~10M). Matches Comunica's
 # benchmark-watdiv-hdt and benchmark-watdiv-hdt-100.
 WATDIV_SCALE ?= 10
+# BSBM product count for the SPARQL endpoint benchmarks: 1000 (~372K triples)
+# or 10000 (~3.5M). Matches Comunica's benchmark-bsbm-hdt and
+# benchmark-bsbm-hdt-10k. Must match DE_BSBM_PRODUCT_COUNT at bench time.
+BSBM_PRODUCT_COUNT ?= 1000
 
 init:
 	scripts/download-sample-bench.sh
@@ -43,15 +47,24 @@ bench-watdiv:
 	scripts/fetch-watdiv-data.sh $(WATDIV_SCALE)
 	DE_WATDIV_SCALE=$(WATDIV_SCALE) cargo bench --bench watdiv
 
-# Measure the heap memory a release build of de uses on both benchmarks'
+# Generate the BSBM fixtures with the official generator (needs Java) and time
+# the SPARQL endpoint, `de serve`, over HTTP on the BSBM explore queries.
+bench-http:
+	python3 scripts/gen-bsbm-data.py $(BSBM_PRODUCT_COUNT)
+	DE_BSBM_PRODUCT_COUNT=$(BSBM_PRODUCT_COUNT) cargo bench --features server --bench sparql_http
+
+# Measure the heap memory a release build of de uses on the benchmarks'
 # fixtures, under heaptrack (apt install heaptrack): one de process per
-# workload. Writes the recordings and memory.json to target/bench-memory;
-# scripts/bench-memory.py compares two such runs.
+# workload, a `de serve` one for sparql_http. Writes the recordings and
+# memory.json to target/bench-memory; scripts/bench-memory.py compares two
+# such runs.
 bench-memory: bench-init
 	scripts/fetch-watdiv-data.sh $(WATDIV_SCALE)
-	cargo build --release --bin de
+	python3 scripts/gen-bsbm-data.py $(BSBM_PRODUCT_COUNT)
+	cargo build --release --bin de --features server
 	DE_BENCH_SCALE=$(BENCH_SCALE) scripts/bench-memory.py run trainmarks --de target/release/de --out target/bench-memory/trainmarks
 	DE_WATDIV_SCALE=$(WATDIV_SCALE) scripts/bench-memory.py run watdiv --de target/release/de --out target/bench-memory/watdiv
+	DE_BSBM_PRODUCT_COUNT=$(BSBM_PRODUCT_COUNT) scripts/bench-memory.py run sparql_http --de target/release/de --out target/bench-memory/sparql_http
 
 build:
 	cargo build --features=server

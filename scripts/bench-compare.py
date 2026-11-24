@@ -24,7 +24,9 @@ two with this script, and keeps the change's results as an artifact:
 
 A difference counts as slower or faster only when it is larger than
 --threshold percent and the two medians' 95% confidence intervals don't
-overlap. Compare results from different machines with care: on GitHub's
+overlap. Benchmarks whose id matches --report-only are compared and shown, but
+never fail the run: for measurements too noisy to gate on, such as several
+clients contending for the same cores. Compare results from different machines with care: on GitHub's
 runners, whose CPU model varies from run to run, identical code has moved by
 40% to 60%.
 """
@@ -32,6 +34,7 @@ runners, whose CPU model varies from run to run, identical code has moved by
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -169,6 +172,7 @@ def run_differences(base_run, cur_run, base_commit_arg):
 
 
 def compare(args):
+    report_only = re.compile(args.report_only) if args.report_only else None
     base_root, base_name = parse_tree(args.baseline)
     cur_root, cur_name = parse_tree(args.current)
     current = load_results(cur_root, cur_name)
@@ -191,6 +195,8 @@ def compare(args):
         verdict = ""
         if abs(change) >= args.threshold and not overlap:
             verdict = "**slower**" if change > 0 else "faster"
+            if report_only and report_only.search(bench_id):
+                verdict += " (report only)"
             (slower if change > 0 else faster).append((bench_id, base[0], cur[0], change))
         rows.append((bench_id, fmt_time(base[0]), fmt_time(cur[0]), f"{change:+.1f}%", verdict))
 
@@ -233,7 +239,8 @@ def compare(args):
     in_actions = os.environ.get("GITHUB_ACTIONS") == "true"
     failed = 0
     for bench_id, base, cur, change in slower:
-        fails = args.fail_above is not None and change > args.fail_above
+        fails = (args.fail_above is not None and change > args.fail_above
+                 and not (report_only and report_only.search(bench_id)))
         failed += fails
         message = f"{bench_id}: {fmt_time(base)} -> {fmt_time(cur)} ({change:+.1f}%)"
         if in_actions:
@@ -261,6 +268,8 @@ def main():
     cmp.add_argument("--threshold", type=float, default=10.0, help="smallest change to report, in percent (default: 10)")
     cmp.add_argument("--fail-above", type=float, help="exit 1 when a benchmark is slower by more than this percent")
     cmp.add_argument("--base-commit", help="the commit the current run builds on; noted when the baseline isn't from it")
+    cmp.add_argument("--report-only", metavar="REGEX",
+                     help="compare and show benchmarks whose id matches, but never fail on them")
 
     args = parser.parse_args()
     if args.command == "record":
