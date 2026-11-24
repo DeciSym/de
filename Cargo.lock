@@ -1704,7 +1704,7 @@ dependencies = [
 [[package]]
 name = "reasonable"
 version = "0.5.0-a2"
-source = "git+https://github.com/DeciSym/reasonable.git?rev=0279bf90c459761ca8d15c903fbcdd0d895fa1f1#0279bf90c459761ca8d15c903fbcdd0d895fa1f1"
+source = "git+https://github.com/DeciSym/reasonable.git?rev=2a6ee89d2e62474f5adbe80efab3a31452cba99d#0279bf90c459761ca8d15c903fbcdd0d895fa1f1"
 dependencies = [
  "datafrog",
  "hashbrown 0.15.5",
