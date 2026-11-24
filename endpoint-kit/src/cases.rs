@@ -75,6 +75,10 @@ fn without_graph_store(c: &Capabilities) -> Option<&'static str> {
         .then_some("the server supports the Graph Store Protocol")
 }
 
+fn with_cors(c: &Capabilities) -> Option<&'static str> {
+    (!c.cors).then_some("the server doesn't enable CORS")
+}
+
 /// Turns a check into an outcome.
 pub(crate) fn outcome(result: Result<(), String>) -> Outcome {
     match result {
@@ -593,6 +597,57 @@ pub(crate) fn protocol_cases() -> Vec<Case> {
                 Ok(())
             }
         ),
+        // CORS, for a server that enables it.
+        case!(
+            "cors/preflight",
+            "an OPTIONS preflight from another origin is allowed",
+            with_cors,
+            |ctx| {
+                let headers = [
+                    ("origin", "http://example.com"),
+                    ("access-control-request-method", "POST"),
+                    ("access-control-request-headers", "content-type"),
+                ];
+                let answer = send(
+                    ctx,
+                    request(Method::OPTIONS, "/query", &headers, Vec::new()),
+                )?;
+                if !answer.status.is_success() {
+                    return Err(format!("expected 2xx, got {}", answer.describe()));
+                }
+                expect_header(&answer, "access-control-allow-origin", |v| {
+                    v == "*" || v == "http://example.com"
+                })?;
+                // POST is a CORS-safelisted method, so a preflight for it may
+                // leave Access-Control-Allow-Methods out (and oxhttp drops it).
+                if answer.headers.contains_key("access-control-allow-methods") {
+                    expect_header(&answer, "access-control-allow-methods", |v| {
+                        v.to_ascii_uppercase().contains("POST")
+                    })?;
+                }
+                expect_header(&answer, "access-control-allow-headers", |v| {
+                    v.to_ascii_lowercase().contains("content-type")
+                })
+            }
+        ),
+        case!(
+            "cors/query",
+            "a query from another origin is allowed",
+            with_cors,
+            |ctx| {
+                let answer = send(
+                    ctx,
+                    get(
+                        "/query?query=ASK%20%7B%7D",
+                        &[("origin", "http://example.com")],
+                    ),
+                )?;
+                answer.expect_success()?;
+                expect_header(&answer, "access-control-allow-origin", |v| {
+                    v == "*" || v == "http://example.com"
+                })
+            }
+        ),
         // A server without SPARQL Update or the Graph Store Protocol.
         case!(
             "readonly/update_post",
@@ -722,6 +777,14 @@ fn ask_true(answer: &Answer) -> Result<(), String> {
         Ok(())
     } else {
         Err("answered false, expected true".to_string())
+    }
+}
+
+fn expect_header(answer: &Answer, name: &str, accept: fn(&str) -> bool) -> Result<(), String> {
+    match answer.headers.get(name).map(|v| v.to_str()) {
+        Some(Ok(value)) if accept(value) => Ok(()),
+        Some(Ok(value)) => Err(format!("{name} was {value:?}")),
+        _ => Err(format!("no {name} header")),
     }
 }
 

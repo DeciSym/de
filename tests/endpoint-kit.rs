@@ -2,7 +2,7 @@
 // Licensed under the BSD 3-Clause License (see LICENSE file in the project root).
 
 //! Runs the `endpoint-kit` cases against `de serve`: once by calling
-//! `de::serve::handle_request` directly, once against the `de` binary over a
+//! `de::serve::SparqlService` directly, once against the `de` binary over a
 //! socket.
 //!
 //! The cases live in the `endpoint-kit` workspace crate so that servers built
@@ -16,14 +16,11 @@
 
 #![cfg(feature = "server")]
 
-use de::sparql::AggregateHdt;
+use de::serve::{HdtDirectory, RequestBody, ServiceOptions, SparqlService, Yasgui};
 use endpoint_kit::{
-    FixtureSet, InProcess, KitResponse, PeakAlloc, Report, ServiceSettings, SpawnedServer, Suite,
-    Target,
+    Capabilities, FixtureSet, InProcess, KitResponse, PeakAlloc, Report, ServiceSettings,
+    SpawnedServer, Suite, Target,
 };
-use http::header::CONTENT_TYPE;
-use http::{HeaderValue, Response, StatusCode};
-use oxhttp::model::Body;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -75,12 +72,16 @@ const EXPECTED_FAILURES: &[(&str, &str)] = &[
     ),
 ];
 
+/// Both runs turn CORS on, so that the CORS cases check `--cors`.
 fn suite(label: &str) -> Suite {
-    EXPECTED_FAILURES
-        .iter()
-        .fold(Suite::new(label), |suite, (id, reason)| {
-            suite.expect_failure(id, reason)
-        })
+    let capabilities = Capabilities {
+        cors: true,
+        ..Capabilities::default()
+    };
+    EXPECTED_FAILURES.iter().fold(
+        Suite::new(label).capabilities(capabilities),
+        |suite, (id, reason)| suite.expect_failure(id, reason),
+    )
 }
 
 /// Builds one HDT per fixture graph in `<fixtures>/store`, with the graph's
@@ -106,43 +107,20 @@ fn build_store(fixtures: &FixtureSet) -> anyhow::Result<PathBuf> {
     Ok(store)
 }
 
-fn hdt_paths(store: &Path) -> anyhow::Result<Vec<String>> {
-    let mut paths = Vec::new();
-    for entry in std::fs::read_dir(store)? {
-        let path = entry?.path();
-        if path.extension().is_some_and(|ext| ext == "hdt") {
-            paths.push(path.to_string_lossy().into_owned());
-        }
-    }
-    paths.sort();
-    Ok(paths)
-}
-
-/// What `de serve` sends for an error, as its private `error` helper does.
-fn error_response(status: StatusCode, message: &str) -> Response<Body> {
-    let mut response = Response::new(Body::from(message.to_string()));
-    *response.status_mut() = status;
-    response.headers_mut().insert(
-        CONTENT_TYPE,
-        HeaderValue::from_static("text/plain; charset=utf-8"),
-    );
-    response
-}
-
 fn in_process(fixtures: &FixtureSet) -> anyhow::Result<Box<dyn Target>> {
-    let store_dir = build_store(fixtures)?;
-    let store = AggregateHdt::new(&hdt_paths(&store_dir)?)?;
-    let location = store_dir.to_string_lossy().into_owned();
+    let mut options = ServiceOptions::default();
+    options.cors = true;
+    let service = SparqlService::new(HdtDirectory::new(build_store(fixtures)?)?)
+        .with_options(options)
+        .with_routes(Yasgui);
     Ok(Box::new(InProcess::new(
         move |request: http::Request<Vec<u8>>| {
-            let mut request = request.map(Body::from);
-            let response = de::serve::handle_request(&mut request, &store, true, &location)
-                .unwrap_or_else(|(status, message)| error_response(status, &message));
-            let (parts, body) = response.into_parts();
+            let mut request = request.map(RequestBody::from);
+            let (parts, body) = service.handle(&mut request).into_parts();
             Ok(KitResponse {
                 status: parts.status,
                 headers: parts.headers,
-                body: Box::new(body),
+                body: body.into_reader(),
             })
         },
     )))
@@ -158,7 +136,8 @@ fn spawned(fixtures: &FixtureSet) -> anyhow::Result<Box<dyn Target>> {
         .arg("--location")
         .arg(&store_dir)
         .arg("--bind")
-        .arg(&bind);
+        .arg(&bind)
+        .arg("--cors");
     let server = SpawnedServer::start(
         command,
         &format!("http://{bind}"),
@@ -181,7 +160,7 @@ fn finish(report: &Report, file: &str) -> anyhow::Result<()> {
 #[test]
 fn endpoint_kit() -> anyhow::Result<()> {
     let settings = ServiceSettings::default();
-    let in_process = suite("de::serve::handle_request, in process")
+    let in_process = suite("de::serve::SparqlService, in process")
         .allocator(&ALLOCATOR)
         .settings(settings.clone())
         .run(|fixtures, _settings| in_process(fixtures))?;

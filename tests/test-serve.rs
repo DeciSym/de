@@ -10,9 +10,9 @@
 
 #[cfg(feature = "server")]
 mod server_tests {
+    use de::serve::{HdtDirectory, HttpError, RequestBody, ResponseBody, SparqlService};
     use de::sparql::AggregateHdt;
     use http::{Method, Request, StatusCode};
-    use oxhttp::model::Body;
     use sparesults::{QueryResultsFormat, QueryResultsParser, ReaderQueryResultsParserOutput};
     use std::io::Read as _;
     use std::io::Write;
@@ -114,8 +114,8 @@ mod server_tests {
     }
 
     // Helper to read body from response
-    fn read_body(response: http::Response<Body>) -> anyhow::Result<String> {
-        let mut body = response.into_body();
+    fn read_body(response: http::Response<ResponseBody>) -> anyhow::Result<String> {
+        let mut body = response.into_body().into_reader();
         let mut content = Vec::new();
         body.read_to_end(&mut content)?;
         String::from_utf8(content).map_err(anyhow::Error::from)
@@ -134,9 +134,18 @@ mod server_tests {
 
     // Helper to convert HttpError to anyhow::Error
     fn handle_response(
-        result: Result<http::Response<Body>, (StatusCode, String)>,
-    ) -> anyhow::Result<http::Response<Body>> {
-        result.map_err(|(status, msg)| anyhow::anyhow!("HTTP Error {}: {}", status, msg))
+        result: Result<http::Response<ResponseBody>, HttpError>,
+    ) -> anyhow::Result<http::Response<ResponseBody>> {
+        result.map_err(|e| anyhow::anyhow!("HTTP Error {}: {}", e.status(), e.message()))
+    }
+
+    /// Answers `request` with a service over `store`, whose files are in `location`.
+    fn handle(
+        request: &mut Request<RequestBody>,
+        store: &AggregateHdt,
+        location: &Path,
+    ) -> Result<http::Response<ResponseBody>, HttpError> {
+        SparqlService::new(HdtDirectory::with_store(store.clone(), location)).try_handle(request)
     }
 
     #[tokio::test]
@@ -150,15 +159,10 @@ mod server_tests {
             .uri("http://localhost/query")
             .header("Content-Type", "application/sparql-query")
             .header("Accept", "application/sparql-results+json")
-            .body(Body::from(query))
+            .body(RequestBody::from(query))
             .unwrap();
 
-        let response = handle_response(de::serve::handle_request(
-            &mut request,
-            &store,
-            true,
-            &tmp_dir.path().to_string_lossy(),
-        ))?;
+        let response = handle_response(handle(&mut request, &store, tmp_dir.path()))?;
 
         assert_eq!(response.status(), StatusCode::OK);
         let body_text = read_body(response)?;
@@ -184,15 +188,10 @@ mod server_tests {
             .method(Method::GET)
             .uri(format!("http://localhost/query?query={encoded_query}"))
             .header("Accept", "application/sparql-results+json")
-            .body(Body::empty())
+            .body(RequestBody::empty())
             .unwrap();
 
-        let response = handle_response(de::serve::handle_request(
-            &mut request,
-            &store,
-            true,
-            &tmp_dir.path().to_string_lossy(),
-        ))?;
+        let response = handle_response(handle(&mut request, &store, tmp_dir.path()))?;
         let body_text = read_body(response)?;
         assert!(parse_boolean_json_result(&body_text)?);
 
@@ -204,15 +203,10 @@ mod server_tests {
                 encode(&book2_graph)
             ))
             .header("Accept", "application/sparql-results+json")
-            .body(Body::empty())
+            .body(RequestBody::empty())
             .unwrap();
 
-        let response = handle_response(de::serve::handle_request(
-            &mut request,
-            &store,
-            true,
-            &tmp_dir.path().to_string_lossy(),
-        ))?;
+        let response = handle_response(handle(&mut request, &store, tmp_dir.path()))?;
         let body_text = read_body(response)?;
         assert!(!parse_boolean_json_result(&body_text)?);
         Ok(())
@@ -248,13 +242,8 @@ mod server_tests {
                     encode(query)
                 ))
                 .header("Accept", "application/sparql-results+json")
-                .body(Body::empty())?;
-            let response = handle_response(de::serve::handle_request(
-                &mut request,
-                &store,
-                true,
-                &tmp_dir.path().to_string_lossy(),
-            ))?;
+                .body(RequestBody::empty())?;
+            let response = handle_response(handle(&mut request, &store, tmp_dir.path()))?;
             Ok(parse_solution_rows_json(&read_body(response)?)?.1)
         };
 
@@ -291,15 +280,10 @@ mod server_tests {
             .uri("http://localhost/query")
             .header("Content-Type", "application/sparql-query")
             .header("Accept", "application/sparql-results+json")
-            .body(Body::from(query))
+            .body(RequestBody::from(query))
             .unwrap();
 
-        let response = handle_response(de::serve::handle_request(
-            &mut request,
-            &store,
-            true,
-            &tmp_dir.path().to_string_lossy(),
-        ))?;
+        let response = handle_response(handle(&mut request, &store, tmp_dir.path()))?;
 
         assert_eq!(response.status(), StatusCode::OK);
         let body_text = read_body(response)?;
@@ -334,15 +318,10 @@ mod server_tests {
             .method(Method::GET)
             .uri(format!("http://localhost/query?query={encoded_query}"))
             .header("Accept", "application/sparql-results+json")
-            .body(Body::empty())
+            .body(RequestBody::empty())
             .unwrap();
 
-        let response = handle_response(de::serve::handle_request(
-            &mut request,
-            &store,
-            true,
-            &tmp_dir.path().to_string_lossy(),
-        ))?;
+        let response = handle_response(handle(&mut request, &store, tmp_dir.path()))?;
 
         assert_eq!(response.status(), StatusCode::OK);
         let body_text = read_body(response)?;
@@ -360,15 +339,10 @@ mod server_tests {
             .method(Method::GET)
             .uri("http://localhost/query")
             .header("Accept", "text/turtle")
-            .body(Body::empty())
+            .body(RequestBody::empty())
             .unwrap();
 
-        let response = handle_response(de::serve::handle_request(
-            &mut request,
-            &store,
-            true,
-            &tmp_dir.path().to_string_lossy(),
-        ))?;
+        let response = handle_response(handle(&mut request, &store, tmp_dir.path()))?;
 
         assert_eq!(response.status(), StatusCode::OK);
         let content_type = response
@@ -393,17 +367,13 @@ mod server_tests {
             .method(Method::POST)
             .uri("http://localhost/update")
             .header("Content-Type", "application/sparql-update")
-            .body(Body::from(update))
+            .body(RequestBody::from(update))
             .unwrap();
 
-        let result = de::serve::handle_request(
-            &mut request,
-            &store,
-            true,
-            &tmp_dir.path().to_string_lossy(),
-        );
+        let result = handle(&mut request, &store, tmp_dir.path());
         assert!(result.is_err());
-        let (status, msg) = result.unwrap_err();
+        let error = result.unwrap_err();
+        let (status, msg) = (error.status(), error.message());
         assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
         assert!(msg.contains("SPARQL Update is not supported"));
 
@@ -428,17 +398,13 @@ mod server_tests {
             .method(Method::POST)
             .uri("http://localhost/update")
             .header("Content-Type", "application/sparql-update")
-            .body(Body::from(update))
+            .body(RequestBody::from(update))
             .unwrap();
 
-        let result = de::serve::handle_request(
-            &mut request,
-            &store,
-            true,
-            &tmp_dir.path().to_string_lossy(),
-        );
+        let result = handle(&mut request, &store, tmp_dir.path());
         assert!(result.is_err());
-        let (status, msg) = result.unwrap_err();
+        let error = result.unwrap_err();
+        let (status, msg) = (error.status(), error.message());
         assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
         assert!(msg.contains("SPARQL Update is not supported"));
 
@@ -467,18 +433,15 @@ mod server_tests {
             .method(Method::POST)
             .uri("http://localhost/update")
             .header("Content-Type", "application/sparql-update")
-            .body(Body::from(update))
+            .body(RequestBody::from(update))
             .unwrap();
 
         // DELETE DATA should return NOT_IMPLEMENTED status.
-        let result: Result<http::Response<Body>, (StatusCode, String)> = de::serve::handle_request(
-            &mut request,
-            &store,
-            true,
-            &tmp_dir.path().to_string_lossy(),
-        );
+        let result: Result<http::Response<ResponseBody>, HttpError> =
+            handle(&mut request, &store, tmp_dir.path());
         assert!(result.is_err());
-        let (status, msg) = result.unwrap_err();
+        let error = result.unwrap_err();
+        let (status, msg) = (error.status(), error.message());
         assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
         assert!(msg.contains("SPARQL Update is not supported"));
 
@@ -490,7 +453,7 @@ mod server_tests {
         tmp_dir: &tempfile::TempDir,
         method: Method,
         uri: &str,
-        body: Body,
+        body: RequestBody,
         content_type: Option<&str>,
     ) -> anyhow::Result<()> {
         let mut request_builder = Request::builder().method(method).uri(uri);
@@ -499,10 +462,10 @@ mod server_tests {
         }
         let mut request = request_builder.body(body).unwrap();
 
-        let result =
-            de::serve::handle_request(&mut request, store, true, &tmp_dir.path().to_string_lossy());
+        let result = handle(&mut request, store, tmp_dir.path());
         assert!(result.is_err());
-        let (status, message) = result.unwrap_err();
+        let error = result.unwrap_err();
+        let (status, message) = (error.status(), error.message());
         assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
         assert!(message.contains("Graph Store Protocol is not supported"));
         Ok(())
@@ -516,7 +479,7 @@ mod server_tests {
             &tmp_dir,
             Method::GET,
             "http://localhost/store?graph=http://example.org/book/book1",
-            Body::empty(),
+            RequestBody::empty(),
             None,
         )
     }
@@ -529,7 +492,7 @@ mod server_tests {
             &tmp_dir,
             Method::PUT,
             "http://localhost/store?graph=http://example.org/newgraph",
-            Body::from("@prefix ex: <http://example.org/> . ex:s ex:p ex:o ."),
+            RequestBody::from("@prefix ex: <http://example.org/> . ex:s ex:p ex:o ."),
             Some("text/turtle"),
         )
     }
@@ -542,7 +505,9 @@ mod server_tests {
             &tmp_dir,
             Method::POST,
             "http://localhost/store",
-            Body::from("<http://example.org/s> <http://example.org/p> <http://example.org/o> ."),
+            RequestBody::from(
+                "<http://example.org/s> <http://example.org/p> <http://example.org/o> .",
+            ),
             Some("application/n-triples"),
         )
     }
@@ -555,7 +520,7 @@ mod server_tests {
             &tmp_dir,
             Method::DELETE,
             "http://localhost/store?default",
-            Body::empty(),
+            RequestBody::empty(),
             None,
         )
     }
@@ -568,7 +533,7 @@ mod server_tests {
             &tmp_dir,
             Method::HEAD,
             "http://localhost/store?graph=http://example.org/any",
-            Body::empty(),
+            RequestBody::empty(),
             None,
         )
     }
@@ -579,17 +544,13 @@ mod server_tests {
         let mut request = Request::builder()
             .method(Method::GET)
             .uri("http://localhost/storehouse")
-            .body(Body::empty())
+            .body(RequestBody::empty())
             .unwrap();
 
-        let result = de::serve::handle_request(
-            &mut request,
-            &store,
-            true,
-            &tmp_dir.path().to_string_lossy(),
-        );
+        let result = handle(&mut request, &store, tmp_dir.path());
         assert!(result.is_err());
-        let (status, _message) = result.unwrap_err();
+        let error = result.unwrap_err();
+        let (status, _message) = (error.status(), error.message());
         assert_eq!(status, StatusCode::NOT_FOUND);
         Ok(())
     }
@@ -606,22 +567,91 @@ mod server_tests {
             .uri("http://localhost/query")
             .header("Content-Type", "application/sparql-query")
             .header("Accept", "application/sparql-results+json")
-            .body(Body::from(query))
+            .body(RequestBody::from(query))
             .unwrap();
 
         // Invalid query should return an error
-        let result = de::serve::handle_request(
-            &mut request,
-            &store,
-            true,
-            &tmp_dir.path().to_string_lossy(),
-        );
+        let result = handle(&mut request, &store, tmp_dir.path());
         assert!(result.is_err());
-        let (status, msg) = result.unwrap_err();
+        let error = result.unwrap_err();
+        let (status, msg) = (error.status(), error.message());
         assert_eq!(status, StatusCode::BAD_REQUEST);
         // Check that the error message contains some indication of parsing error
         assert!(msg.contains("expected") || msg.contains("error"));
 
+        Ok(())
+    }
+
+    /// The API as a downstream server uses it: a data source and routes of
+    /// its own around the same SPARQL endpoint.
+    #[tokio::test]
+    async fn test_custom_source_and_routes() -> anyhow::Result<()> {
+        use de::serve::{DatasetSelection, DatasetSource, Routes, ServeDataset};
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct Counting {
+            inner: HdtDirectory,
+            refreshes: Arc<AtomicUsize>,
+            opens: Arc<AtomicUsize>,
+        }
+        impl DatasetSource for Counting {
+            fn refresh(&self) -> Result<(), HttpError> {
+                self.refreshes.fetch_add(1, Ordering::SeqCst);
+                self.inner.refresh()
+            }
+            fn open(
+                &self,
+                selection: &DatasetSelection,
+            ) -> Result<Box<dyn ServeDataset + '_>, HttpError> {
+                self.opens.fetch_add(1, Ordering::SeqCst);
+                self.inner.open(selection)
+            }
+        }
+        struct Hello;
+        impl Routes for Hello {
+            fn route(
+                &self,
+                request: &mut Request<RequestBody>,
+            ) -> Option<Result<http::Response<ResponseBody>, HttpError>> {
+                (request.uri().path() == "/hello")
+                    .then(|| Ok(http::Response::new(ResponseBody::from("hello"))))
+            }
+        }
+
+        let (tmp_dir, store) = setup_test_store().await?;
+        let refreshes = Arc::new(AtomicUsize::new(0));
+        let opens = Arc::new(AtomicUsize::new(0));
+        let service = SparqlService::new(Counting {
+            inner: HdtDirectory::with_store(store, tmp_dir.path()),
+            refreshes: Arc::clone(&refreshes),
+            opens: Arc::clone(&opens),
+        })
+        .with_routes(Hello);
+
+        // The route answers its own path...
+        let mut request = Request::get("http://localhost/hello").body(RequestBody::empty())?;
+        assert_eq!(
+            read_body(handle_response(service.try_handle(&mut request))?)?,
+            "hello"
+        );
+
+        // ...and leaves the rest to the endpoint, which reads from the source.
+        let query: String = url::form_urlencoded::byte_serialize(b"ASK { ?s ?p ?o }").collect();
+        let mut request = Request::get(format!("http://localhost/query?query={query}"))
+            .header("Accept", "application/sparql-results+json")
+            .body(RequestBody::empty())?;
+        let body = read_body(handle_response(service.try_handle(&mut request))?)?;
+        assert!(parse_boolean_json_result(&body)?);
+        assert_eq!(refreshes.load(Ordering::SeqCst), 1);
+        assert_eq!(opens.load(Ordering::SeqCst), 1);
+
+        // Without the query page's routes, / isn't found.
+        let mut request = Request::get("http://localhost/").body(RequestBody::empty())?;
+        assert_eq!(
+            service.try_handle(&mut request).unwrap_err().status(),
+            StatusCode::NOT_FOUND
+        );
         Ok(())
     }
 }

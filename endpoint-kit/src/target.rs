@@ -90,10 +90,14 @@ where
     }
 }
 
-/// A server reached over HTTP.
+/// A server reached over HTTP, at a base URL such as `http://127.0.0.1:7878`
+/// (plain HTTP, no path).
+///
+/// Requests go out exactly as the cases build them, `Origin` included, which a
+/// browser-like client would drop.
 pub struct HttpTarget {
     base_url: String,
-    client: oxhttp::Client,
+    timeout: Duration,
     process: ServerProcess,
 }
 
@@ -102,7 +106,7 @@ impl HttpTarget {
     pub fn new(base_url: impl Into<String>) -> Self {
         Self {
             base_url: base_url.into().trim_end_matches('/').to_string(),
-            client: oxhttp::Client::new().with_global_timeout(Duration::from_secs(120)),
+            timeout: Duration::from_secs(120),
             process: ServerProcess::Unknown,
         }
     }
@@ -117,23 +121,12 @@ impl HttpTarget {
 
 impl Target for HttpTarget {
     fn send(&self, request: Request<Vec<u8>>) -> anyhow::Result<KitResponse> {
-        let (parts, body) = request.into_parts();
-        let mut builder = Request::builder()
-            .method(parts.method)
-            .uri(format!("{}{}", self.base_url, parts.uri));
-        for (name, value) in &parts.headers {
-            builder = builder.header(name, value);
-        }
-        let response = self
-            .client
-            .request(builder.body(oxhttp::model::Body::from(body))?)
-            .with_context(|| format!("sending a request to {}", self.base_url))?;
-        let (parts, body) = response.into_parts();
-        Ok(KitResponse {
-            status: parts.status,
-            headers: parts.headers,
-            body: Box::new(body),
-        })
+        let authority = self
+            .base_url
+            .strip_prefix("http://")
+            .with_context(|| format!("{} isn't an http:// URL", self.base_url))?;
+        crate::http1::send(authority, request, self.timeout)
+            .with_context(|| format!("sending a request to {}", self.base_url))
     }
 
     fn server_process(&self) -> ServerProcess {
