@@ -109,7 +109,13 @@ pub(super) fn configure_and_evaluate_sparql_query(
             }
         }
     }
-    if default_graph_uris.is_empty() && named_graph_uris.is_empty() {
+    let names_graphs = !default_graph_uris.is_empty() || !named_graph_uris.is_empty();
+    if use_default_graph_as_union && names_graphs {
+        return Err(bad_request(
+            "default-graph-uri or named-graph-uri and union-default-graph should not be set at the same time",
+        ));
+    }
+    if !names_graphs {
         use_default_graph_as_union |= default_use_default_graph_as_union;
     }
     let query = query.ok_or_else(|| bad_request("You should set the 'query' parameter"))?;

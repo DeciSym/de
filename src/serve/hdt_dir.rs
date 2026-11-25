@@ -8,6 +8,7 @@ use crate::sparql::AggregateHdt;
 use http::StatusCode;
 use log::debug;
 use std::{
+    collections::HashSet,
     path::{Path, PathBuf},
     sync::Mutex,
     time::SystemTime,
@@ -79,44 +80,39 @@ impl DatasetSource for HdtDirectory {
     }
 
     fn open(&self, selection: &DatasetSelection) -> Result<Box<dyn ServeDataset + '_>, HttpError> {
-        // Optimization: Filter graphs BEFORE loading into memory by passing an explicit list.
-        // This significantly reduces memory usage and load time when only a subset of graphs are
-        // needed for the query.
-        let graph_filter = graph_filter(selection);
-        if let Some(graph_filter_ref) = graph_filter.as_ref() {
-            debug!("using graph filter for query: {graph_filter_ref:?}");
+        let explicit =
+            !selection.default_graph_uris.is_empty() || !selection.named_graph_uris.is_empty();
+        // Only the graphs the dataset names are opened, which saves memory
+        // and time when a request needs a few of many.
+        let (load, default_graphs, named_graphs) = if explicit {
+            let mut load: Vec<String> = selection
+                .default_graph_uris
+                .iter()
+                .chain(&selection.named_graph_uris)
+                .cloned()
+                .collect();
+            load.sort_unstable();
+            load.dedup();
+            let default_graphs = selection.default_graph_uris.iter().cloned().collect();
+            let named_graphs = selection.named_graph_uris.iter().cloned().collect();
+            (Some(load), Some(default_graphs), Some(named_graphs))
+        } else if selection.union_default_graph {
+            (None, None, None)
         } else {
-            debug!("using default graph filter for query: all graphs");
-        }
-        let snapshot = self.store.get_snapshot(graph_filter).map_err(|_| {
+            (None, Some(HashSet::new()), None)
+        };
+        debug!(
+            "dataset for query: load {load:?}, default graph {default_graphs:?}, named graphs {named_graphs:?}"
+        );
+        let mut snapshot = self.store.get_snapshot(load).map_err(|_| {
             HttpError::new(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "data temporarily unavailable",
             )
         })?;
+        snapshot.default_graphs = default_graphs;
+        snapshot.named_graphs = named_graphs;
         Ok(Box::new(snapshot))
-    }
-}
-
-/// The graphs to open for a query, or `None` for all of them.
-fn graph_filter(selection: &DatasetSelection) -> Option<Vec<String>> {
-    let mut selected_graphs: Vec<String> = if selection.union_default_graph {
-        let mut selected = selection.default_graph_uris.clone();
-        selected.extend_from_slice(&selection.named_graph_uris);
-        selected
-    } else if selection.default_graph_uris.is_empty() {
-        selection.named_graph_uris.clone()
-    } else {
-        selection.default_graph_uris.clone()
-    };
-
-    selected_graphs.sort_unstable();
-    selected_graphs.dedup();
-
-    if selected_graphs.is_empty() {
-        None
-    } else {
-        Some(selected_graphs)
     }
 }
 

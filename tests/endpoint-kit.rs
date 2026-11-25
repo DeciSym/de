@@ -31,28 +31,12 @@ static ALLOCATOR: PeakAlloc = PeakAlloc::new();
 /// The cases `de serve` fails today, and why.
 const EXPECTED_FAILURES: &[(&str, &str)] = &[
     (
-        "w3c/query_dataset_full",
-        "default-graph-uri limits which files are loaded, so the named-graph-uri graphs sent with it are never loaded",
-    ),
-    (
-        "w3c/query_multiple_dataset",
-        "the protocol's dataset doesn't replace the query's FROM",
-    ),
-    (
         "w3c/query_content_type_describe",
         "graph results default to N-Quads",
     ),
     (
         "w3c/query_content_type_construct",
         "graph results default to N-Quads",
-    ),
-    (
-        "oxigraph/get_query_union_graph_and_default_graph",
-        "union-default-graph together with explicit graphs isn't rejected",
-    ),
-    (
-        "de/named_graph_uri_alone_leaves_default_graph_empty",
-        "graphs named with named-graph-uri are also put in the default graph",
     ),
     (
         "de/evaluation_error_has_error_status",

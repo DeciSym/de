@@ -654,4 +654,29 @@ mod server_tests {
         );
         Ok(())
     }
+
+    /// Without a union default graph and with no graphs named, the default
+    /// graph is empty and every graph is a named graph.
+    #[tokio::test]
+    async fn test_default_graph_without_union_is_empty() -> anyhow::Result<()> {
+        use de::serve::ServiceOptions;
+
+        let (tmp_dir, store) = setup_test_store().await?;
+        let mut options = ServiceOptions::default();
+        options.union_default_graph = false;
+        let service = SparqlService::new(HdtDirectory::with_store(store, tmp_dir.path()))
+            .with_options(options);
+        let ask = |query: &str| -> anyhow::Result<bool> {
+            let query: String = url::form_urlencoded::byte_serialize(query.as_bytes()).collect();
+            let mut request = Request::get(format!("http://localhost/query?query={query}"))
+                .header("Accept", "application/sparql-results+json")
+                .body(RequestBody::empty())?;
+            parse_boolean_json_result(&read_body(handle_response(
+                service.try_handle(&mut request),
+            )?)?)
+        };
+        assert!(!ask("ASK { ?s ?p ?o }")?);
+        assert!(ask("ASK { GRAPH ?g { ?s ?p ?o } }")?);
+        Ok(())
+    }
 }
