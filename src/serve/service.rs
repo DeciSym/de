@@ -66,9 +66,10 @@ pub trait Routes: Send + Sync + 'static {
 /// A read-only SPARQL endpoint over a [`DatasetSource`].
 ///
 /// It answers SPARQL 1.1 Protocol queries on `/query`, with GET or POST, and
-/// the service description on `GET /query` without a query. `/update` and
-/// `/store` answer 501. [`Routes`] add other paths. It doesn't depend on any
-/// HTTP server: [`spawn`](super::spawn) runs one with oxhttp.
+/// the service description on `GET /query` without a query; other methods
+/// get 405. `/update` and `/store` answer 501, whatever the method. [`Routes`]
+/// add other paths. It doesn't depend on any HTTP server:
+/// [`spawn`](super::spawn) runs one with oxhttp.
 ///
 /// A query's response starts once its first results are ready, and then
 /// streams the rest. So a query that fails before its first results gets an
@@ -189,7 +190,12 @@ impl SparqlService {
                     Err(unsupported_media_type(&content_type))
                 }
             }
-            ("/update", "GET" | "POST") => Err(not_implemented(
+            ("/query", _) => Err(HttpError::method_not_allowed(
+                request.method(),
+                "/query",
+                &[Method::GET, Method::POST],
+            )),
+            ("/update", _) => Err(not_implemented(
                 "SPARQL Update is not supported by this server",
             )),
             (path, _method) if is_store_path(path) => Err(not_implemented(

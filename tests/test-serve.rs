@@ -11,7 +11,7 @@
 #[cfg(feature = "server")]
 mod server_tests {
     use de::serve::{
-        HdtDirectory, HttpError, RequestBody, ResponseBody, ServiceOptions, SparqlService,
+        HdtDirectory, HttpError, RequestBody, ResponseBody, ServiceOptions, SparqlService, Yasgui,
     };
     use de::sparql::AggregateHdt;
     use http::{Method, Request, StatusCode};
@@ -539,6 +539,65 @@ mod server_tests {
             RequestBody::empty(),
             None,
         )
+    }
+
+    /// A method `/query` doesn't accept is 405, with `Allow` naming those it
+    /// does, while `/update` is 501 whatever the method.
+    #[tokio::test]
+    async fn test_wrong_method_on_query_is_405() -> anyhow::Result<()> {
+        let (tmp_dir, store) = setup_test_store().await?;
+
+        for method in [Method::PUT, Method::DELETE, Method::PATCH, Method::HEAD] {
+            let mut request = Request::builder()
+                .method(method.clone())
+                .uri("http://localhost/query?query=ASK%20%7B%7D")
+                .body(RequestBody::empty())
+                .unwrap();
+            let error = handle(&mut request, &store, tmp_dir.path())
+                .err()
+                .ok_or_else(|| anyhow::anyhow!("{method} /query was answered"))?;
+            assert_eq!(error.status(), StatusCode::METHOD_NOT_ALLOWED, "{method}");
+            assert_eq!(
+                error.headers().get(http::header::ALLOW),
+                Some(&http::HeaderValue::from_static("GET, POST")),
+                "{method}"
+            );
+        }
+        for method in [Method::PUT, Method::DELETE] {
+            let mut request = Request::builder()
+                .method(method.clone())
+                .uri("http://localhost/update")
+                .body(RequestBody::empty())
+                .unwrap();
+            let error = handle(&mut request, &store, tmp_dir.path())
+                .err()
+                .ok_or_else(|| anyhow::anyhow!("{method} /update was answered"))?;
+            assert_eq!(error.status(), StatusCode::NOT_IMPLEMENTED, "{method}");
+        }
+
+        Ok(())
+    }
+
+    /// The query page's paths answer GET and HEAD, and a 405 with `Allow` to
+    /// any other method.
+    #[tokio::test]
+    async fn test_wrong_method_on_query_page_is_405() -> anyhow::Result<()> {
+        let (tmp_dir, store) = setup_test_store().await?;
+        let service =
+            SparqlService::new(HdtDirectory::with_store(store, tmp_dir.path())).with_routes(Yasgui);
+
+        let mut request = Request::post("http://localhost/").body(RequestBody::empty())?;
+        let response = service.handle(&mut request);
+        assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(
+            response.headers().get(http::header::ALLOW),
+            Some(&http::HeaderValue::from_static("GET, HEAD"))
+        );
+
+        let mut request = Request::head("http://localhost/").body(RequestBody::empty())?;
+        assert_eq!(service.handle(&mut request).status(), StatusCode::OK);
+
+        Ok(())
     }
 
     #[tokio::test]

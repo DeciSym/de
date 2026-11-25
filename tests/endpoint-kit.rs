@@ -39,10 +39,6 @@ const EXPECTED_FAILURES: &[(&str, &str)] = &[
         "graph results default to N-Quads",
     ),
     (
-        "de/wrong_method_is_405",
-        "an unsupported method is 404, without an Allow header",
-    ),
-    (
         "contract/disconnect_stops_evaluation",
         "oxhttp notices a client left only when it next writes, and the response starts with the first result",
     ),
