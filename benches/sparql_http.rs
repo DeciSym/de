@@ -43,9 +43,9 @@ use criterion::{
 };
 use de::serve::{HdtDirectory, RequestBody, ServerConfig, SparqlService};
 use de::sparql::{AggregateHdt, parse_query, query_parsed_with_debug_plan};
+use endpoint_kit::{HttpTarget, Target};
 use http::header::ACCEPT;
 use http::{Method, Request, StatusCode};
-use oxhttp::model::Body;
 use oxrdfio::{RdfFormat, RdfParser};
 use sparesults::{
     QueryResultsFormat, QueryResultsParser, QueryResultsSerializer, ReaderQueryResultsParserOutput,
@@ -146,22 +146,24 @@ fn start_server(service: SparqlService) -> String {
 
 /// Sends a GET for `query`, checks the status and media type, and reads the
 /// whole body. Returns the body when `keep` is set, otherwise its length.
-fn get(client: &oxhttp::Client, base: &str, query: &str, accept: &str, keep: bool) -> Vec<u8> {
+///
+/// The client is endpoint-kit's: one connection per request, as `curl` makes.
+fn get(server: &HttpTarget, query: &str, accept: &str, keep: bool) -> Vec<u8> {
     let uri = format!(
-        "{base}/query?query={}",
+        "/query?query={}",
         url::form_urlencoded::byte_serialize(query.as_bytes()).collect::<String>()
     );
     let request = Request::builder()
         .method(Method::GET)
         .uri(&uri)
         .header(ACCEPT, accept)
-        .body(Body::empty())
+        .body(Vec::new())
         .expect("valid request");
-    let response = client
-        .request(request)
-        .unwrap_or_else(|e| panic!("request failed: {e}\n{query}"));
-    let status = response.status();
-    let mut body = response.into_body();
+    let response = server
+        .send(request)
+        .unwrap_or_else(|e| panic!("request failed: {e:#}\n{query}"));
+    let status = response.status;
+    let mut body = response.body;
     if status != StatusCode::OK {
         let mut message = String::new();
         let _ = body.read_to_string(&mut message);
@@ -257,7 +259,7 @@ fn canonical_http_triples(body: &[u8]) -> Vec<String> {
 }
 
 /// Answers every instance over HTTP and in process, and fails on any difference.
-fn check_answers(client: &oxhttp::Client, base: &str, store: &AggregateHdt, workload: &[Template]) {
+fn check_answers(server: &HttpTarget, store: &AggregateHdt, workload: &[Template]) {
     let snapshot = store
         .get_snapshot(None)
         .expect("failed to open the BSBM HDT");
@@ -271,11 +273,10 @@ fn check_answers(client: &oxhttp::Client, base: &str, store: &AggregateHdt, work
                     .unwrap_or_else(|e| panic!("{} #{i} failed in process: {e}", template.name)),
             );
             let actual = if template.graph {
-                canonical_http_triples(&get(client, base, query, "application/n-triples", true))
+                canonical_http_triples(&get(server, query, "application/n-triples", true))
             } else {
                 canonical_http_solutions(&get(
-                    client,
-                    base,
+                    server,
                     query,
                     "application/sparql-results+json",
                     true,
@@ -300,8 +301,7 @@ fn check_answers(client: &oxhttp::Client, base: &str, store: &AggregateHdt, work
 fn bench_overhead(
     c: &mut Criterion,
     scale: &str,
-    client: &oxhttp::Client,
-    base: &str,
+    server: &HttpTarget,
     store: &AggregateHdt,
     handler: &SparqlService,
 ) {
@@ -310,15 +310,7 @@ fn bench_overhead(
     group.sample_size(20);
     group.measurement_time(Duration::from_secs(5));
     group.bench_function("http_ask", |b| {
-        b.iter(|| {
-            get(
-                client,
-                base,
-                "ASK {}",
-                "application/sparql-results+json",
-                false,
-            )
-        });
+        b.iter(|| get(server, "ASK {}", "application/sparql-results+json", false));
     });
     group.bench_function("handler_ask", |b| {
         b.iter(|| {
@@ -351,13 +343,7 @@ fn bench_overhead(
     group.finish();
 }
 
-fn bench_templates(
-    c: &mut Criterion,
-    scale: &str,
-    client: &oxhttp::Client,
-    base: &str,
-    workload: &[Template],
-) {
+fn bench_templates(c: &mut Criterion, scale: &str, server: &HttpTarget, workload: &[Template]) {
     let mut group = c.benchmark_group(format!("sparql_http_bsbm/{scale}"));
     group.sample_size(10);
     group.sampling_mode(SamplingMode::Flat);
@@ -366,7 +352,7 @@ fn bench_templates(
         group.bench_function(&template.name, |b| {
             b.iter(|| {
                 for query in &template.queries {
-                    get(client, base, query, accept_for(template), false);
+                    get(server, query, accept_for(template), false);
                 }
             });
         });
@@ -374,7 +360,7 @@ fn bench_templates(
     group.finish();
 }
 
-fn bench_formats(c: &mut Criterion, scale: &str, client: &oxhttp::Client, base: &str) {
+fn bench_formats(c: &mut Criterion, scale: &str, server: &HttpTarget) {
     let query = format!("SELECT ?s ?p ?o WHERE {{ ?s ?p ?o }} LIMIT {FORMAT_ROWS}");
     let mut group = c.benchmark_group(format!("sparql_http_format/{scale}"));
     group.sample_size(10);
@@ -391,7 +377,7 @@ fn bench_formats(c: &mut Criterion, scale: &str, client: &oxhttp::Client, base: 
             BenchmarkId::from_parameter(name),
             media_type,
             |b, accept| {
-                b.iter(|| get(client, base, &query, accept, false));
+                b.iter(|| get(server, &query, accept, false));
             },
         );
     }
@@ -410,12 +396,11 @@ fn bench_concurrent(c: &mut Criterion, scale: &str, base: &str, workload: &Arc<V
                 let clients: Vec<_> = (0..CONCURRENT_CLIENTS)
                     .map(|_| {
                         let workload = Arc::clone(workload);
-                        let base = base.to_string();
+                        let server = HttpTarget::new(base);
                         std::thread::spawn(move || {
-                            let client = oxhttp::Client::new();
                             for template in workload.iter() {
                                 for query in &template.queries {
-                                    get(&client, &base, query, accept_for(template), false);
+                                    get(&server, query, accept_for(template), false);
                                 }
                             }
                         })
@@ -464,15 +449,15 @@ fn sparql_http(c: &mut Criterion) {
         &dir,
     )));
     let handler = SparqlService::new(HdtDirectory::with_store(store.clone(), &dir));
-    let client = oxhttp::Client::new();
+    let server = HttpTarget::new(base.clone());
     let workload = Arc::new(load_workload(&queries_dir));
 
     // Untimed: builds the HDT's index sidecar on first use, and checks answers.
-    check_answers(&client, &base, &store, &workload);
+    check_answers(&server, &store, &workload);
 
-    bench_overhead(c, &scale, &client, &base, &store, &handler);
-    bench_templates(c, &scale, &client, &base, &workload);
-    bench_formats(c, &scale, &client, &base);
+    bench_overhead(c, &scale, &server, &store, &handler);
+    bench_templates(c, &scale, &server, &workload);
+    bench_formats(c, &scale, &server);
     bench_concurrent(c, &scale, &base, &workload);
 }
 

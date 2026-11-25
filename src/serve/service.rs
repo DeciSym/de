@@ -69,7 +69,7 @@ pub trait Routes: Send + Sync + 'static {
 /// the service description on `GET /query` without a query; other methods
 /// get 405. `/update` and `/store` answer 501, whatever the method. [`Routes`]
 /// add other paths. It doesn't depend on any HTTP server:
-/// [`spawn`](super::spawn) runs one with oxhttp.
+/// [`axum::spawn`](super::axum::spawn) runs one on axum and hyper.
 ///
 /// A query's response starts once its first results are ready, and then
 /// streams the rest. So a query that fails before its first results gets an

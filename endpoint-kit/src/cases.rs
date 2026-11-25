@@ -619,7 +619,7 @@ pub(crate) fn protocol_cases() -> Vec<Case> {
                     v == "*" || v == "http://example.com"
                 })?;
                 // POST is a CORS-safelisted method, so a preflight for it may
-                // leave Access-Control-Allow-Methods out (and oxhttp drops it).
+                // leave Access-Control-Allow-Methods out.
                 if answer.headers.contains_key("access-control-allow-methods") {
                     expect_header(&answer, "access-control-allow-methods", |v| {
                         v.to_ascii_uppercase().contains("POST")
