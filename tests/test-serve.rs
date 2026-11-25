@@ -593,6 +593,39 @@ mod server_tests {
         Ok(())
     }
 
+    /// The HDT files in a directory's subdirectories are served with
+    /// `with_subdirectories`, and only then.
+    #[tokio::test]
+    async fn test_hdt_directory_subdirectories() -> anyhow::Result<()> {
+        let (tmp_dir, _store) = setup_test_store().await?;
+        let nested = tmp_dir.path().join("nested").join("deeper");
+        std::fs::create_dir_all(&nested)?;
+        std::fs::rename(tmp_dir.path().join("book2.hdt"), nested.join("book2.hdt"))?;
+        // A link back up the tree is followed once, not forever.
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(tmp_dir.path(), nested.join("loop"))?;
+
+        let query: String =
+            url::form_urlencoded::byte_serialize(format!("ASK {{ {BOOK2_IRI} ?p ?o }}").as_bytes())
+                .collect();
+        for (source, served) in [
+            (HdtDirectory::new(tmp_dir.path())?, false),
+            (
+                HdtDirectory::new(tmp_dir.path())?.with_subdirectories(),
+                true,
+            ),
+        ] {
+            let service = SparqlService::new(source);
+            let mut request = Request::get(format!("http://localhost/query?query={query}"))
+                .header("Accept", "application/sparql-results+json")
+                .body(RequestBody::empty())?;
+            let body = read_body(handle_response(service.try_handle(&mut request))?)?;
+            assert_eq!(parse_boolean_json_result(&body)?, served);
+        }
+
+        Ok(())
+    }
+
     /// A method `/query` doesn't accept is 405, with `Allow` naming those it
     /// does, while `/update` is 501 whatever the method.
     #[tokio::test]

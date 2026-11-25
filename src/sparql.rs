@@ -227,6 +227,25 @@ impl AggregateHdt {
     /// Returns a tuple of (`added_count`, `removed_count`).
     #[cfg(feature = "server")]
     pub fn sync(&self, location: &std::path::Path) -> Result<(usize, usize), anyhow::Error> {
+        self.sync_files(location, false)
+    }
+
+    /// [`Self::sync`], with the `.hdt` files in `location`'s subdirectories
+    /// too, at any depth.
+    #[cfg(feature = "server")]
+    pub fn sync_recursive(
+        &self,
+        location: &std::path::Path,
+    ) -> Result<(usize, usize), anyhow::Error> {
+        self.sync_files(location, true)
+    }
+
+    #[cfg(feature = "server")]
+    fn sync_files(
+        &self,
+        location: &std::path::Path,
+        recursive: bool,
+    ) -> Result<(usize, usize), anyhow::Error> {
         use std::collections::HashSet;
 
         if self.default_graphs.is_some() || self.named_graphs.is_some() {
@@ -251,17 +270,10 @@ impl AggregateHdt {
         // Scan the location for .hdt files
         let mut current_files: HashSet<std::path::PathBuf> = HashSet::new();
         let mut discovered_mappings: HashMap<String, std::path::PathBuf> = HashMap::new();
-        for entry in std::fs::read_dir(&canonical_location)? {
-            let entry = entry?;
-            let path = entry.path();
-            if path.is_file()
-                && let Some(ext) = path.extension()
-                && ext.eq_ignore_ascii_case("hdt")
-            {
-                let resolved = resolve_hdt_graph_path(&path)?;
-                current_files.insert(resolved.canonical_path().to_path_buf());
-                insert_graph_mapping(&mut discovered_mappings, resolved, "duplicate graph IRI")?;
-            }
+        for path in hdt_files(&canonical_location, recursive)? {
+            let resolved = resolve_hdt_graph_path(&path)?;
+            current_files.insert(resolved.canonical_path().to_path_buf());
+            insert_graph_mapping(&mut discovered_mappings, resolved, "duplicate graph IRI")?;
         }
 
         let mut file_paths = lock_write_file_paths(&self.file_paths, "modifying HDT paths")?;
@@ -273,6 +285,37 @@ impl AggregateHdt {
 
         Ok((added, removed))
     }
+}
+
+/// The `.hdt` files in `location`, and in its subdirectories at any depth
+/// when `recursive`, sorted. Symbolic links to directories are followed, but
+/// a directory is read once, so a link back up the tree ends there.
+#[cfg(feature = "server")]
+pub fn hdt_files(location: &Path, recursive: bool) -> std::io::Result<Vec<PathBuf>> {
+    let mut files = Vec::new();
+    let mut seen = HashSet::new();
+    let mut pending = vec![location.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        if !seen.insert(dir.canonicalize()?) {
+            continue;
+        }
+        for entry in std::fs::read_dir(&dir)? {
+            let path = entry?.path();
+            if path.is_dir() {
+                if recursive {
+                    pending.push(path);
+                }
+            } else if path.is_file()
+                && path
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("hdt"))
+            {
+                files.push(path);
+            }
+        }
+    }
+    files.sort_unstable();
+    Ok(files)
 }
 
 /// Create the correct term for a given resource string.
