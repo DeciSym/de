@@ -4,7 +4,7 @@ use super::{
     dataset::{DatasetSelection, DatasetSource, ServeDataset},
     error::{HttpError, internal_server_error},
 };
-use crate::sparql::AggregateHdt;
+use crate::sparql::{AggregateHdt, hdt_files};
 use http::StatusCode;
 use log::debug;
 use std::{
@@ -14,7 +14,9 @@ use std::{
     time::SystemTime,
 };
 
-/// The `.hdt` files directly in a directory, served as one dataset.
+/// The `.hdt` files directly in a directory, or in its subdirectories too
+/// with [`with_subdirectories`](Self::with_subdirectories), served as one
+/// dataset.
 ///
 /// Before each query it checks the files' paths, sizes and modification
 /// times, and re-reads their graph IRIs when anything changed, so files
@@ -22,6 +24,7 @@ use std::{
 pub struct HdtDirectory {
     store: AggregateHdt,
     location: PathBuf,
+    recursive: bool,
     /// The directory, canonicalized, and its files when last read.
     synced: Mutex<Option<(PathBuf, StoreFingerprint)>>,
 }
@@ -45,8 +48,17 @@ impl HdtDirectory {
         Self {
             store,
             location: location.into(),
+            recursive: false,
             synced: Mutex::new(None),
         }
+    }
+
+    /// Also serves the `.hdt` files in the directory's subdirectories, at
+    /// any depth. They are read before the first query.
+    #[must_use]
+    pub fn with_subdirectories(mut self) -> Self {
+        self.recursive = true;
+        self
     }
 }
 
@@ -56,7 +68,7 @@ impl DatasetSource for HdtDirectory {
             .location
             .canonicalize()
             .map_err(|e| internal_server_error(format!("error resolving data location: {e}")))?;
-        let fingerprint = compute_store_fingerprint(&canonical_location)?;
+        let fingerprint = compute_store_fingerprint(&canonical_location, self.recursive)?;
         {
             let guard = self
                 .synced
@@ -68,9 +80,12 @@ impl DatasetSource for HdtDirectory {
                 return Ok(());
             }
         }
-        self.store
-            .sync(&canonical_location)
-            .map_err(|e| internal_server_error(format!("error loading data files: {e}")))?;
+        let synced = if self.recursive {
+            self.store.sync_recursive(&canonical_location)
+        } else {
+            self.store.sync(&canonical_location)
+        };
+        synced.map_err(|e| internal_server_error(format!("error loading data files: {e}")))?;
         let mut guard = self
             .synced
             .lock()
@@ -129,45 +144,21 @@ struct StoreFingerprint {
 }
 
 pub(super) fn collect_hdt_paths(location: &Path) -> anyhow::Result<Vec<String>> {
-    let mut hdt_paths: Vec<String> = std::fs::read_dir(location)?
-        .filter_map(|entry| {
-            let entry = entry.ok()?;
-            if !entry.file_type().ok()?.is_file() {
-                return None;
-            }
-            let path = entry.path();
-            let is_hdt = path
-                .extension()
-                .and_then(|ext| ext.to_str())
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("hdt"));
-            if is_hdt {
-                Some(path.to_string_lossy().into_owned())
-            } else {
-                None
-            }
-        })
-        .collect();
-    hdt_paths.sort_unstable();
-    hdt_paths.dedup();
-    Ok(hdt_paths)
+    Ok(hdt_files(location, false)?
+        .into_iter()
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect())
 }
 
-fn compute_store_fingerprint(location: &Path) -> Result<StoreFingerprint, HttpError> {
-    let mut files = Vec::new();
-    for entry in std::fs::read_dir(location)
-        .map_err(|e| internal_server_error(format!("error reading data location: {e}")))?
-    {
-        let entry = entry.map_err(|e| {
-            internal_server_error(format!("error while iterating data location: {e}"))
-        })?;
-        let path = entry.path();
-        if !path
-            .extension()
-            .is_some_and(|extension| extension.to_string_lossy().eq_ignore_ascii_case("hdt"))
-        {
-            continue;
-        }
-        let metadata = entry.metadata().map_err(|e| {
+fn compute_store_fingerprint(
+    location: &Path,
+    recursive: bool,
+) -> Result<StoreFingerprint, HttpError> {
+    let paths = hdt_files(location, recursive)
+        .map_err(|e| internal_server_error(format!("error reading data location: {e}")))?;
+    let mut files = Vec::with_capacity(paths.len());
+    for path in paths {
+        let metadata = std::fs::metadata(&path).map_err(|e| {
             internal_server_error(format!(
                 "error reading HDT metadata for {}: {e}",
                 path.display()
@@ -185,6 +176,5 @@ fn compute_store_fingerprint(location: &Path) -> Result<StoreFingerprint, HttpEr
             len: metadata.len(),
         });
     }
-    files.sort_unstable_by(|left, right| left.path.cmp(&right.path));
     Ok(StoreFingerprint { files })
 }
