@@ -53,6 +53,14 @@ impl HdtDirectory {
         }
     }
 
+    /// The store it serves from, as last refreshed. Call
+    /// [`refresh`](DatasetSource::refresh) first to see the directory as it
+    /// is now, such as after writing a file into it.
+    #[must_use]
+    pub fn store(&self) -> &AggregateHdt {
+        &self.store
+    }
+
     /// Also serves the `.hdt` files in the directory's subdirectories, at
     /// any depth. They are read before the first query.
     #[must_use]
