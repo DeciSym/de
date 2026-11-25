@@ -73,6 +73,11 @@ enum Commands {
         /// Allow requests from web pages on any origin (CORS)
         #[arg(long)]
         cors: bool,
+        /// Cancel a query that runs longer than this many seconds, such as 30
+        /// or 0.5. One cancelled before its first results gets a 503, and one
+        /// cancelled later has its response cut off. Default: no limit.
+        #[arg(long, value_name = "SECONDS", value_parser = parse_seconds)]
+        timeout_s: Option<std::time::Duration>,
     },
     /// Use to view info about an HDT file
     View {
@@ -156,12 +161,24 @@ async fn run_command<W: Write>(
             location,
             bind,
             cors,
+            timeout_s,
         } => {
             let mut options = de::serve::ServiceOptions::default();
             options.cors = *cors;
+            options.query_timeout = *timeout_s;
             serve_until_stopped(location.to_owned(), bind.to_owned(), options).await
         }
     }
+}
+
+/// A number of seconds over 0, such as `30` or `0.5`.
+#[cfg(feature = "server")]
+fn parse_seconds(value: &str) -> Result<std::time::Duration, String> {
+    let seconds: f64 = value.parse().map_err(|e| format!("{e}"))?;
+    if seconds <= 0.0 {
+        return Err("must be over 0".into());
+    }
+    std::time::Duration::try_from_secs_f64(seconds).map_err(|e| e.to_string())
 }
 
 /// Runs the server until it fails, or until SIGINT or SIGTERM ends the

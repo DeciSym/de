@@ -2,7 +2,7 @@
 
 use super::{
     body::{RequestBody, ResponseBody},
-    dataset::{DatasetSelection, DatasetSource},
+    dataset::{DatasetSelection, DatasetSource, EvalOptions},
     error::{HttpError, bad_request, internal_server_error},
     negotiate::{query_results_content_negotiation, rdf_content_negotiation},
     protocol::base_url,
@@ -11,10 +11,14 @@ use http::{Request, Response, StatusCode, header::CONTENT_TYPE};
 use log::debug;
 use oxrdfio::{RdfFormat, RdfSerializer};
 use sparesults::{QueryResultsFormat, QueryResultsSerializer};
-use spareval::{QueryEvaluationError, QueryResults};
+use spareval::{CancellationToken, QueryEvaluationError, QueryResults};
 use std::{
     io::{self, Read, Write},
-    sync::{Arc, mpsc},
+    sync::{
+        Arc,
+        mpsc::{self, RecvTimeoutError, TryRecvError},
+    },
+    time::{Duration, Instant},
 };
 
 const QUERY_STREAM_CHUNK_SIZE: usize = 32 * 1024;
@@ -24,46 +28,113 @@ enum QueryStreamItem {
     Error(HttpError),
 }
 
-struct QueryStreamReader {
+/// The messages from a query's worker thread, until the query's deadline.
+/// Dropping it cancels the query, which then stops at its next step.
+struct QueryStream {
     receiver: mpsc::Receiver<QueryStreamItem>,
+    cancellation: CancellationToken,
+    /// When the query must end by, and the timeout that set it.
+    deadline: Option<(Instant, Duration)>,
+}
+
+/// Why a query's results stopped before their end.
+enum Ended {
+    Failed(HttpError),
+    TimedOut(Duration),
+}
+
+impl QueryStream {
+    /// The next chunk of results, `None` once there are no more, or why they
+    /// stopped. Results that are ready go out even past the deadline: the
+    /// query is cancelled only when it would have to be waited for, so its
+    /// timeout limits how long it runs, not how long a client takes to read.
+    fn next(&self) -> Result<Option<Vec<u8>>, Ended> {
+        let item = match self.receiver.try_recv() {
+            Ok(item) => Some(item),
+            Err(TryRecvError::Disconnected) => None,
+            Err(TryRecvError::Empty) => match self.deadline {
+                None => self.receiver.recv().ok(),
+                Some((deadline, timeout)) => {
+                    match self
+                        .receiver
+                        .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                    {
+                        Ok(item) => Some(item),
+                        Err(RecvTimeoutError::Disconnected) => None,
+                        Err(RecvTimeoutError::Timeout) => {
+                            self.cancellation.cancel();
+                            return Err(Ended::TimedOut(timeout));
+                        }
+                    }
+                }
+            },
+        };
+        match item {
+            Some(QueryStreamItem::Data(data)) => Ok(Some(data)),
+            Some(QueryStreamItem::Error(error)) => Err(Ended::Failed(error)),
+            None => Ok(None),
+        }
+    }
+}
+
+impl Drop for QueryStream {
+    fn drop(&mut self) {
+        self.cancellation.cancel();
+    }
+}
+
+fn timeout_message(timeout: Duration) -> String {
+    format!("the query ran past this server's {timeout:?} timeout")
+}
+
+impl From<Ended> for HttpError {
+    fn from(ended: Ended) -> Self {
+        match ended {
+            Ended::Failed(error) => error,
+            Ended::TimedOut(timeout) => {
+                HttpError::new(StatusCode::SERVICE_UNAVAILABLE, timeout_message(timeout))
+            }
+        }
+    }
+}
+
+impl From<Ended> for io::Error {
+    fn from(ended: Ended) -> Self {
+        match ended {
+            Ended::Failed(error) => io::Error::new(io::ErrorKind::InvalidData, error.message()),
+            Ended::TimedOut(timeout) => {
+                io::Error::new(io::ErrorKind::TimedOut, timeout_message(timeout))
+            }
+        }
+    }
+}
+
+/// A query's response body: its results, as the worker thread sends them.
+struct QueryStreamReader {
+    stream: QueryStream,
     buffer: Vec<u8>,
     position: usize,
 }
 
 impl QueryStreamReader {
-    fn new(receiver: mpsc::Receiver<QueryStreamItem>) -> Self {
-        Self::starting_with(receiver, Vec::new())
-    }
-
-    /// A reader that first returns `first`, which came from `receiver`.
-    fn starting_with(receiver: mpsc::Receiver<QueryStreamItem>, first: Vec<u8>) -> Self {
+    /// A reader that first returns `first`, which came from `stream`.
+    fn new(stream: QueryStream, first: Vec<u8>) -> Self {
         Self {
-            receiver,
+            stream,
             buffer: first,
             position: 0,
         }
     }
 
     fn fill_buffer(&mut self) -> io::Result<bool> {
-        loop {
-            match self.receiver.recv() {
-                Ok(QueryStreamItem::Data(data)) => {
-                    if data.is_empty() {
-                        continue;
-                    }
-                    self.buffer = data;
-                    self.position = 0;
-                    return Ok(true);
-                }
-                Ok(QueryStreamItem::Error(error)) => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        error.message().to_string(),
-                    ));
-                }
-                Err(_) => return Ok(false),
+        while let Some(data) = self.stream.next()? {
+            if !data.is_empty() {
+                self.buffer = data;
+                self.position = 0;
+                return Ok(true);
             }
         }
+        Ok(false)
     }
 }
 
@@ -185,7 +256,9 @@ pub(super) fn evaluate_sparql_query(
     query: &str,
     selection: DatasetSelection,
     request: &Request<RequestBody>,
+    timeout: Option<Duration>,
 ) -> Result<Response<ResponseBody>, HttpError> {
+    let started = Instant::now();
     debug!("query: {query}");
     let base = base_url(request);
     let mut parsed_query = crate::sparql::parse_query(query, &base)
@@ -205,6 +278,10 @@ pub(super) fn evaluate_sparql_query(
     );
 
     let (tx, rx) = mpsc::sync_channel::<QueryStreamItem>(4);
+    let cancellation = CancellationToken::new();
+    let eval_options = EvalOptions {
+        cancellation_token: cancellation.clone(),
+    };
     let source = Arc::clone(source);
     let output_media_type = if is_rdf_result {
         let graph_format = rdf_content_negotiation(request)?;
@@ -212,7 +289,7 @@ pub(super) fn evaluate_sparql_query(
             let outcome = (|| -> Result<(), HttpError> {
                 let dataset = source.open(&selection)?;
                 let results = dataset
-                    .evaluate(&parsed_query)
+                    .evaluate(&parsed_query, &eval_options)
                     .map_err(|e| evaluation_error(&e))?;
                 match results {
                     QueryResults::Graph(triples) => {
@@ -238,7 +315,7 @@ pub(super) fn evaluate_sparql_query(
             let outcome = (|| -> Result<(), HttpError> {
                 let dataset = source.open(&selection)?;
                 let results = dataset
-                    .evaluate(&parsed_query)
+                    .evaluate(&parsed_query, &eval_options)
                     .map_err(|e| evaluation_error(&e))?;
                 match results {
                     QueryResults::Solutions(solutions) => {
@@ -272,15 +349,22 @@ pub(super) fn evaluate_sparql_query(
     // The status goes out with the headers, so the response waits for the
     // worker's first message: a query that fails before its first results
     // then gets an error status, instead of a 200 whose body is cut off.
-    let body = match rx.recv() {
-        Ok(QueryStreamItem::Data(first)) => QueryStreamReader::starting_with(rx, first),
-        Ok(QueryStreamItem::Error(error)) => return Err(error),
+    let stream = QueryStream {
+        receiver: rx,
+        cancellation,
+        deadline: timeout.map(|timeout| (started + timeout, timeout)),
+    };
+    let first = match stream.next() {
+        Ok(Some(first)) => first,
         // The worker finished without sending anything: no results.
-        Err(_) => QueryStreamReader::new(rx),
+        Ok(None) => Vec::new(),
+        Err(ended) => return Err(ended.into()),
     };
     Response::builder()
         .header(CONTENT_TYPE, output_media_type)
-        .body(ResponseBody::Stream(Box::new(body)))
+        .body(ResponseBody::Stream(Box::new(QueryStreamReader::new(
+            stream, first,
+        ))))
         .map_err(internal_server_error)
 }
 
@@ -301,4 +385,76 @@ fn stream_error(context: &str, error: &io::Error) -> HttpError {
         StatusCode::INTERNAL_SERVER_ERROR,
         format!("{context}: {error}"),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A query's stream, as the worker thread would feed it, with a deadline
+    /// `timeout` from now.
+    fn query_stream(
+        timeout: Option<Duration>,
+    ) -> (
+        mpsc::SyncSender<QueryStreamItem>,
+        QueryStream,
+        CancellationToken,
+    ) {
+        let (tx, rx) = mpsc::sync_channel(4);
+        let cancellation = CancellationToken::new();
+        let stream = QueryStream {
+            receiver: rx,
+            cancellation: cancellation.clone(),
+            deadline: timeout.map(|timeout| (Instant::now() + timeout, timeout)),
+        };
+        (tx, stream, cancellation)
+    }
+
+    #[test]
+    fn waiting_past_the_deadline_cancels_the_query() {
+        let (_tx, stream, cancellation) = query_stream(Some(Duration::from_millis(50)));
+        let started = Instant::now();
+        let Err(ended) = stream.next() else {
+            panic!("results came from a worker that sent none");
+        };
+        assert!(started.elapsed() >= Duration::from_millis(50));
+        assert!(cancellation.is_cancelled());
+        assert_eq!(
+            HttpError::from(ended).status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
+
+    #[test]
+    fn a_timeout_after_the_first_results_cuts_the_body_off() {
+        let (_tx, stream, cancellation) = query_stream(Some(Duration::from_millis(50)));
+        let mut body = Vec::new();
+        let error = QueryStreamReader::new(stream, b"first".to_vec())
+            .read_to_end(&mut body)
+            .unwrap_err();
+        assert_eq!(body, b"first");
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(cancellation.is_cancelled());
+    }
+
+    #[test]
+    fn results_that_are_ready_go_out_past_the_deadline() {
+        let (tx, stream, _cancellation) = query_stream(Some(Duration::ZERO));
+        tx.send(QueryStreamItem::Data(b" rest".to_vec())).unwrap();
+        drop(tx);
+        let mut body = Vec::new();
+        QueryStreamReader::new(stream, b"first".to_vec())
+            .read_to_end(&mut body)
+            .unwrap();
+        assert_eq!(body, b"first rest");
+    }
+
+    #[test]
+    fn dropping_the_body_cancels_the_query() {
+        let (_tx, stream, cancellation) = query_stream(None);
+        let reader = QueryStreamReader::new(stream, b"first".to_vec());
+        assert!(!cancellation.is_cancelled());
+        drop(reader);
+        assert!(cancellation.is_cancelled());
+    }
 }

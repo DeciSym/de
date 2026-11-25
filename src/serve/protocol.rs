@@ -4,6 +4,7 @@ use super::{
     body::{RequestBody, ResponseBody},
     dataset::{DatasetSelection, DatasetSource},
     error::{HttpError, bad_request, internal_server_error},
+    service::ServiceOptions,
     stream::evaluate_sparql_query,
 };
 use http::{
@@ -88,7 +89,7 @@ pub(super) fn configure_and_evaluate_sparql_query(
     encoded: &[&[u8]],
     mut query: Option<String>,
     request: &Request<RequestBody>,
-    default_use_default_graph_as_union: bool,
+    options: &ServiceOptions,
 ) -> Result<Response<ResponseBody>, HttpError> {
     let mut default_graph_uris = Vec::new();
     let mut named_graph_uris = Vec::new();
@@ -116,7 +117,7 @@ pub(super) fn configure_and_evaluate_sparql_query(
         ));
     }
     if !names_graphs {
-        use_default_graph_as_union |= default_use_default_graph_as_union;
+        use_default_graph_as_union |= options.union_default_graph;
     }
     let query = query.ok_or_else(|| bad_request("You should set the 'query' parameter"))?;
     let selection = DatasetSelection {
@@ -124,7 +125,7 @@ pub(super) fn configure_and_evaluate_sparql_query(
         named_graph_uris,
         union_default_graph: use_default_graph_as_union,
     };
-    evaluate_sparql_query(source, &query, selection, request)
+    evaluate_sparql_query(source, &query, selection, request, options.query_timeout)
 }
 
 pub(super) fn content_type(request: &Request<RequestBody>) -> Option<String> {

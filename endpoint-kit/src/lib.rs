@@ -28,10 +28,12 @@
 //! report.check()?;
 //! ```
 //!
-//! The factory is called twice, with two fixture sets: small graphs for the
-//! protocol cases, then larger ones for the contracts. Use a fresh server
-//! each time. [`SpawnedServer`] and [`HttpTarget`] run the same cases against
-//! a server binary over a socket.
+//! The factory is called three times, each with a fixture set and the
+//! settings to configure the server with: small graphs for the protocol
+//! cases, larger ones for the contracts, then the slow graph for the timeout
+//! contract, the only server with a query timeout. Use a fresh server each
+//! time. [`SpawnedServer`] and [`HttpTarget`] run the same cases against a
+//! server binary over a socket.
 //!
 //! See `cases.rs` for where each case comes from, and `contracts.rs` for the
 //! runtime properties checked.
@@ -84,27 +86,21 @@ impl Default for Capabilities {
     }
 }
 
-/// How the factory should configure the server, where it can.
-#[derive(Clone, Debug)]
+/// How the factory should configure the server it builds, where it can.
+#[derive(Clone, Debug, Default)]
 pub struct ServiceSettings {
-    /// The longest a query may run. A server without a timeout ignores this,
-    /// and `contract/timeout_stops_evaluation` fails.
-    pub query_timeout: Duration,
-}
-
-impl Default for ServiceSettings {
-    fn default() -> Self {
-        Self {
-            query_timeout: Duration::from_secs(1),
-        }
-    }
+    /// The longest a query may run, or `None` for no limit. Only the timeout
+    /// contract's server gets one, so that a timeout can't end another
+    /// case's query. A server without a query timeout ignores it, and
+    /// `contract/timeout_stops_evaluation` fails.
+    pub query_timeout: Option<Duration>,
 }
 
 /// A configured run of the cases.
 pub struct Suite {
     label: String,
     capabilities: Capabilities,
-    settings: ServiceSettings,
+    query_timeout: Duration,
     allocator: Option<&'static PeakAlloc>,
     expected_failures: Vec<ExpectedFailure>,
 }
@@ -115,7 +111,7 @@ impl Suite {
         Self {
             label: label.into(),
             capabilities: Capabilities::default(),
-            settings: ServiceSettings::default(),
+            query_timeout: Duration::from_secs(1),
             allocator: None,
             expected_failures: Vec::new(),
         }
@@ -127,9 +123,11 @@ impl Suite {
         self
     }
 
+    /// The query timeout the timeout contract's server gets. Default: one
+    /// second.
     #[must_use]
-    pub fn settings(mut self, settings: ServiceSettings) -> Self {
-        self.settings = settings;
+    pub fn query_timeout(mut self, timeout: Duration) -> Self {
+        self.query_timeout = timeout;
         self
     }
 
@@ -155,21 +153,31 @@ impl Suite {
     {
         let dir = tempfile::Builder::new().prefix("endpoint-kit-").tempdir()?;
         let mut results = Vec::new();
-        for (fixtures, cases) in [
+        let timed = ServiceSettings {
+            query_timeout: Some(self.query_timeout),
+        };
+        for (fixtures, cases, settings) in [
             (
                 fixtures::protocol(&dir.path().join("protocol"))?,
                 cases::protocol_cases(),
+                ServiceSettings::default(),
             ),
             (
                 fixtures::contracts(&dir.path().join("contracts"))?,
                 contracts::contract_cases(),
+                ServiceSettings::default(),
+            ),
+            (
+                fixtures::timeout(&dir.path().join("timeout"))?,
+                contracts::timeout_cases(),
+                timed,
             ),
         ] {
-            let target: Arc<dyn Target> = Arc::from(factory(&fixtures, &self.settings)?);
+            let target: Arc<dyn Target> = Arc::from(factory(&fixtures, &settings)?);
             let _stop = StopOnDrop(Arc::clone(&target));
             let ctx = cases::Ctx {
                 target: &target,
-                settings: &self.settings,
+                settings: &settings,
                 allocator: self.allocator,
             };
             for case in cases {

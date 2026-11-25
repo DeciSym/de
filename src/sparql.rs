@@ -1,6 +1,8 @@
 use crate::graph_iri::{insert_graph_mapping, resolve_hdt_graph_path, resolve_named_graph_path};
 use sparesults::{QueryResultsFormat, QueryResultsSerializer};
-use spareval::{InternalQuad, QueryEvaluationError, QueryEvaluator, QueryableDataset};
+use spareval::{
+    CancellationToken, InternalQuad, QueryEvaluationError, QueryEvaluator, QueryableDataset,
+};
 use spargebra::term::{BlankNode, NamedNode, Term};
 use spargebra::{Query, SparqlParser};
 use std::{
@@ -785,6 +787,22 @@ where
     evaluate_query_with_debug_plan(parsed, dataset, debug_plan)
 }
 
+/// Evaluates `parsed` over `dataset`, stopping with
+/// [`QueryEvaluationError::Cancelled`] once `cancellation_token` is cancelled.
+pub fn query_parsed_with_cancellation<'a, D>(
+    parsed: &Query,
+    dataset: D,
+    cancellation_token: CancellationToken,
+) -> Result<spareval::QueryResults<'a>, QueryEvaluationError>
+where
+    D: QueryableDataset<'a>,
+{
+    evaluator()
+        .with_cancellation_token(cancellation_token)
+        .prepare(parsed)
+        .execute(dataset)
+}
+
 pub fn query_with_debug_plan<'a, D>(
     q: &str,
     dataset: D,
@@ -867,11 +885,7 @@ fn evaluate_query_with_debug_plan<'a, D>(
 where
     D: QueryableDataset<'a>,
 {
-    // NOTE: previously this ran .without_optimizations() in order to pass W3C suites, but is no
-    // longer needed with current spareval revision. With optimizations, query responses are
-    // significantly reduced.
-    // TODO: monitor for optimizer-specific regressions, perhaps introducing toggle
-    let evaluator = QueryEvaluator::new();
+    let evaluator = evaluator();
     if debug_plan {
         let (results, explanation) = evaluator.prepare(parsed).explain(dataset);
         let mut json = Vec::new();
@@ -883,6 +897,15 @@ where
     } else {
         evaluator.prepare(parsed).execute(dataset)
     }
+}
+
+/// The evaluator every query runs with.
+fn evaluator() -> QueryEvaluator {
+    // NOTE: previously this ran .without_optimizations() in order to pass W3C suites, but is no
+    // longer needed with current spareval revision. With optimizations, query responses are
+    // significantly reduced.
+    // TODO: monitor for optimizer-specific regressions, perhaps introducing toggle
+    QueryEvaluator::new()
 }
 
 #[cfg(test)]
