@@ -240,8 +240,8 @@ struct Limits {
 /// runs on threads of its own until the returned [`AxumServer`] is shut down
 /// or dropped.
 ///
-/// Like the oxhttp server, it sends `config.server_name` as the `Server`
-/// header and serves at most `config.max_connections` connections at once. A
+/// It sends `config.server_name` as the `Server` header, and serves at most
+/// `config.max_connections` connections at once. A
 /// client gets `config.timeout` to send a request's headers, and to take each
 /// next part of a response: one that stops reading is disconnected, which
 /// cancels its query.

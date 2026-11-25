@@ -1,23 +1,14 @@
-//! Running a [`SparqlService`] over HTTP with oxhttp, which `de serve` did
-//! before it moved to [`axum`](super::axum), and the service `de serve` runs.
-//!
-//! This module and [`axum`](super::axum) are the only ones that know an HTTP
-//! server: the service takes and returns its own body types, which they
-//! convert.
+//! What a server around a [`SparqlService`] shares, whatever runs it: its
+//! settings, and the service `de serve` runs. [`axum`](super::axum) runs it.
 
 use super::{
-    body::{RequestBody, ResponseBody},
     hdt_dir::{HdtDirectory, collect_hdt_paths},
     service::{ServiceOptions, SparqlService},
     ui::Yasgui,
 };
 use crate::sparql::AggregateHdt;
-use http::{Request, Response};
 use log::warn;
-use oxhttp::{ListeningServer, Server, model::Body};
-use std::{
-    io, net::ToSocketAddrs, path::Path, sync::Arc, thread::available_parallelism, time::Duration,
-};
+use std::{io, path::Path, thread::available_parallelism, time::Duration};
 
 /// How the HTTP server runs.
 #[derive(Clone, Debug)]
@@ -25,11 +16,10 @@ use std::{
 pub struct ServerConfig {
     /// The `Server` header. Default: `de/` and this crate's version.
     pub server_name: String,
-    /// How long a connection may wait on the client. The axum server gives a
-    /// client this long to send a request's headers, and to take each next
-    /// part of a response, and gives open connections this long to finish
-    /// when it shuts down; the oxhttp server applies it to every read and
-    /// write. Default: one minute.
+    /// How long a connection may wait on the client: to send a request's
+    /// headers, and to take each next part of a response. Also how long open
+    /// connections get to finish when the server shuts down. Default: one
+    /// minute.
     pub timeout: Duration,
     /// The most connections served at once. Default: 128 per CPU.
     pub max_connections: Option<usize>,
@@ -45,54 +35,12 @@ impl Default for ServerConfig {
     }
 }
 
-/// Starts serving `service` on `bind` (a host and port), and returns once it
-/// listens. The server runs on threads of its own until the process exits.
-pub fn spawn(
-    service: SparqlService,
-    bind: &str,
-    config: &ServerConfig,
-) -> anyhow::Result<ListeningServer> {
-    let service = Arc::new(service);
-    let max_connections = max_connections(config)?;
-    let mut server = Server::new(move |request| handle(&service, request))
-        .with_global_timeout(config.timeout)
-        .with_server_name(config.server_name.clone())?
-        .with_max_concurrent_connections(max_connections);
-    for socket in bind.to_socket_addrs()? {
-        server = server.bind(socket);
-    }
-    Ok(server.spawn()?)
-}
-
 /// The most connections `config` allows at once.
 pub(super) fn max_connections(config: &ServerConfig) -> io::Result<usize> {
     match config.max_connections {
         Some(max) => Ok(max),
         None => Ok(available_parallelism()?.get() * 128),
     }
-}
-
-/// Answers one oxhttp request with `service`, converting the bodies.
-fn handle(service: &SparqlService, request: &mut Request<Body>) -> Response<Body> {
-    let (parts, body) = std::mem::take(request).into_parts();
-    let mut request = Request::from_parts(parts, RequestBody::from_reader(body));
-    service.handle(&mut request).map(|body| match body {
-        ResponseBody::Empty => Body::empty(),
-        ResponseBody::Bytes(bytes) => Body::from(bytes),
-        ResponseBody::Stream(reader) => Body::from_read(reader),
-    })
-}
-
-/// `de serve`: the HDT files in `location`, with the query page, on `bind`,
-/// until the process exits.
-pub fn serve(location: &str, bind: &str, options: ServiceOptions) -> anyhow::Result<()> {
-    let service = hdt_service(location, options)?;
-    let server = spawn(service, bind, &ServerConfig::default())?;
-    #[cfg(target_os = "linux")]
-    systemd_notify_ready()?;
-    eprintln!("Listening for requests at http://{bind}");
-    server.join()?;
-    Ok(())
 }
 
 /// `de serve`'s service: the HDT files in `location`, with the query page.

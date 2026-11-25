@@ -551,7 +551,6 @@ dependencies = [
  "hyper",
  "hyper-util",
  "log",
- "oxhttp",
  "oxrdf",
  "oxrdfio",
  "pprof",
@@ -1428,17 +1427,6 @@ name = "oorandom"
 version = "11.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6790f58c7ff633d8771f42965289203411a5e5c68388703c06e14f24770b41e"
-
-[[package]]
-name = "oxhttp"
-version = "0.3.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "01d4ba13b109f473f649aa71dfc8a83c41cc0cd3eaf5f6adfe2a18046b985d8a"
-dependencies = [
- "http",
- "httparse",
- "url",
-]
 
 [[package]]
 name = "oxilangtag"
