@@ -593,6 +593,45 @@ mod server_tests {
         Ok(())
     }
 
+    /// A server's own routes can share the service's `HdtDirectory`: after
+    /// they write a file into the directory, a refresh shows it to both.
+    #[tokio::test]
+    async fn test_shared_hdt_directory() -> anyhow::Result<()> {
+        use std::sync::Arc;
+
+        let (tmp_dir, _store) = setup_test_store().await?;
+        let book2 = tmp_dir.path().join("book2.hdt");
+        let aside = tmp_dir.path().join("book2.hdt.aside");
+        std::fs::rename(&book2, &aside)?;
+
+        let dir = Arc::new(HdtDirectory::new(tmp_dir.path())?);
+        let service = SparqlService::new(Arc::clone(&dir));
+        let query: String =
+            url::form_urlencoded::byte_serialize(format!("ASK {{ {BOOK2_IRI} ?p ?o }}").as_bytes())
+                .collect();
+        let ask = |service: &SparqlService| -> anyhow::Result<bool> {
+            let mut request = Request::get(format!("http://localhost/query?query={query}"))
+                .header("Accept", "application/sparql-results+json")
+                .body(RequestBody::empty())?;
+            parse_boolean_json_result(&read_body(handle_response(
+                service.try_handle(&mut request),
+            )?)?)
+        };
+        assert!(!ask(&service)?);
+
+        // What a route that writes a graph does: the file, then a refresh.
+        std::fs::rename(&aside, &book2)?;
+        de::serve::DatasetSource::refresh(dir.as_ref())?;
+        let graphs = dir.store().graph_names()?;
+        assert!(
+            graphs.iter().any(|graph| graph.ends_with("book2.hdt")),
+            "{graphs:?}"
+        );
+        assert!(ask(&service)?);
+
+        Ok(())
+    }
+
     /// The HDT files in a directory's subdirectories are served with
     /// `with_subdirectories`, and only then.
     #[tokio::test]

@@ -3,6 +3,7 @@
 use super::error::HttpError;
 use spareval::{CancellationToken, QueryEvaluationError, QueryResults, QueryableDataset};
 use spargebra::Query;
+use std::sync::Arc;
 
 /// The dataset a request asks for, from the SPARQL protocol's parameters.
 ///
@@ -42,6 +43,18 @@ pub trait DatasetSource: Send + Sync + 'static {
     /// The dataset lives until the results have been streamed, so it can
     /// hold whatever must stay open until then.
     fn open(&self, selection: &DatasetSelection) -> Result<Box<dyn ServeDataset + '_>, HttpError>;
+}
+
+/// A source a server shares, such as with routes of its own that write to it:
+/// the service holds one `Arc`, and the routes another.
+impl<S: DatasetSource + ?Sized> DatasetSource for Arc<S> {
+    fn refresh(&self) -> Result<(), HttpError> {
+        (**self).refresh()
+    }
+
+    fn open(&self, selection: &DatasetSelection) -> Result<Box<dyn ServeDataset + '_>, HttpError> {
+        (**self).open(selection)
+    }
 }
 
 /// A dataset opened for one query.
