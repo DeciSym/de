@@ -29,20 +29,10 @@ use std::time::Duration;
 static ALLOCATOR: PeakAlloc = PeakAlloc::new();
 
 /// The cases `de serve` fails today, and why.
-const EXPECTED_FAILURES: &[(&str, &str)] = &[
-    (
-        "w3c/query_content_type_describe",
-        "graph results default to N-Quads",
-    ),
-    (
-        "w3c/query_content_type_construct",
-        "graph results default to N-Quads",
-    ),
-    (
-        "contract/disconnect_stops_evaluation",
-        "oxhttp notices a client left only when it next writes, and the response starts with the first result",
-    ),
-];
+const EXPECTED_FAILURES: &[(&str, &str)] = &[(
+    "contract/disconnect_stops_evaluation",
+    "oxhttp notices a client left only when it next writes, and the response starts with the first result",
+)];
 
 /// Both runs turn CORS on, so that the CORS cases check `--cors`.
 fn suite(label: &str) -> Suite {

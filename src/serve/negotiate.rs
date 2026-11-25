@@ -10,18 +10,23 @@ use oxrdfio::RdfFormat;
 use sparesults::QueryResultsFormat;
 use std::str::FromStr;
 
+/// The format of a graph: the results of a CONSTRUCT or DESCRIBE, or the
+/// service description. Without a specific type, it's N-Triples, or Turtle
+/// for `text/*`. The SPARQL 1.1 Protocol answers these with a graph format;
+/// N-Quads, which `oxigraph serve` defaults to, is a dataset format, though
+/// it writes triples as the same bytes.
 pub(super) fn rdf_content_negotiation(
     request: &Request<RequestBody>,
 ) -> Result<RdfFormat, HttpError> {
     content_negotiation(
         request,
         RdfFormat::from_media_type,
-        RdfFormat::NQuads,
+        RdfFormat::NTriples,
         &[
-            ("application", RdfFormat::NQuads),
-            ("text", RdfFormat::NQuads),
+            ("application", RdfFormat::NTriples),
+            ("text", RdfFormat::Turtle),
         ],
-        "application/n-quads or text/turtle",
+        "application/n-triples or text/turtle",
     )
 }
 

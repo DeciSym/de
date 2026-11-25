@@ -541,6 +541,58 @@ mod server_tests {
         )
     }
 
+    /// Graph results default to N-Triples, or Turtle for `text/*`, and a
+    /// specific type is still honored.
+    #[tokio::test]
+    async fn test_graph_result_formats() -> anyhow::Result<()> {
+        let (tmp_dir, store) = setup_test_store().await?;
+        let construct: String =
+            url::form_urlencoded::byte_serialize(b"CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }")
+                .collect();
+
+        for (accept, expected) in [
+            (None, "application/n-triples"),
+            (Some("*/*"), "application/n-triples"),
+            (Some("application/*"), "application/n-triples"),
+            (Some("text/*"), "text/turtle"),
+            (Some("application/n-quads"), "application/n-quads"),
+            (
+                Some("text/turtle;q=0.5, application/rdf+xml"),
+                "application/rdf+xml",
+            ),
+        ] {
+            for uri in [
+                format!("http://localhost/query?query={construct}"),
+                // The service description is a graph too.
+                "http://localhost/query".to_string(),
+            ] {
+                let mut request = Request::get(&uri);
+                if let Some(accept) = accept {
+                    request = request.header("Accept", accept);
+                }
+                let mut request = request.body(RequestBody::empty())?;
+                let response = handle_response(handle(&mut request, &store, tmp_dir.path()))?;
+                assert_eq!(
+                    response.headers().get("Content-Type"),
+                    Some(&http::HeaderValue::from_static(expected)),
+                    "{uri} with Accept {accept:?}"
+                );
+            }
+        }
+
+        // N-Triples for the default: the same lines N-Quads would have had.
+        let mut request = Request::get(format!("http://localhost/query?query={construct}"))
+            .body(RequestBody::empty())?;
+        let body = read_body(handle_response(handle(
+            &mut request,
+            &store,
+            tmp_dir.path(),
+        ))?)?;
+        assert!(body.contains(&format!("{BOOK1_IRI} {DC_TITLE} \"SPARQL Tutorial\" .")));
+
+        Ok(())
+    }
+
     /// A method `/query` doesn't accept is 405, with `Allow` naming those it
     /// does, while `/update` is 501 whatever the method.
     #[tokio::test]
