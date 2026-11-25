@@ -59,7 +59,7 @@ rayon = "1.11.0"
 sparesults = "0.3"
 spareval = { version = "=0.2.9", features = ["sep-0002", "sep-0006"] }
 spargebra = "0.4"
-reasonable = "0.4.3"
+reasonable = "0.5.0-a2"
 tempfile = {version = "3.27"}
 thiserror = "2.0"
 tokio = { version = "1.49", default-features = false, features = ["full"] }
@@ -108,6 +108,6 @@ sparopt = { git = "https://github.com/DeciSym/oxigraph.git", rev = "a5950fc4af10
 spargebra = { git = "https://github.com/DeciSym/oxigraph.git", rev = "a5950fc4af10a2ea4e8927b47d01660bbfb49355" }
 sparesults = { git = "https://github.com/DeciSym/oxigraph.git", rev = "a5950fc4af10a2ea4e8927b47d01660bbfb49355" }
 oxrdfxml = { git = "https://github.com/DeciSym/oxigraph.git", rev = "a5950fc4af10a2ea4e8927b47d01660bbfb49355" }
-reasonable = { git = "https://github.com/DeciSym/reasonable.git", rev = "c961cfc1c45a09b218d8910c387b8c5c4ef3df03" }
+reasonable = { git = "https://github.com/DeciSym/reasonable.git", rev = "2a6ee89d2e62474f5adbe80efab3a31452cba99d" }
 hdt = { git = "https://github.com/DeciSym/hdt.git", rev = "919c725fd5f0e42662f9e3824e3f96d86baa8bb4" }
 

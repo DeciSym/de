@@ -588,12 +588,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "disjoint-sets"
-version = "0.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4ccbbca7d6a247007ca2535c616d4bb4a5fcad176ef0218671f96b88c52c3d34"
-
-[[package]]
 name = "displaydoc"
 version = "0.2.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -726,6 +720,12 @@ dependencies = [
  "miniz_oxide 0.9.1",
  "zlib-rs",
 ]
+
+[[package]]
+name = "foldhash"
+version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d9c4f5dac5e15c24eb999c26181a6ca40b39fe946cbe4c263c7209467bc83af2"
 
 [[package]]
 name = "foldhash"
@@ -914,13 +914,22 @@ dependencies = [
 
 [[package]]
 name = "hashbrown"
+version = "0.15.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9229cfe53dfd69f0609a49f65461bd93001ea1ef889cd5529dd176593f5338a1"
+dependencies = [
+ "foldhash 0.1.5",
+]
+
+[[package]]
+name = "hashbrown"
 version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
 dependencies = [
  "allocator-api2",
  "equivalent",
- "foldhash",
+ "foldhash 0.2.0",
 ]
 
 [[package]]
@@ -938,7 +947,7 @@ dependencies = [
  "fs2",
  "getrandom 0.2.17",
  "getrandom 0.3.4",
- "hashbrown",
+ "hashbrown 0.17.1",
  "log",
  "memmap2",
  "oxrdf",
@@ -1178,7 +1187,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cc4e190f5d26ca7051642629da2c52fc03bde85a03197c99408dcd291734c855"
 dependencies = [
  "equivalent",
- "hashbrown",
+ "hashbrown 0.17.1",
 ]
 
 [[package]]
@@ -1823,11 +1832,11 @@ dependencies = [
 
 [[package]]
 name = "reasonable"
-version = "0.4.4"
-source = "git+https://github.com/DeciSym/reasonable.git?rev=c961cfc1c45a09b218d8910c387b8c5c4ef3df03#c961cfc1c45a09b218d8910c387b8c5c4ef3df03"
+version = "0.5.0-a2"
+source = "git+https://github.com/DeciSym/reasonable.git?rev=2a6ee89d2e62474f5adbe80efab3a31452cba99d#0279bf90c459761ca8d15c903fbcdd0d895fa1f1"
 dependencies = [
  "datafrog",
- "disjoint-sets",
+ "hashbrown 0.15.5",
  "log",
  "oxrdf",
  "quick-xml 0.42.0",
