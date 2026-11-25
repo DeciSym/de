@@ -181,11 +181,11 @@ fn parse_seconds(value: &str) -> Result<std::time::Duration, String> {
     std::time::Duration::try_from_secs_f64(seconds).map_err(|e| e.to_string())
 }
 
-/// Runs the server until it fails, or until SIGINT or SIGTERM ends the
-/// process with exit status 0.
+/// Runs `de serve` on axum until SIGINT or SIGTERM, then shuts the server
+/// down: it stops accepting connections, lets open ones finish their
+/// responses, and the process exits with status 0.
 ///
-/// The server has no shutdown of its own, so the signal handler is what makes
-/// the exit clean rather than a kill: systemd's stop then reports success,
+/// A clean exit matters beyond tidiness: systemd's stop then reports success,
 /// and tools that record a process until it exits, such as heaptrack in
 /// `scripts/bench-memory.py`, get a complete recording.
 #[cfg(feature = "server")]
@@ -194,11 +194,12 @@ async fn serve_until_stopped(
     bind: String,
     options: de::serve::ServiceOptions,
 ) -> anyhow::Result<()> {
-    let server = tokio::task::spawn_blocking(move || de::serve::serve(&location, &bind, options));
-    tokio::select! {
-        result = server => result?,
-        () = shutdown_signal() => Ok(()),
-    }
+    let server =
+        tokio::task::spawn_blocking(move || de::serve::axum::start(&location, &bind, options))
+            .await??;
+    shutdown_signal().await;
+    tokio::task::spawn_blocking(move || server.shutdown()).await?;
+    Ok(())
 }
 
 #[cfg(feature = "server")]

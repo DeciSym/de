@@ -1,4 +1,5 @@
-//! Running a [`SparqlService`] over HTTP with oxhttp, and `de serve`.
+//! Running a [`SparqlService`] over HTTP with oxhttp, which `de serve` did
+//! before it moved to [`axum`](super::axum), and the service `de serve` runs.
 //!
 //! This module and [`axum`](super::axum) are the only ones that know an HTTP
 //! server: the service takes and returns its own body types, which they
@@ -24,7 +25,11 @@ use std::{
 pub struct ServerConfig {
     /// The `Server` header. Default: `de/` and this crate's version.
     pub server_name: String,
-    /// How long a connection may wait on a read or a write. Default: one minute.
+    /// How long a connection may wait on the client. The axum server gives a
+    /// client this long to send a request's headers, and to take each next
+    /// part of a response, and gives open connections this long to finish
+    /// when it shuts down; the oxhttp server applies it to every read and
+    /// write. Default: one minute.
     pub timeout: Duration,
     /// The most connections served at once. Default: 128 per CPU.
     pub max_connections: Option<usize>,
@@ -81,6 +86,20 @@ fn handle(service: &SparqlService, request: &mut Request<Body>) -> Response<Body
 /// `de serve`: the HDT files in `location`, with the query page, on `bind`,
 /// until the process exits.
 pub fn serve(location: &str, bind: &str, options: ServiceOptions) -> anyhow::Result<()> {
+    let service = hdt_service(location, options)?;
+    let server = spawn(service, bind, &ServerConfig::default())?;
+    #[cfg(target_os = "linux")]
+    systemd_notify_ready()?;
+    eprintln!("Listening for requests at http://{bind}");
+    server.join()?;
+    Ok(())
+}
+
+/// `de serve`'s service: the HDT files in `location`, with the query page.
+pub(super) fn hdt_service(
+    location: &str,
+    options: ServiceOptions,
+) -> anyhow::Result<SparqlService> {
     let hdt_paths = collect_hdt_paths(Path::new(location))?;
 
     eprintln!("Found {} HDT files in {}", hdt_paths.len(), location);
@@ -96,19 +115,16 @@ pub fn serve(location: &str, bind: &str, options: ServiceOptions) -> anyhow::Res
         AggregateHdt::new(&hdt_paths)?
     };
 
-    let service = SparqlService::new(HdtDirectory::with_store(store, location))
-        .with_options(options)
-        .with_routes(Yasgui);
-    let server = spawn(service, bind, &ServerConfig::default())?;
-    #[cfg(target_os = "linux")]
-    systemd_notify_ready()?;
-    eprintln!("Listening for requests at http://{bind}");
-    server.join()?;
-    Ok(())
+    Ok(
+        SparqlService::new(HdtDirectory::with_store(store, location))
+            .with_options(options)
+            .with_routes(Yasgui),
+    )
 }
 
+/// Tells systemd, or whatever set `NOTIFY_SOCKET`, that the server listens.
 #[cfg(target_os = "linux")]
-fn systemd_notify_ready() -> io::Result<()> {
+pub(super) fn systemd_notify_ready() -> io::Result<()> {
     use std::env;
 
     if let Some(path) = env::var_os("NOTIFY_SOCKET") {

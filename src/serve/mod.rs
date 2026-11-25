@@ -3,9 +3,10 @@
 //! A [`SparqlService`] answers requests from a [`DatasetSource`], such as an
 //! [`HdtDirectory`], with [`Routes`] of its own tried first, such as the
 //! [`Yasgui`] query page. It takes and returns its own [`RequestBody`] and
-//! [`ResponseBody`], so it runs on any HTTP server: [`spawn`] and [`serve`]
-//! run it on oxhttp, and [`axum::router`] and [`axum::spawn`] on axum and
-//! hyper.
+//! [`ResponseBody`], so it runs on any HTTP server. `de serve` runs it on
+//! axum and hyper with [`axum::start`]; [`axum::router`] mounts it in an axum
+//! app of a server's own, and [`axum::spawn`] runs it on a server of its own.
+//! [`spawn`] and [`serve`] run it on oxhttp, which `de serve` no longer uses.
 //!
 //! ```no_run
 //! use de::serve::{HdtDirectory, ServerConfig, ServiceOptions, SparqlService, Yasgui};
@@ -15,7 +16,9 @@
 //! let service = SparqlService::new(HdtDirectory::new("data")?)
 //!     .with_options(options)
 //!     .with_routes(Yasgui);
-//! de::serve::spawn(service, "localhost:7878", &ServerConfig::default())?.join()?;
+//! let server = de::serve::axum::spawn(service, "localhost:7878", &ServerConfig::default())?;
+//! // Serves until shut down, or dropped.
+//! server.shutdown();
 //! # Ok::<(), anyhow::Error>(())
 //! ```
 //!

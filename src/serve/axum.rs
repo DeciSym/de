@@ -9,8 +9,8 @@
 use super::{
     body::{RequestBody, ResponseBody},
     error::{HttpError, bad_request},
-    server::{ServerConfig, max_connections},
-    service::SparqlService,
+    server::{ServerConfig, hdt_service, max_connections},
+    service::{ServiceOptions, SparqlService},
 };
 use ::axum::{
     Router, body::Body, extract::Request as AxumRequest, middleware,
@@ -31,15 +31,20 @@ use hyper_util::{
 use log::warn;
 use spareval::CancellationToken;
 use std::{
-    io::{self, Cursor, Read},
+    future::Future,
+    io::{self, Cursor, IoSlice, Read},
     net::{SocketAddr, ToSocketAddrs},
+    pin::Pin,
     sync::Arc,
+    task::{Context, Poll},
     thread,
     time::Duration,
 };
 use tokio::{
+    io::{AsyncRead, AsyncWrite, ReadBuf},
     net::TcpListener,
     sync::{Semaphore, mpsc, oneshot, watch},
+    time::Sleep,
 };
 
 /// How many chunks of a streamed body wait between the thread that reads it
@@ -224,8 +229,9 @@ impl Drop for AxumServer {
 #[derive(Clone, Copy)]
 struct Limits {
     max_connections: usize,
-    /// How long a client may take to send a request's headers, and how long
-    /// open connections get to finish when the server shuts down.
+    /// How long a client may take to send a request's headers or to take the
+    /// next part of a response, and how long open connections get to finish
+    /// when the server shuts down.
     timeout: Duration,
 }
 
@@ -235,8 +241,10 @@ struct Limits {
 /// or dropped.
 ///
 /// Like the oxhttp server, it sends `config.server_name` as the `Server`
-/// header, serves at most `config.max_connections` connections at once, and
-/// gives a client `config.timeout` to send a request's headers.
+/// header and serves at most `config.max_connections` connections at once. A
+/// client gets `config.timeout` to send a request's headers, and to take each
+/// next part of a response: one that stops reading is disconnected, which
+/// cancels its query.
 pub fn spawn(
     service: SparqlService,
     bind: &str,
@@ -318,6 +326,21 @@ pub fn spawn(
     }
 }
 
+/// `de serve` on axum: the HDT files in `location`, with the query page, on
+/// `bind`. Returns the running server once it listens, having told systemd,
+/// or whatever set `NOTIFY_SOCKET`.
+pub fn start(location: &str, bind: &str, options: ServiceOptions) -> anyhow::Result<AxumServer> {
+    let server = spawn(
+        hdt_service(location, options)?,
+        bind,
+        &ServerConfig::default(),
+    )?;
+    #[cfg(target_os = "linux")]
+    super::server::systemd_notify_ready()?;
+    eprintln!("Listening for requests at http://{bind}");
+    Ok(server)
+}
+
 /// Accepts connections on `listeners` until shutdown is requested, then
 /// waits for the open ones to finish, for up to the timeout.
 async fn run(
@@ -382,6 +405,7 @@ async fn accept(
             _ = stopping.changed() => return,
         };
         let _ = stream.set_nodelay(true);
+        let stream = WriteTimeout::new(stream, header_timeout);
         let service = TowerToHyperService::new(app.clone());
         let mut stopping = stopping.clone();
         tokio::spawn(async move {
@@ -400,6 +424,101 @@ async fn accept(
                 }
             }
         });
+    }
+}
+
+/// A connection whose writes fail once one has waited `timeout` for the
+/// client to take more. Reads have no timeout: hyper reads while it streams
+/// a response, to notice a client that goes away, and a long answer is no
+/// reason to drop the connection.
+struct WriteTimeout<T> {
+    inner: T,
+    timeout: Duration,
+    /// Set while a write waits for the client.
+    waiting: Option<Pin<Box<Sleep>>>,
+}
+
+impl<T> WriteTimeout<T> {
+    fn new(inner: T, timeout: Duration) -> Self {
+        Self {
+            inner,
+            timeout,
+            waiting: None,
+        }
+    }
+
+    /// What a write that `inner` left pending returns: still pending, or an
+    /// error once it has waited `timeout`.
+    fn wait<R>(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<R>> {
+        let timeout = self.timeout;
+        let waiting = self
+            .waiting
+            .get_or_insert_with(|| Box::pin(tokio::time::sleep(timeout)));
+        match waiting.as_mut().poll(cx) {
+            Poll::Ready(()) => Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!("the client took nothing for {timeout:?}"),
+            ))),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+
+    /// Passes on a write's outcome, waiting while it's pending.
+    fn written<R>(
+        &mut self,
+        cx: &mut Context<'_>,
+        written: Poll<io::Result<R>>,
+    ) -> Poll<io::Result<R>> {
+        match written {
+            Poll::Ready(result) => {
+                self.waiting = None;
+                Poll::Ready(result)
+            }
+            Poll::Pending => self.wait(cx),
+        }
+    }
+}
+
+impl<T: AsyncRead + Unpin> AsyncRead for WriteTimeout<T> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.inner).poll_read(cx, buf)
+    }
+}
+
+impl<T: AsyncWrite + Unpin> AsyncWrite for WriteTimeout<T> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        let written = Pin::new(&mut self.inner).poll_write(cx, buf);
+        self.written(cx, written)
+    }
+
+    fn poll_write_vectored(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        let written = Pin::new(&mut self.inner).poll_write_vectored(cx, bufs);
+        self.written(cx, written)
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.inner.is_write_vectored()
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let flushed = Pin::new(&mut self.inner).poll_flush(cx);
+        self.written(cx, flushed)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.inner).poll_shutdown(cx)
     }
 }
 
@@ -527,6 +646,24 @@ mod tests {
             .err()
             .expect("bound an address that was taken");
         assert!(error.to_string().contains("in use"), "{error:#}");
+    }
+
+    /// A write the client doesn't take fails after the timeout; one it takes
+    /// in time doesn't.
+    #[tokio::test]
+    async fn a_write_the_client_doesnt_take_times_out() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let (server, mut client) = tokio::io::duplex(16);
+        let mut server = WriteTimeout::new(server, Duration::from_millis(100));
+        server.write_all(b"fits").await.unwrap();
+        let mut taken = [0; 4];
+        client.read_exact(&mut taken).await.unwrap();
+
+        let started = std::time::Instant::now();
+        let error = server.write_all(&[0; 64]).await.unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(started.elapsed() >= Duration::from_millis(100));
     }
 
     /// A server of its own: it names itself, and stops listening on shutdown.
