@@ -109,6 +109,10 @@ impl SparqlService {
 
     /// Answers `request`: with an error response if it fails, and with CORS
     /// headers if they are enabled.
+    ///
+    /// A spareval `CancellationToken` in the request's extensions cancels
+    /// its query: an HTTP server can cancel it when the client goes away, as
+    /// [`axum::router`](super::axum::router) does.
     pub fn handle(&self, request: &mut Request<RequestBody>) -> Response<ResponseBody> {
         if self.options.cors && *request.method() == Method::OPTIONS {
             return cors_preflight(request);

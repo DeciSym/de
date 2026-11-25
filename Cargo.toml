@@ -40,14 +40,18 @@ required-features = ["server"]
 [dependencies]
 anyhow = { version = "1.0", default-features = false }
 async-trait = "0.1"
+axum = { version = "0.8", optional = true, default-features = false }
 bzip2 = "0.6"
 clap = { version = "4.5" }
 clap-verbosity-flag = { version = "3.0", default-features = false, features = ["log"] }
 env_logger = { version = "0.11", default-features = false }
 exitcode = "1.1"
 flate2 = "1"
+futures-util = { version = "0.3", optional = true, default-features = false }
 hdt = { version = "0.7.3", default-features = false, features = ["nt", "cache"] }
 http = { version = "1.4", optional = true }
+hyper = { version = "1", optional = true, features = ["server", "http1"] }
+hyper-util = { version = "0.1", optional = true, features = ["tokio", "service"] }
 log = "0.4"
 oxhttp = { version = "0.3", optional=true }
 oxrdf = "0.3"
@@ -87,7 +91,14 @@ default-features = false
 
 [features]
 default = []
-server = ["dep:oxhttp", "dep:http"]
+server = [
+    "dep:oxhttp",
+    "dep:http",
+    "dep:axum",
+    "dep:futures-util",
+    "dep:hyper",
+    "dep:hyper-util",
+]
 
 [patch.crates-io]
 # The exact `spareval` and `oxrdfio` pins in [dependencies] stop cargo from
