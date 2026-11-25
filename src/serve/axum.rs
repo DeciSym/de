@@ -242,20 +242,13 @@ pub fn spawn(
     bind: &str,
     config: &ServerConfig,
 ) -> anyhow::Result<AxumServer> {
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .thread_name("de-serve")
-        .build()?;
     let mut listeners = Vec::new();
     let mut addresses = Vec::new();
-    {
-        let _runtime = runtime.enter();
-        for address in bind.to_socket_addrs()? {
-            let listener = std::net::TcpListener::bind(address)?;
-            listener.set_nonblocking(true)?;
-            addresses.push(listener.local_addr()?);
-            listeners.push(TcpListener::from_std(listener)?);
-        }
+    for address in bind.to_socket_addrs()? {
+        let listener = std::net::TcpListener::bind(address)?;
+        listener.set_nonblocking(true)?;
+        addresses.push(listener.local_addr()?);
+        listeners.push(listener);
     }
     anyhow::ensure!(!listeners.is_empty(), "{bind} resolves to no address");
     let server_name = HeaderValue::from_str(&config.server_name)?;
@@ -273,17 +266,56 @@ pub fn spawn(
         timeout: config.timeout,
     };
     let (shutdown, shutdown_requested) = oneshot::channel();
+    // The runtime lives and dies on the server's thread: dropped on the
+    // caller's, as on an error here, it would panic in async code.
+    let (listening, started) = std::sync::mpsc::channel::<io::Result<()>>();
     let thread = thread::Builder::new()
         .name("de-serve".into())
         .spawn(move || {
-            runtime.block_on(run(listeners, app, limits, shutdown_requested));
+            let runtime = match tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .thread_name("de-serve")
+                .build()
+            {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    let _ = listening.send(Err(error));
+                    return;
+                }
+            };
+            let listeners = {
+                let _runtime = runtime.enter();
+                listeners
+                    .into_iter()
+                    .map(TcpListener::from_std)
+                    .collect::<io::Result<Vec<_>>>()
+            };
+            match listeners {
+                Ok(listeners) => {
+                    let _ = listening.send(Ok(()));
+                    runtime.block_on(run(listeners, app, limits, shutdown_requested));
+                }
+                Err(error) => {
+                    let _ = listening.send(Err(error));
+                }
+            }
             runtime.shutdown_timeout(Duration::from_secs(1));
         })?;
-    Ok(AxumServer {
-        addresses,
-        shutdown: Some(shutdown),
-        thread: Some(thread),
-    })
+    match started.recv() {
+        Ok(Ok(())) => Ok(AxumServer {
+            addresses,
+            shutdown: Some(shutdown),
+            thread: Some(thread),
+        }),
+        Ok(Err(error)) => {
+            let _ = thread.join();
+            Err(error.into())
+        }
+        Err(_) => {
+            let _ = thread.join();
+            anyhow::bail!("the server's thread stopped before it listened")
+        }
+    }
 }
 
 /// Accepts connections on `listeners` until shutdown is requested, then
@@ -482,6 +514,19 @@ mod tests {
         let response = handle(Arc::new(service), request).await;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         assert!(body_text(response).await.contains("limited to 64 bytes"));
+    }
+
+    /// An address that's taken is an error, even from async code, where
+    /// dropping the server's unused runtime would panic.
+    #[tokio::test]
+    async fn spawn_on_a_taken_address_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let bind = taken.local_addr().unwrap().to_string();
+        let error = spawn(service(&dir), &bind, &ServerConfig::default())
+            .err()
+            .expect("bound an address that was taken");
+        assert!(error.to_string().contains("in use"), "{error:#}");
     }
 
     /// A server of its own: it names itself, and stops listening on shutdown.
