@@ -39,10 +39,6 @@ const EXPECTED_FAILURES: &[(&str, &str)] = &[
         "graph results default to N-Quads",
     ),
     (
-        "de/evaluation_error_has_error_status",
-        "the 200 is sent before the worker thread has evaluated anything",
-    ),
-    (
         "de/wrong_method_is_405",
         "an unsupported method is 404, without an Allow header",
     ),
@@ -52,7 +48,7 @@ const EXPECTED_FAILURES: &[(&str, &str)] = &[
     ),
     (
         "contract/disconnect_stops_evaluation",
-        "the worker thread only notices the client left when it next sends results",
+        "oxhttp notices a client left only when it next writes, and the response starts with the first result",
     ),
 ];
 
