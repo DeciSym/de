@@ -278,7 +278,13 @@ pub(super) fn evaluate_sparql_query(
     );
 
     let (tx, rx) = mpsc::sync_channel::<QueryStreamItem>(4);
-    let cancellation = CancellationToken::new();
+    // The HTTP server's token, if it put one in the request, so that it can
+    // cancel the query when the client goes away.
+    let cancellation = request
+        .extensions()
+        .get::<CancellationToken>()
+        .cloned()
+        .unwrap_or_default();
     let eval_options = EvalOptions {
         cancellation_token: cancellation.clone(),
     };

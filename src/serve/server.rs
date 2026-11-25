@@ -1,7 +1,8 @@
 //! Running a [`SparqlService`] over HTTP with oxhttp, and `de serve`.
 //!
-//! This is the only module that knows the HTTP server: the service takes and
-//! returns its own body types, which this adapter converts.
+//! This module and [`axum`](super::axum) are the only ones that know an HTTP
+//! server: the service takes and returns its own body types, which they
+//! convert.
 
 use super::{
     body::{RequestBody, ResponseBody},
@@ -47,10 +48,7 @@ pub fn spawn(
     config: &ServerConfig,
 ) -> anyhow::Result<ListeningServer> {
     let service = Arc::new(service);
-    let max_connections = match config.max_connections {
-        Some(max) => max,
-        None => available_parallelism()?.get() * 128,
-    };
+    let max_connections = max_connections(config)?;
     let mut server = Server::new(move |request| handle(&service, request))
         .with_global_timeout(config.timeout)
         .with_server_name(config.server_name.clone())?
@@ -59,6 +57,14 @@ pub fn spawn(
         server = server.bind(socket);
     }
     Ok(server.spawn()?)
+}
+
+/// The most connections `config` allows at once.
+pub(super) fn max_connections(config: &ServerConfig) -> io::Result<usize> {
+    match config.max_connections {
+        Some(max) => Ok(max),
+        None => Ok(available_parallelism()?.get() * 128),
+    }
 }
 
 /// Answers one oxhttp request with `service`, converting the bodies.

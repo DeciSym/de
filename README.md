@@ -136,8 +136,9 @@ Run W3C RDF/SPARQL integration tests:
 cargo test --all-features --test w3c-sparql
 ```
 
-Run the SPARQL endpoint cases against `de serve`, in process and against the
-`de` binary over a socket:
+Run the SPARQL endpoint cases against `de serve` three ways: in process,
+against the `de` binary over a socket, and against `de::serve::axum`'s server
+over a socket:
 
 ```sh
 cargo test --all-features --test endpoint-kit
@@ -153,7 +154,8 @@ its client goes away.
 `tests/endpoint-kit.rs` lists the cases `de` fails today, with the reason for
 each. A listed case that starts to pass fails the run until it is removed from
 the list. Each run writes a report of every case to
-`target/endpoint-kit-in-process.txt` and `target/endpoint-kit-http.txt`.
+`target/endpoint-kit-in-process.txt`, `target/endpoint-kit-http.txt` and
+`target/endpoint-kit-axum.txt`.
 
 ## Benchmarks
 

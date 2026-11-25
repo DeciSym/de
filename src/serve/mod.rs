@@ -4,7 +4,8 @@
 //! [`HdtDirectory`], with [`Routes`] of its own tried first, such as the
 //! [`Yasgui`] query page. It takes and returns its own [`RequestBody`] and
 //! [`ResponseBody`], so it runs on any HTTP server: [`spawn`] and [`serve`]
-//! run it on oxhttp.
+//! run it on oxhttp, and [`axum::router`] and [`axum::spawn`] on axum and
+//! hyper.
 //!
 //! ```no_run
 //! use de::serve::{HdtDirectory, ServerConfig, ServiceOptions, SparqlService, Yasgui};
@@ -27,9 +28,11 @@
 //! * `stream` evaluates the query on a worker thread and streams the results,
 //!   cancelling the query past its timeout or once its response is dropped.
 //! * `dataset` is what a data source implements; `hdt_dir` is de's.
-//! * `server` runs a service on oxhttp; `ui` is the query page.
+//! * `server` runs a service on oxhttp, and `axum` on axum and hyper; `ui` is
+//!   the query page.
 //! * `body` and `error` are the request and response types.
 
+pub mod axum;
 mod body;
 mod dataset;
 mod error;

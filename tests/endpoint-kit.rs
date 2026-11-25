@@ -1,8 +1,9 @@
 // Copyright (c) 2026, Decisym, LLC
 // Licensed under the BSD 3-Clause License (see LICENSE file in the project root).
 
-//! Runs the `endpoint-kit` cases against `de serve`: once by calling
-//! `de::serve::SparqlService` directly, once against the `de` binary over a
+//! Runs the `endpoint-kit` cases against `de serve` three ways: by calling
+//! `de::serve::SparqlService` directly, against the `de` binary over a
+//! socket, and against `de::serve::axum`'s server, in this process, over a
 //! socket.
 //!
 //! The cases live in the `endpoint-kit` workspace crate so that servers built
@@ -16,31 +17,35 @@
 
 #![cfg(feature = "server")]
 
-use de::serve::{HdtDirectory, RequestBody, ServiceOptions, SparqlService, Yasgui};
+use de::serve::{
+    HdtDirectory, RequestBody, ServerConfig, ServiceOptions, SparqlService, Yasgui,
+    axum::AxumServer,
+};
 use endpoint_kit::{
-    Capabilities, FixtureSet, InProcess, KitResponse, PeakAlloc, Report, ServiceSettings,
-    SpawnedServer, Suite, Target,
+    Capabilities, FixtureSet, HttpTarget, InProcess, KitResponse, PeakAlloc, Report, ServerProcess,
+    ServiceSettings, SpawnedServer, Suite, Target,
 };
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Mutex;
 use std::time::Duration;
 
 #[global_allocator]
 static ALLOCATOR: PeakAlloc = PeakAlloc::new();
 
-/// The cases `de serve` fails today, and why.
-const EXPECTED_FAILURES: &[(&str, &str)] = &[(
+/// The cases the `de` binary, on oxhttp, fails today, and why.
+const OXHTTP_FAILURES: &[(&str, &str)] = &[(
     "contract/disconnect_stops_evaluation",
     "oxhttp notices a client left only when it next writes, and the response starts with the first result",
 )];
 
-/// Both runs turn CORS on, so that the CORS cases check `--cors`.
-fn suite(label: &str) -> Suite {
+/// Every run turns CORS on, so that the CORS cases check `--cors`.
+fn suite(label: &str, expected_failures: &[(&'static str, &'static str)]) -> Suite {
     let capabilities = Capabilities {
         cors: true,
         ..Capabilities::default()
     };
-    EXPECTED_FAILURES.iter().fold(
+    expected_failures.iter().fold(
         Suite::new(label).capabilities(capabilities),
         |suite, (id, reason)| suite.expect_failure(id, reason),
     )
@@ -69,16 +74,23 @@ fn build_store(fixtures: &FixtureSet) -> anyhow::Result<PathBuf> {
     Ok(store)
 }
 
+/// `de serve`'s service, with its query page, over the fixtures.
+fn service(fixtures: &FixtureSet, settings: &ServiceSettings) -> anyhow::Result<SparqlService> {
+    let mut options = ServiceOptions::default();
+    options.cors = true;
+    options.query_timeout = settings.query_timeout;
+    Ok(
+        SparqlService::new(HdtDirectory::new(build_store(fixtures)?)?)
+            .with_options(options)
+            .with_routes(Yasgui),
+    )
+}
+
 fn in_process(
     fixtures: &FixtureSet,
     settings: &ServiceSettings,
 ) -> anyhow::Result<Box<dyn Target>> {
-    let mut options = ServiceOptions::default();
-    options.cors = true;
-    options.query_timeout = settings.query_timeout;
-    let service = SparqlService::new(HdtDirectory::new(build_store(fixtures)?)?)
-        .with_options(options)
-        .with_routes(Yasgui);
+    let service = service(fixtures, settings)?;
     Ok(Box::new(InProcess::new(
         move |request: http::Request<Vec<u8>>| {
             let mut request = request.map(RequestBody::from);
@@ -119,6 +131,50 @@ fn spawned(fixtures: &FixtureSet, settings: &ServiceSettings) -> anyhow::Result<
     Ok(Box::new(server))
 }
 
+/// `de::serve::axum`'s server, in this process, which the kit reaches over a
+/// socket; stopping the target shuts the server down.
+struct AxumTarget {
+    http: HttpTarget,
+    server: Mutex<Option<AxumServer>>,
+}
+
+impl Target for AxumTarget {
+    fn send(&self, request: http::Request<Vec<u8>>) -> anyhow::Result<KitResponse> {
+        self.http.send(request)
+    }
+
+    fn server_process(&self) -> ServerProcess {
+        self.http.server_process()
+    }
+
+    fn send_without_reading(
+        &self,
+        request: http::Request<Vec<u8>>,
+    ) -> anyhow::Result<Option<Box<dyn Send>>> {
+        self.http.send_without_reading(request)
+    }
+
+    fn stop(&self) {
+        let server = self.server.lock().map(|mut server| server.take());
+        if let Ok(Some(server)) = server {
+            server.shutdown();
+        }
+    }
+}
+
+fn on_axum(fixtures: &FixtureSet, settings: &ServiceSettings) -> anyhow::Result<Box<dyn Target>> {
+    let server = de::serve::axum::spawn(
+        service(fixtures, settings)?,
+        "127.0.0.1:0",
+        &ServerConfig::default(),
+    )?;
+    let address = server.local_addrs()[0];
+    Ok(Box::new(AxumTarget {
+        http: HttpTarget::new(format!("http://{address}")).with_process(ServerProcess::InProcess),
+        server: Mutex::new(Some(server)),
+    }))
+}
+
 fn finish(report: &Report, file: &str) -> anyhow::Result<()> {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("target")
@@ -130,13 +186,19 @@ fn finish(report: &Report, file: &str) -> anyhow::Result<()> {
 
 #[test]
 fn endpoint_kit() -> anyhow::Result<()> {
-    let in_process = suite("de::serve::SparqlService, in process")
+    let in_process = suite("de::serve::SparqlService, in process", &[])
         .allocator(&ALLOCATOR)
         .run(in_process)?;
-    let over_http = suite("de serve, over HTTP").run(spawned)?;
-    // Both reports are written before either is checked, so a failure in
-    // one doesn't hide the other's.
-    let first = finish(&in_process, "endpoint-kit-in-process.txt");
-    let second = finish(&over_http, "endpoint-kit-http.txt");
-    first.and(second)
+    let over_http = suite("de serve, over HTTP", OXHTTP_FAILURES).run(spawned)?;
+    let axum = suite("de::serve::axum, over HTTP", &[])
+        .allocator(&ALLOCATOR)
+        .run(on_axum)?;
+    // Every report is written before any is checked, so a failure in one
+    // doesn't hide the others'.
+    let checks = [
+        finish(&in_process, "endpoint-kit-in-process.txt"),
+        finish(&over_http, "endpoint-kit-http.txt"),
+        finish(&axum, "endpoint-kit-axum.txt"),
+    ];
+    checks.into_iter().collect()
 }
