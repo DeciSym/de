@@ -33,12 +33,6 @@ use std::time::Duration;
 #[global_allocator]
 static ALLOCATOR: PeakAlloc = PeakAlloc::new();
 
-/// The cases the `de` binary, on oxhttp, fails today, and why.
-const OXHTTP_FAILURES: &[(&str, &str)] = &[(
-    "contract/disconnect_stops_evaluation",
-    "oxhttp notices a client left only when it next writes, and the response starts with the first result",
-)];
-
 /// Every run turns CORS on, so that the CORS cases check `--cors`.
 fn suite(label: &str, expected_failures: &[(&'static str, &'static str)]) -> Suite {
     let capabilities = Capabilities {
@@ -189,7 +183,7 @@ fn endpoint_kit() -> anyhow::Result<()> {
     let in_process = suite("de::serve::SparqlService, in process", &[])
         .allocator(&ALLOCATOR)
         .run(in_process)?;
-    let over_http = suite("de serve, over HTTP", OXHTTP_FAILURES).run(spawned)?;
+    let over_http = suite("de serve, over HTTP", &[]).run(spawned)?;
     let axum = suite("de::serve::axum, over HTTP", &[])
         .allocator(&ALLOCATOR)
         .run(on_axum)?;

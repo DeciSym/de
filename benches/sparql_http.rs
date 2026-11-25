@@ -35,8 +35,8 @@
 //!   at once. Contention makes it noisy, so the comparison reports it without
 //!   failing on it (`--report-only` in `.github/workflows/bench.yml`).
 //!
-//! The server is `de::serve::spawn`, which `de serve` runs too. The target
-//! needs the `server` feature (`required-features` in Cargo.toml).
+//! The server is `de::serve::axum::spawn`, which `de serve` runs too. The
+//! target needs the `server` feature (`required-features` in Cargo.toml).
 
 use criterion::{
     BenchmarkId, Criterion, SamplingMode, Throughput, criterion_group, criterion_main,
@@ -53,7 +53,6 @@ use sparesults::{
 use spareval::QueryResults;
 use std::collections::BTreeMap;
 use std::io::{Read, sink};
-use std::net::{Ipv4Addr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -137,19 +136,12 @@ fn ensure_hdt(dir: &Path) -> String {
 /// Starts `service` on a free loopback port, as `de serve` runs it, and
 /// returns its base URL. The server runs until the process exits.
 fn start_server(service: SparqlService) -> String {
-    let port = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
-        .and_then(|listener| listener.local_addr())
-        .expect("failed to find a free port")
-        .port();
-    let server = de::serve::spawn(
-        service,
-        &format!("127.0.0.1:{port}"),
-        &ServerConfig::default(),
-    )
-    .expect("failed to start the endpoint");
-    // The listener threads stay up for the rest of the process.
+    let server = de::serve::axum::spawn(service, "127.0.0.1:0", &ServerConfig::default())
+        .expect("failed to start the endpoint");
+    let address = server.local_addrs()[0];
+    // Dropping the server would shut it down.
     std::mem::forget(server);
-    format!("http://127.0.0.1:{port}")
+    format!("http://{address}")
 }
 
 /// Sends a GET for `query`, checks the status and media type, and reads the
