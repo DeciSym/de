@@ -56,19 +56,28 @@ enum Commands {
         #[clap(short, long, default_value_t, value_enum)]
         output: query::DeOutput,
     },
-    /// Start a server to listen for /sparql, /update and /store API's. HDT's are read-only
-    /// per spec, so new graphs (i.e. files) can be uploaded, but existing graphs can NOT be
-    /// modified or deleted through /update or /store overwrite/delete requests.
+    /// Serve the HDT files in a directory as a read-only SPARQL endpoint
+    ///
+    /// Queries go to /query, by the SPARQL 1.1 Protocol (GET, or POST as a form or as a
+    /// query), and / is a query page. HDT files added to the directory, replaced or removed
+    /// are picked up between queries. /update and /store answer 501 Not Implemented, since
+    /// HDT files are read-only.
     #[cfg(feature = "server")]
     Serve {
-        /// Directory in which the data should be persisted
-        ///
-        /// If not present, an in-memory storage will be used.
+        /// Directory holding the .hdt files to serve
         #[arg(short, long, value_hint = clap::ValueHint::DirPath)]
         location: String,
         /// Host and port to listen to
         #[arg(short, long, default_value = "localhost:7878", value_hint = clap::ValueHint::Hostname)]
         bind: String,
+        /// Allow requests from web pages on any origin (CORS)
+        #[arg(long)]
+        cors: bool,
+        /// Cancel a query that runs longer than this many seconds, such as 30
+        /// or 0.5. One cancelled before its first results gets a 503, and one
+        /// cancelled later has its response cut off. Default: no limit.
+        #[arg(long, value_name = "SECONDS", value_parser = parse_seconds)]
+        timeout_s: Option<std::time::Duration>,
     },
     /// Use to view info about an HDT file
     View {
@@ -148,8 +157,65 @@ async fn run_command<W: Write>(
         .map(|_| ()),
         Commands::View { data } => view::view_hdt(data, stdout_writer),
         #[cfg(feature = "server")]
-        Commands::Serve { location, bind } => de::serve::serve(location.to_owned(), bind),
+        Commands::Serve {
+            location,
+            bind,
+            cors,
+            timeout_s,
+        } => {
+            let mut options = de::serve::ServiceOptions::default();
+            options.cors = *cors;
+            options.query_timeout = *timeout_s;
+            serve_until_stopped(location.to_owned(), bind.to_owned(), options).await
+        }
     }
+}
+
+/// A number of seconds over 0, such as `30` or `0.5`.
+#[cfg(feature = "server")]
+fn parse_seconds(value: &str) -> Result<std::time::Duration, String> {
+    let seconds: f64 = value.parse().map_err(|e| format!("{e}"))?;
+    if seconds <= 0.0 {
+        return Err("must be over 0".into());
+    }
+    std::time::Duration::try_from_secs_f64(seconds).map_err(|e| e.to_string())
+}
+
+/// Runs `de serve` on axum until SIGINT or SIGTERM, then shuts the server
+/// down: it stops accepting connections, lets open ones finish their
+/// responses, and the process exits with status 0.
+///
+/// A clean exit matters beyond tidiness: systemd's stop then reports success,
+/// and tools that record a process until it exits, such as heaptrack in
+/// `scripts/bench-memory.py`, get a complete recording.
+#[cfg(feature = "server")]
+async fn serve_until_stopped(
+    location: String,
+    bind: String,
+    options: de::serve::ServiceOptions,
+) -> anyhow::Result<()> {
+    let server =
+        tokio::task::spawn_blocking(move || de::serve::axum::start(&location, &bind, options))
+            .await??;
+    shutdown_signal().await;
+    tokio::task::spawn_blocking(move || server.shutdown()).await?;
+    Ok(())
+}
+
+#[cfg(feature = "server")]
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        if let Ok(mut terminate) = signal(SignalKind::terminate()) {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {}
+                _ = terminate.recv() => {}
+            }
+            return;
+        }
+    }
+    let _ = tokio::signal::ctrl_c().await;
 }
 
 fn flush_stdout_writer<W: Write>(writer: &mut W) -> std::io::Result<()> {

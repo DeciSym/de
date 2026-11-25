@@ -586,6 +586,105 @@ fn test_query_cli_runs_each_sparql_file_in_order() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// A triple in two data files is in the default graph once, whether the files
+/// are passed as `--data` or named by `FROM`: the default graph is the RDF
+/// merge of the files, and an RDF graph is a set. The files here are a source
+/// HDT and the OWL RL closure materialized from it, which repeats every source
+/// triple, so the two answer as the closure alone does. `de` merges `--data`
+/// files itself, while spareval merges the graphs `FROM` names.
+#[test]
+fn test_query_cli_triple_in_two_data_files_is_returned_once() -> anyhow::Result<()> {
+    let tmp_dir = tempdir()?;
+    let dir = tmp_dir.path();
+    std::fs::write(
+        dir.join("source.nt"),
+        "<http://ex/alice> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://ex/Student> .\n\
+         <http://ex/Student> <http://www.w3.org/2000/01/rdf-schema#subClassOf> <http://ex/Person> .\n",
+    )?;
+    let construct_all = std::fs::canonicalize("tests/resources/construct-all.rq")?;
+    let closure = run_de_ok_stdout(
+        dir,
+        &[
+            "query",
+            "--data",
+            "source.nt",
+            "--sparql",
+            &construct_all.to_string_lossy(),
+            "--entailment",
+            "owl-rl",
+            "--output",
+            "ntriple",
+        ],
+    )?;
+    std::fs::write(dir.join("closure.nt"), format!("{closure}\n"))?;
+    for name in ["source", "closure"] {
+        run_de_ok(
+            dir,
+            &[
+                "create",
+                "--output-name",
+                &format!("{name}.hdt"),
+                "--data",
+                &format!("{name}.nt"),
+            ],
+        )?;
+    }
+    std::fs::write(
+        dir.join("types.rq"),
+        "SELECT ?type WHERE { <http://ex/alice> a ?type } ORDER BY ?type",
+    )?;
+    std::fs::write(
+        dir.join("count.rq"),
+        "SELECT (COUNT(*) AS ?n) WHERE { ?s ?p ?o }",
+    )?;
+    // The same queries with both files named by FROM. `de` names a FROM graph
+    // after the file's canonical path, so the IRIs are built from that.
+    let canonical_dir = dir.canonicalize()?;
+    let from = ["source.hdt", "closure.hdt"]
+        .iter()
+        .map(|name| {
+            url::Url::from_file_path(canonical_dir.join(name))
+                .map(|iri| format!("FROM <{iri}>"))
+                .map_err(|()| anyhow::anyhow!("no file IRI for {name}"))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?
+        .join(" ");
+    std::fs::write(
+        dir.join("types-from.rq"),
+        format!("SELECT ?type {from} WHERE {{ <http://ex/alice> a ?type }} ORDER BY ?type"),
+    )?;
+    std::fs::write(
+        dir.join("count-from.rq"),
+        format!("SELECT (COUNT(*) AS ?n) {from} WHERE {{ ?s ?p ?o }}"),
+    )?;
+
+    let query = |data: &[&str], sparql: &str| {
+        let mut args = vec!["query"];
+        if !data.is_empty() {
+            args.push("--data");
+            args.extend_from_slice(data);
+        }
+        args.extend_from_slice(&["--sparql", sparql]);
+        run_de_ok_stdout(dir, &args)
+    };
+    let types = query(&["source.hdt", "closure.hdt"], "types.rq")?;
+    assert!(types.contains("http://ex/Person"), "not entailed:\n{types}");
+    for sparql in ["types", "count"] {
+        let closure_alone = query(&["closure.hdt"], &format!("{sparql}.rq"))?;
+        assert_eq!(
+            query(&["source.hdt", "closure.hdt"], &format!("{sparql}.rq"))?,
+            closure_alone,
+            "{sparql} with --data"
+        );
+        assert_eq!(
+            query(&[], &format!("{sparql}-from.rq"))?,
+            closure_alone,
+            "{sparql} with FROM"
+        );
+    }
+    Ok(())
+}
+
 /// A failed query exits non-zero, explains why on stderr and writes no results.
 #[test]
 fn test_query_cli_errors() -> anyhow::Result<()> {

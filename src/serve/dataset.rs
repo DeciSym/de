@@ -1,0 +1,84 @@
+//! Where the endpoint's data comes from.
+
+use super::error::HttpError;
+use spareval::{CancellationToken, QueryEvaluationError, QueryResults, QueryableDataset};
+use spargebra::Query;
+
+/// The dataset a request asks for, from the SPARQL protocol's parameters.
+///
+/// When the request names graphs, they are the whole dataset: the default
+/// graph is the merge of `default_graph_uris` (empty if there are none), and
+/// the named graphs are `named_graph_uris`. The query's own `FROM` and
+/// `FROM NAMED` don't apply. When it names none, every graph is a named graph,
+/// and the default graph is their union if `union_default_graph` is set, or
+/// empty if it isn't; the query's `FROM` and `FROM NAMED` then apply as usual.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct DatasetSelection {
+    /// The graphs named by `default-graph-uri`.
+    pub default_graph_uris: Vec<String>,
+    /// The graphs named by `named-graph-uri`.
+    pub named_graph_uris: Vec<String>,
+    /// Whether the default graph is the union of every graph: the
+    /// `union-default-graph` parameter, or the service's default when the
+    /// request names no graphs.
+    pub union_default_graph: bool,
+}
+
+/// Where a [`SparqlService`](super::SparqlService) gets its data.
+///
+/// [`HdtDirectory`](super::HdtDirectory) serves the HDT files in a directory.
+/// A source can serve anything spareval can query: what it opens is a
+/// [`ServeDataset`], which every type whose references implement
+/// `QueryableDataset` already is.
+pub trait DatasetSource: Send + Sync + 'static {
+    /// Called on the request's thread before each query: the chance to
+    /// notice new data.
+    fn refresh(&self) -> Result<(), HttpError> {
+        Ok(())
+    }
+
+    /// Opens the data a query reads. Called on the query's worker thread.
+    /// The dataset lives until the results have been streamed, so it can
+    /// hold whatever must stay open until then.
+    fn open(&self, selection: &DatasetSelection) -> Result<Box<dyn ServeDataset + '_>, HttpError>;
+}
+
+/// A dataset opened for one query.
+pub trait ServeDataset {
+    /// Evaluates `query`. Its results should end in
+    /// [`QueryEvaluationError::Cancelled`] once `options`' cancellation token
+    /// is cancelled, as spareval's do when the token is its evaluator's.
+    fn evaluate(
+        &self,
+        query: &Query,
+        options: &EvalOptions,
+    ) -> Result<QueryResults<'_>, QueryEvaluationError>;
+}
+
+impl<D> ServeDataset for D
+where
+    for<'a> &'a D: QueryableDataset<'a>,
+{
+    fn evaluate(
+        &self,
+        query: &Query,
+        options: &EvalOptions,
+    ) -> Result<QueryResults<'_>, QueryEvaluationError> {
+        crate::sparql::query_parsed_with_cancellation(
+            query,
+            self,
+            options.cancellation_token.clone(),
+        )
+    }
+}
+
+/// How a [`ServeDataset`] evaluates one query.
+#[derive(Clone, Default)]
+#[non_exhaustive]
+pub struct EvalOptions {
+    /// Cancelled once the answer is no longer wanted: the query ran past the
+    /// service's timeout, or its response was dropped, as when its client
+    /// went away while it streamed.
+    pub cancellation_token: CancellationToken,
+}

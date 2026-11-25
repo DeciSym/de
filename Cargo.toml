@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "w3c-validation"]
+members = [".", "w3c-validation", "endpoint-kit"]
 resolver = "2"
 
 [package]
@@ -14,9 +14,9 @@ default-run = "de"
 keywords = ["hdt", "rdf", "semantic-web", "triple-store", "sparql"]
 categories = ["command-line-utilities"]
 # Benchmark fixtures: the trainmarks submodule is a separate repo of fixtures
-# and harnesses for other engines, and the WatDiv directory holds downloaded
-# datasets. None of it belongs in the published crate.
-exclude = ["benches/trainmarks", "benches/watdiv"]
+# and harnesses for other engines, and the WatDiv and BSBM directories hold
+# downloaded or generated datasets. None of it belongs in the published crate.
+exclude = ["benches/trainmarks", "benches/watdiv", "benches/bsbm"]
 
 [[bin]]
 name = "de"
@@ -31,19 +31,28 @@ harness = false
 name = "watdiv"
 harness = false
 
+# Times the SPARQL endpoint over HTTP, so it needs the server.
+[[bench]]
+name = "sparql_http"
+harness = false
+required-features = ["server"]
+
 [dependencies]
 anyhow = { version = "1.0", default-features = false }
 async-trait = "0.1"
+axum = { version = "0.8", optional = true, default-features = false }
 bzip2 = "0.6"
 clap = { version = "4.5" }
 clap-verbosity-flag = { version = "3.0", default-features = false, features = ["log"] }
 env_logger = { version = "0.11", default-features = false }
 exitcode = "1.1"
 flate2 = "1"
+futures-util = { version = "0.3", optional = true, default-features = false }
 hdt = { version = "0.7.3", default-features = false, features = ["nt", "cache"] }
 http = { version = "1.4", optional = true }
+hyper = { version = "1", optional = true, features = ["server", "http1"] }
+hyper-util = { version = "0.1", optional = true, features = ["tokio", "service"] }
 log = "0.4"
-oxhttp = { version = "0.3", optional=true }
 oxrdf = "0.3"
 oxrdfio = "=0.2.7"
 rayon = "1.11.0"
@@ -59,6 +68,7 @@ url = { version = "2.5" }
 [dev-dependencies]
 urlencoding = "2.1"
 criterion = { version = "0.5", features = ["async_tokio"] }
+endpoint-kit = { path = "endpoint-kit" }
 futures = "0.3"
 w3c-validation = { path = "w3c-validation" }
 
@@ -80,18 +90,24 @@ default-features = false
 
 [features]
 default = []
-server = ["dep:oxhttp", "dep:http"]
+server = [
+    "dep:http",
+    "dep:axum",
+    "dep:futures-util",
+    "dep:hyper",
+    "dep:hyper-util",
+]
 
 [patch.crates-io]
 # The exact `spareval` and `oxrdfio` pins in [dependencies] stop cargo from
 # swapping these oxigraph patches for stock crates.io crates (it only warns that
 # a patch "was not used in the crate graph"). Bump the pins with the rev, to the
 # versions in the fork's lib/spareval and lib/oxrdfio at that rev.
-spareval = { git = "https://github.com/DeciSym/oxigraph.git", rev = "78d1d86d6dff016f400dee562da5b55691a63bb6" }
-sparopt = { git = "https://github.com/DeciSym/oxigraph.git", rev = "78d1d86d6dff016f400dee562da5b55691a63bb6" }
-spargebra = { git = "https://github.com/DeciSym/oxigraph.git", rev = "78d1d86d6dff016f400dee562da5b55691a63bb6" }
-sparesults = { git = "https://github.com/DeciSym/oxigraph.git", rev = "78d1d86d6dff016f400dee562da5b55691a63bb6" }
-oxrdfxml = { git = "https://github.com/DeciSym/oxigraph.git", rev = "78d1d86d6dff016f400dee562da5b55691a63bb6" }
+spareval = { git = "https://github.com/DeciSym/oxigraph.git", rev = "a5950fc4af10a2ea4e8927b47d01660bbfb49355" }
+sparopt = { git = "https://github.com/DeciSym/oxigraph.git", rev = "a5950fc4af10a2ea4e8927b47d01660bbfb49355" }
+spargebra = { git = "https://github.com/DeciSym/oxigraph.git", rev = "a5950fc4af10a2ea4e8927b47d01660bbfb49355" }
+sparesults = { git = "https://github.com/DeciSym/oxigraph.git", rev = "a5950fc4af10a2ea4e8927b47d01660bbfb49355" }
+oxrdfxml = { git = "https://github.com/DeciSym/oxigraph.git", rev = "a5950fc4af10a2ea4e8927b47d01660bbfb49355" }
 reasonable = { git = "https://github.com/DeciSym/reasonable.git", rev = "2a6ee89d2e62474f5adbe80efab3a31452cba99d" }
 hdt = { git = "https://github.com/DeciSym/hdt.git", rev = "919c725fd5f0e42662f9e3824e3f96d86baa8bb4" }
 

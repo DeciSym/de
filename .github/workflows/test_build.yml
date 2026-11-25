@@ -99,6 +99,19 @@ jobs:
 
     - name: Run server integration tests
       run: cargo test --all-features --locked --test test-serve
+    # The shared endpoint-kit cases: in process, against the de binary, and
+    # against de::serve::axum's server.
+    # Each run writes a report of every case, expected failures included.
+    - name: Run the endpoint-kit cases
+      run: cargo test --all-features --locked --test endpoint-kit
+    - name: Upload the endpoint-kit reports
+      if: always()
+      uses: actions/upload-artifact@v7
+      with:
+        name: endpoint-kit-reports
+        path: target/endpoint-kit-*.txt
+        if-no-files-found: ignore
+        overwrite: true
 
   w3c-conformance:
     name: W3C SPARQL/RDF conformance

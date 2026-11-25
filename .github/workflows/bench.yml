@@ -18,15 +18,33 @@ name: Benchmarks
 # BENCH_THRESHOLD percent and the confidence intervals don't overlap, and fails
 # the job when a benchmark is more than BENCH_FAIL_ABOVE percent slower. Both
 # sit above the noise seen when both sides are the same code: up to 11.7% in
-# the first two samples, on 2026-11-02. A pull request that changes no
-# benchmarked code adds a sample, and so does a run started by hand with its
-# own ref as the base. Each run compares with its own base, so a slowdown that
-# is accepted and merged fails only its pull request and the push that lands
-# it, not the runs after.
+# the first two samples, on 2026-11-02. A run started by hand with its own
+# ref as the base adds a sample of that noise. Each run compares with its own
+# base, so a slowdown that is accepted and merged fails only its pull request
+# and the push that lands it, not the runs after.
 #
-# To add a target, add a matrix entry with the command that prepares its
-# fixtures. A base commit that predates the target measures nothing, and the
-# comparison says so.
+# A change runs only the targets it can affect. The `targets` job compares it
+# with its base and picks them with scripts/bench-targets.py, which lists the
+# files each target doesn't use: a change to the endpoint alone runs only
+# sparql_http, and one to `de create` alone only trainmarks. A file the script
+# doesn't list runs every target. A run started by hand runs them all. The
+# benchmark jobs aren't required checks, so a target that doesn't run blocks
+# nothing.
+#
+# To add a target, add it to scripts/bench-targets.py with the command that
+# prepares its fixtures, and `cargo-args` if it needs features. A base commit
+# that predates the target measures nothing, and the comparison says so.
+#
+# `sparql_http` times `de serve` over HTTP on the BSBM explore queries
+# (benches/sparql_http.rs) and measures its memory, so it builds with the
+# server feature. Its fixtures come from the official BSBM generator, which
+# needs Java (the runner image has it) and a download from SourceForge, so
+# they are cached by the generator's hash; only main saves the cache. The base
+# gets a copy of the same fixtures. Its `sparql_http_concurrent` group, four
+# clients at once, is too noisy to gate on: BENCH_REPORT_ONLY shows it without
+# failing on it. Its memory run also makes two checks that need no baseline
+# (see scripts/bench-memory.py): peak heap mustn't grow with the queries a
+# server has answered, nor with the size of a result it streams.
 #
 # The memory job measures heap memory the same way, on the change and on its
 # base: scripts/bench-memory.py runs a release build of de under heaptrack, one
@@ -84,25 +102,46 @@ env:
   # The commit to compare with: a pull request's base, the previous commit on
   # main, or the `base` input of a run started by hand.
   BASE_SHA: ${{ github.event.pull_request.base.sha || (github.event.before != '0000000000000000000000000000000000000000' && github.event.before) || inputs.base }}
+  # BSBM product count for sparql_http: ~372K triples.
+  DE_BSBM_PRODUCT_COUNT: 1000
   BENCH_THRESHOLD: 15
   BENCH_FAIL_ABOVE: 25
+  # Benchmarks compared and shown, but never failed on.
+  BENCH_REPORT_ONLY: '^sparql_http_concurrent/'
   # Peak heap and calls to allocation functions, in percent (see the memory job).
   MEMORY_THRESHOLD: 5
   MEMORY_FAIL_ABOVE: 15
 
 jobs:
+  targets:
+    name: choose benchmark targets
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.choose.outputs.matrix }}
+      any: ${{ steps.choose.outputs.any }}
+    steps:
+      - uses: actions/checkout@v7
+      # Only the two commits' trees are needed, to list the files that differ.
+      - name: Fetch the base commit
+        if: env.BASE_SHA != ''
+        continue-on-error: true
+        run: git fetch --no-tags --depth=1 origin "$BASE_SHA"
+      # Without a base, or when it can't be compared, every target runs.
+      - name: Choose the targets this change can affect
+        id: choose
+        run: |
+          python3 scripts/bench-targets.py --base "$BASE_SHA" --head HEAD \
+            ${{ github.event_name == 'workflow_dispatch' && '--all' || '' }} >> "$GITHUB_OUTPUT"
+
   bench:
     name: ${{ matrix.bench }} benchmarks
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    needs: targets
+    if: needs.targets.outputs.any == 'true'
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - bench: trainmarks
-            fixtures: python3 scripts/gen-trainmarks-data.py "$DE_BENCH_SCALE"
-          - bench: watdiv
-            fixtures: scripts/fetch-watdiv-data.sh "$DE_WATDIV_SCALE"
+      matrix: ${{ fromJSON(needs.targets.outputs.matrix) }}
     env:
       # One target directory for both checkouts: the second build reuses the
       # first one's dependencies, and both runs write one criterion tree.
@@ -133,9 +172,33 @@ jobs:
       # The base side builds and runs first. Failures there are tolerated: it
       # may predate the target or its fixtures, and then the comparison has no
       # baseline.
+      - name: Restore the BSBM fixtures
+        id: bsbm-cache
+        if: matrix.bsbm
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            head/benches/bsbm/.tools
+            head/benches/bsbm/${{ env.DE_BSBM_PRODUCT_COUNT }}/dataset.nt
+            head/benches/bsbm/${{ env.DE_BSBM_PRODUCT_COUNT }}/queries
+          key: bsbm-${{ env.DE_BSBM_PRODUCT_COUNT }}-${{ hashFiles('head/scripts/gen-bsbm-data.py') }}
       - name: Prepare fixtures
         working-directory: head
         run: ${{ matrix.fixtures }}
+      - name: Save the BSBM fixtures
+        if: matrix.bsbm && steps.bsbm-cache.outputs.cache-hit != 'true' && github.ref == 'refs/heads/main'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            head/benches/bsbm/.tools
+            head/benches/bsbm/${{ env.DE_BSBM_PRODUCT_COUNT }}/dataset.nt
+            head/benches/bsbm/${{ env.DE_BSBM_PRODUCT_COUNT }}/queries
+          key: bsbm-${{ env.DE_BSBM_PRODUCT_COUNT }}-${{ hashFiles('head/scripts/gen-bsbm-data.py') }}
+      # Both sides query the same data, whatever the base's generator would
+      # write; with the fixtures present, the base's generator does nothing.
+      - name: Share the BSBM fixtures with the base
+        if: matrix.bsbm && env.BASE_SHA != ''
+        run: mkdir -p base/benches && cp -r head/benches/bsbm base/benches/
       - name: Prepare fixtures for the base
         id: base-fixtures
         if: env.BASE_SHA != ''
@@ -147,12 +210,12 @@ jobs:
         if: steps.base-fixtures.outcome == 'success'
         continue-on-error: true
         working-directory: base
-        run: cargo bench --locked --bench ${{ matrix.bench }} --no-run
+        run: cargo bench --locked --bench ${{ matrix.bench }} ${{ matrix.cargo-args }} --no-run
       - name: Run benchmarks on the base
         if: steps.base-build.outcome == 'success'
         continue-on-error: true
         working-directory: base
-        run: cargo bench --locked --bench ${{ matrix.bench }} -- --noplot --save-baseline base
+        run: cargo bench --locked --bench ${{ matrix.bench }} ${{ matrix.cargo-args }} -- --noplot --save-baseline base
       # Cargo hashes workspace packages by their path within the workspace, so
       # both checkouts' builds of de get the same file names. This commit's
       # sources were checked out before the base was built, so they look older
@@ -165,10 +228,10 @@ jobs:
           cargo clean --release "${packages[@]}"
       - name: Build
         working-directory: head
-        run: cargo bench --locked --bench ${{ matrix.bench }} --no-run
+        run: cargo bench --locked --bench ${{ matrix.bench }} ${{ matrix.cargo-args }} --no-run
       - name: Run benchmarks
         working-directory: head
-        run: cargo bench --locked --bench ${{ matrix.bench }} -- --noplot --save-baseline head
+        run: cargo bench --locked --bench ${{ matrix.bench }} ${{ matrix.cargo-args }} -- --noplot --save-baseline head
       - name: Record run details
         run: head/scripts/bench-compare.py record "$CARGO_TARGET_DIR/criterion"
 
@@ -189,20 +252,18 @@ jobs:
       - name: Compare with the base
         run: |
           head/scripts/bench-compare.py compare "$CARGO_TARGET_DIR/criterion:base" "$CARGO_TARGET_DIR/criterion:head" \
-            --base-commit "$BASE_SHA" --threshold "$BENCH_THRESHOLD" ${BENCH_FAIL_ABOVE:+--fail-above "$BENCH_FAIL_ABOVE"}
+            --base-commit "$BASE_SHA" --threshold "$BENCH_THRESHOLD" ${BENCH_FAIL_ABOVE:+--fail-above "$BENCH_FAIL_ABOVE"} \
+            ${BENCH_REPORT_ONLY:+--report-only "$BENCH_REPORT_ONLY"}
 
   memory:
     name: ${{ matrix.bench }} memory
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    needs: targets
+    if: needs.targets.outputs.any == 'true'
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - bench: trainmarks
-            fixtures: python3 scripts/gen-trainmarks-data.py "$DE_BENCH_SCALE"
-          - bench: watdiv
-            fixtures: scripts/fetch-watdiv-data.sh "$DE_WATDIV_SCALE"
+      matrix: ${{ fromJSON(needs.targets.outputs.matrix) }}
     env:
       # As in the bench job: one target directory for both checkouts.
       CARGO_TARGET_DIR: ${{ github.workspace }}/target
@@ -235,9 +296,33 @@ jobs:
       # As in the bench job, the base goes first and its failures are
       # tolerated. This commit's script measures both builds, so the base is
       # measured the same way even when it predates the script.
+      - name: Restore the BSBM fixtures
+        id: bsbm-cache
+        if: matrix.bsbm
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            head/benches/bsbm/.tools
+            head/benches/bsbm/${{ env.DE_BSBM_PRODUCT_COUNT }}/dataset.nt
+            head/benches/bsbm/${{ env.DE_BSBM_PRODUCT_COUNT }}/queries
+          key: bsbm-${{ env.DE_BSBM_PRODUCT_COUNT }}-${{ hashFiles('head/scripts/gen-bsbm-data.py') }}
       - name: Prepare fixtures
         working-directory: head
         run: ${{ matrix.fixtures }}
+      - name: Save the BSBM fixtures
+        if: matrix.bsbm && steps.bsbm-cache.outputs.cache-hit != 'true' && github.ref == 'refs/heads/main'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            head/benches/bsbm/.tools
+            head/benches/bsbm/${{ env.DE_BSBM_PRODUCT_COUNT }}/dataset.nt
+            head/benches/bsbm/${{ env.DE_BSBM_PRODUCT_COUNT }}/queries
+          key: bsbm-${{ env.DE_BSBM_PRODUCT_COUNT }}-${{ hashFiles('head/scripts/gen-bsbm-data.py') }}
+      # Both sides query the same data, whatever the base's generator would
+      # write; with the fixtures present, the base's generator does nothing.
+      - name: Share the BSBM fixtures with the base
+        if: matrix.bsbm && env.BASE_SHA != ''
+        run: mkdir -p base/benches && cp -r head/benches/bsbm base/benches/
       - name: Prepare fixtures for the base
         id: base-fixtures
         if: env.BASE_SHA != ''
@@ -249,7 +334,7 @@ jobs:
         continue-on-error: true
         working-directory: base
         run: |
-          cargo build --release --locked --bin de
+          cargo build --release --locked --bin de ${{ matrix.cargo-args }}
           ../head/scripts/bench-memory.py run ${{ matrix.bench }} --de "$CARGO_TARGET_DIR/release/de" --out "$RUNNER_TEMP/memory-base"
       # See the same step in the bench job.
       - name: Remove the base's build of the workspace
@@ -260,7 +345,7 @@ jobs:
           cargo clean --release "${packages[@]}"
       - name: Build
         working-directory: head
-        run: cargo build --release --locked --bin de
+        run: cargo build --release --locked --bin de ${{ matrix.cargo-args }}
       - name: Measure
         working-directory: head
         run: scripts/bench-memory.py run ${{ matrix.bench }} --de "$CARGO_TARGET_DIR/release/de" --out "$RUNNER_TEMP/memory-head"
