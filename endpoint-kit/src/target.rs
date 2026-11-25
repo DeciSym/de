@@ -52,6 +52,18 @@ pub trait Target: Send + Sync {
     /// its cases are done: a contract can leave a request running on a thread
     /// of its own, which keeps the target alive past the end of the run.
     fn stop(&self) {}
+
+    /// Sends `request` and returns the open connection without waiting for
+    /// the answer; dropping it closes the connection, as a client that goes
+    /// away does. `None` when the target can't, as a call in process can't
+    /// be left before it returns.
+    fn send_without_reading(
+        &self,
+        request: Request<Vec<u8>>,
+    ) -> anyhow::Result<Option<Box<dyn Send>>> {
+        let _ = request;
+        Ok(None)
+    }
 }
 
 /// A handler called directly, without a socket.
@@ -131,6 +143,18 @@ impl Target for HttpTarget {
 
     fn server_process(&self) -> ServerProcess {
         self.process
+    }
+
+    fn send_without_reading(
+        &self,
+        request: Request<Vec<u8>>,
+    ) -> anyhow::Result<Option<Box<dyn Send>>> {
+        let authority = self
+            .base_url
+            .strip_prefix("http://")
+            .with_context(|| format!("{} isn't an http:// URL", self.base_url))?;
+        let connection = crate::http1::send_without_reading(authority, request, self.timeout)?;
+        Ok(Some(Box::new(connection)))
     }
 }
 
@@ -218,6 +242,13 @@ impl Target for SpawnedServer {
 
     fn server_process(&self) -> ServerProcess {
         self.target.server_process()
+    }
+
+    fn send_without_reading(
+        &self,
+        request: Request<Vec<u8>>,
+    ) -> anyhow::Result<Option<Box<dyn Send>>> {
+        self.target.send_without_reading(request)
     }
 
     fn stop(&self) {

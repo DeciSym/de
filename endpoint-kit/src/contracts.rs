@@ -71,7 +71,7 @@ pub(crate) fn contract_cases() -> Vec<Case> {
         },
         Case {
             id: "contract/disconnect_stops_evaluation",
-            description: "a query whose client went away frees its core",
+            description: "a query whose client went away before the answer frees its core",
             skip_unless: always,
             run: disconnect_stops_evaluation,
         },
@@ -298,19 +298,23 @@ fn timeout_stops_evaluation(ctx: &Ctx<'_>) -> Outcome {
 
 fn disconnect_stops_evaluation(ctx: &Ctx<'_>) -> Outcome {
     let process = ctx.target.server_process();
-    if process != ServerProcess::InProcess {
-        // Over a socket, noticing that the client left depends on the HTTP
-        // stack; in process, the server sees its response body dropped.
-        return Outcome::Skip("needs a server in this process".into());
-    }
     let Some(baseline) = cpu_rate(process, Duration::from_millis(300)) else {
-        return Outcome::Skip("can't read this process's CPU time (needs Linux)".into());
+        return Outcome::Skip(
+            "can't read the server's CPU time (needs Linux and a known process)".into(),
+        );
     };
-    let response = match ctx.target.send(get(
+    let request = get(
         &query_uri(&slow_query(), &[]),
         &[(ACCEPT.as_str(), RESULTS_JSON)],
-    )) {
-        Ok(response) => response,
+    );
+    let connection = match ctx.target.send_without_reading(request) {
+        Ok(Some(connection)) => connection,
+        Ok(None) => {
+            return Outcome::Skip(
+                "this target can't leave a request before its answer, as a call in process can't"
+                    .into(),
+            );
+        }
         Err(e) => return Outcome::Fail(format!("{e:#}")),
     };
     let busy = cpu_rate(process, Duration::from_millis(300)).unwrap_or(0.0);
@@ -320,7 +324,7 @@ fn disconnect_stops_evaluation(ctx: &Ctx<'_>) -> Outcome {
              tell running from stopped"
         ));
     }
-    drop(response);
+    drop(connection);
     idle_after(process, baseline, "the client went away")
 }
 

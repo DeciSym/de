@@ -582,6 +582,39 @@ mod server_tests {
         Ok(())
     }
 
+    /// A query that fails before its first result gets the error's status,
+    /// not a 200 whose body is cut off. A SERVICE call is 501 whether it
+    /// fails during evaluation (ASK) or as the results are read (SELECT and
+    /// CONSTRUCT).
+    #[tokio::test]
+    async fn test_unsupported_service_is_501() -> anyhow::Result<()> {
+        let (tmp_dir, store) = setup_test_store().await?;
+
+        for query in [
+            "SELECT * WHERE { SERVICE <http://127.0.0.1:9/sparql> { ?s ?p ?o } }",
+            "CONSTRUCT { ?s ?p ?o } WHERE { SERVICE <http://127.0.0.1:9/sparql> { ?s ?p ?o } }",
+            "ASK { SERVICE <http://127.0.0.1:9/sparql> { ?s ?p ?o } }",
+        ] {
+            let mut request = Request::builder()
+                .method(Method::POST)
+                .uri("http://localhost/query")
+                .header("Content-Type", "application/sparql-query")
+                .body(RequestBody::from(query))
+                .unwrap();
+            let error = handle(&mut request, &store, tmp_dir.path())
+                .err()
+                .ok_or_else(|| anyhow::anyhow!("answered with a success: {query}"))?;
+            assert_eq!(error.status(), StatusCode::NOT_IMPLEMENTED, "{query}");
+            assert!(
+                error.message().contains("http://127.0.0.1:9/sparql"),
+                "{query}: {}",
+                error.message()
+            );
+        }
+
+        Ok(())
+    }
+
     /// The API as a downstream server uses it: a data source and routes of
     /// its own around the same SPARQL endpoint.
     #[tokio::test]

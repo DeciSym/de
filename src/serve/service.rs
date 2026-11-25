@@ -63,6 +63,10 @@ pub trait Routes: Send + Sync + 'static {
 /// the service description on `GET /query` without a query. `/update` and
 /// `/store` answer 501. [`Routes`] add other paths. It doesn't depend on any
 /// HTTP server: [`spawn`](super::spawn) runs one with oxhttp.
+///
+/// A query's response starts once its first results are ready, and then
+/// streams the rest. So a query that fails before its first results gets an
+/// error status; one that fails later can only have its body cut off.
 pub struct SparqlService {
     source: Arc<dyn DatasetSource>,
     options: ServiceOptions,

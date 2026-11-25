@@ -25,6 +25,17 @@ pub(crate) fn send(
     request: Request<Vec<u8>>,
     timeout: Duration,
 ) -> anyhow::Result<KitResponse> {
+    let method = request.method().clone();
+    let stream = send_without_reading(authority, request, timeout)?;
+    read_response(stream, &method)
+}
+
+/// Sends `request` and returns the connection, with the response unread.
+pub(crate) fn send_without_reading(
+    authority: &str,
+    request: Request<Vec<u8>>,
+    timeout: Duration,
+) -> anyhow::Result<TcpStream> {
     let (parts, body) = request.into_parts();
     let stream =
         TcpStream::connect(authority).with_context(|| format!("connecting to {authority}"))?;
@@ -48,11 +59,14 @@ pub(crate) fn send(
     writer.write_all(head.as_bytes())?;
     writer.write_all(&body)?;
     writer.flush()?;
+    Ok(stream)
+}
 
+fn read_response(stream: TcpStream, method: &Method) -> anyhow::Result<KitResponse> {
     let mut reader = BufReader::new(stream);
     let status = read_status(&mut reader)?;
     let headers = read_headers(&mut reader)?;
-    let no_body = parts.method == Method::HEAD
+    let no_body = *method == Method::HEAD
         || status.is_informational()
         || status == StatusCode::NO_CONTENT
         || status == StatusCode::NOT_MODIFIED;
