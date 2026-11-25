@@ -54,7 +54,8 @@ pub(crate) const LARGE_TRIPLES: usize = 50_000;
 
 /// Values whose pairs make a long, CPU-bound and memory-light query: 2,000²
 /// pairs run for minutes in a debug build of `de` and for seconds in a release
-/// one, either way well past the one-second timeout the contracts ask for.
+/// one, either way well past the one-second timeout the timeout contract asks
+/// for.
 pub(crate) const SLOW: &str = "http://example.org/endpoint-kit/graph/slow";
 pub(crate) const WEIGHT: &str = "http://example.org/endpoint-kit/weight";
 pub(crate) const SLOW_TRIPLES: usize = 2_000;
@@ -96,13 +97,6 @@ pub(crate) fn contracts(dir: &Path) -> anyhow::Result<FixtureSet> {
             "<http://example.org/endpoint-kit/item/{i}> <{LABEL}> \"item {i}\" ."
         )?;
     }
-    let mut slow = String::new();
-    for i in 0..SLOW_TRIPLES {
-        writeln!(
-            slow,
-            "<http://example.org/endpoint-kit/slow/{i}> <{WEIGHT}> \"{i}\" ."
-        )?;
-    }
     let mut join = String::new();
     for i in 0..JOIN_CHAINS {
         writeln!(
@@ -122,10 +116,29 @@ pub(crate) fn contracts(dir: &Path) -> anyhow::Result<FixtureSet> {
         dir: dir.to_path_buf(),
         graphs: vec![
             write_graph(dir, "large", LARGE, &large, LARGE_TRIPLES)?,
-            write_graph(dir, "slow", SLOW, &slow, SLOW_TRIPLES)?,
+            slow_graph(dir)?,
             write_graph(dir, "join", JOIN, &join, JOIN_CHAINS * 3)?,
         ],
     })
+}
+
+/// The slow graph alone, for the timeout contract's server.
+pub(crate) fn timeout(dir: &Path) -> anyhow::Result<FixtureSet> {
+    Ok(FixtureSet {
+        dir: dir.to_path_buf(),
+        graphs: vec![slow_graph(dir)?],
+    })
+}
+
+fn slow_graph(dir: &Path) -> anyhow::Result<FixtureGraph> {
+    let mut slow = String::new();
+    for i in 0..SLOW_TRIPLES {
+        writeln!(
+            slow,
+            "<http://example.org/endpoint-kit/slow/{i}> <{WEIGHT}> \"{i}\" ."
+        )?;
+    }
+    write_graph(dir, "slow", SLOW, &slow, SLOW_TRIPLES)
 }
 
 fn write_graph(

@@ -1,7 +1,7 @@
 //! Where the endpoint's data comes from.
 
 use super::error::HttpError;
-use spareval::{QueryEvaluationError, QueryResults, QueryableDataset};
+use spareval::{CancellationToken, QueryEvaluationError, QueryResults, QueryableDataset};
 use spargebra::Query;
 
 /// The dataset a request asks for, from the SPARQL protocol's parameters.
@@ -46,14 +46,39 @@ pub trait DatasetSource: Send + Sync + 'static {
 
 /// A dataset opened for one query.
 pub trait ServeDataset {
-    fn evaluate(&self, query: &Query) -> Result<QueryResults<'_>, QueryEvaluationError>;
+    /// Evaluates `query`. Its results should end in
+    /// [`QueryEvaluationError::Cancelled`] once `options`' cancellation token
+    /// is cancelled, as spareval's do when the token is its evaluator's.
+    fn evaluate(
+        &self,
+        query: &Query,
+        options: &EvalOptions,
+    ) -> Result<QueryResults<'_>, QueryEvaluationError>;
 }
 
 impl<D> ServeDataset for D
 where
     for<'a> &'a D: QueryableDataset<'a>,
 {
-    fn evaluate(&self, query: &Query) -> Result<QueryResults<'_>, QueryEvaluationError> {
-        crate::sparql::query_parsed_with_debug_plan(query, self, false)
+    fn evaluate(
+        &self,
+        query: &Query,
+        options: &EvalOptions,
+    ) -> Result<QueryResults<'_>, QueryEvaluationError> {
+        crate::sparql::query_parsed_with_cancellation(
+            query,
+            self,
+            options.cancellation_token.clone(),
+        )
     }
+}
+
+/// How a [`ServeDataset`] evaluates one query.
+#[derive(Clone, Default)]
+#[non_exhaustive]
+pub struct EvalOptions {
+    /// Cancelled once the answer is no longer wanted: the query ran past the
+    /// service's timeout, or its response was dropped, as when its client
+    /// went away while it streamed.
+    pub cancellation_token: CancellationToken,
 }

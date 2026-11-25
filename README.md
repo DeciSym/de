@@ -148,7 +148,8 @@ The cases live in the `endpoint-kit` workspace crate, so that servers built on
 Protocol tests, the HTTP tests of `oxigraph serve` that apply to a read-only
 endpoint, CORS for a server that enables it (`de serve --cors`), and runtime
 contracts: results stream rather than being held in memory, joins run in a good
-order, and a query stops when its timeout passes or its client goes away.
+order, and a query stops when its timeout passes (`de serve --timeout-s`) or
+its client goes away.
 `tests/endpoint-kit.rs` lists the cases `de` fails today, with the reason for
 each. A listed case that starts to pass fails the run until it is removed from
 the list. Each run writes a report of every case to

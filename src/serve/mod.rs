@@ -24,7 +24,8 @@
 //! * `service` routes each request, and adds CORS headers.
 //! * `protocol` reads the request (URL, body, query parameters), and
 //!   `negotiate` picks the result format from the Accept header.
-//! * `stream` evaluates the query on a worker thread and streams the results.
+//! * `stream` evaluates the query on a worker thread and streams the results,
+//!   cancelling the query past its timeout or once its response is dropped.
 //! * `dataset` is what a data source implements; `hdt_dir` is de's.
 //! * `server` runs a service on oxhttp; `ui` is the query page.
 //! * `body` and `error` are the request and response types.
@@ -41,7 +42,7 @@ mod stream;
 mod ui;
 
 pub use body::{RequestBody, ResponseBody};
-pub use dataset::{DatasetSelection, DatasetSource, ServeDataset};
+pub use dataset::{DatasetSelection, DatasetSource, EvalOptions, ServeDataset};
 pub use error::HttpError;
 pub use hdt_dir::HdtDirectory;
 pub use server::{ServerConfig, serve, spawn};

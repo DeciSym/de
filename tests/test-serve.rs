@@ -10,13 +10,16 @@
 
 #[cfg(feature = "server")]
 mod server_tests {
-    use de::serve::{HdtDirectory, HttpError, RequestBody, ResponseBody, SparqlService};
+    use de::serve::{
+        HdtDirectory, HttpError, RequestBody, ResponseBody, ServiceOptions, SparqlService,
+    };
     use de::sparql::AggregateHdt;
     use http::{Method, Request, StatusCode};
     use sparesults::{QueryResultsFormat, QueryResultsParser, ReaderQueryResultsParserOutput};
     use std::io::Read as _;
     use std::io::Write;
     use std::path::Path;
+    use std::time::{Duration, Instant};
     use tempfile::tempdir;
 
     // W3C SPARQL 1.1 Query examples:
@@ -611,6 +614,48 @@ mod server_tests {
                 error.message()
             );
         }
+
+        Ok(())
+    }
+
+    /// A query that runs past the service's timeout before its first results
+    /// gets a 503, instead of running on.
+    #[tokio::test]
+    async fn test_query_timeout_is_503() -> anyhow::Result<()> {
+        let tmp_dir = tempdir()?;
+        let nt = tmp_dir.path().join("titles.nt");
+        create_large_nt_dataset(&nt, 2_000)?;
+        let hdt = tmp_dir.path().join("titles.hdt");
+        de::create::do_create(&hdt.to_string_lossy(), &[nt.to_string_lossy().to_string()]).await?;
+        let store = AggregateHdt::new(&[hdt.to_string_lossy().to_string()])?;
+
+        let mut options = ServiceOptions::default();
+        options.query_timeout = Some(Duration::from_millis(200));
+        let service = SparqlService::new(HdtDirectory::with_store(store, tmp_dir.path()))
+            .with_options(options);
+
+        // 2,000² pairs, which take a debug build minutes to count.
+        let query = format!(
+            "SELECT (COUNT(*) AS ?n) WHERE {{ ?a {DC_TITLE} ?x . ?b {DC_TITLE} ?y . FILTER(?x != ?y) }}"
+        );
+        let mut request = Request::builder()
+            .method(Method::POST)
+            .uri("http://localhost/query")
+            .header("Content-Type", "application/sparql-query")
+            .body(RequestBody::from(query))
+            .unwrap();
+        let started = Instant::now();
+        let error = service
+            .try_handle(&mut request)
+            .err()
+            .ok_or_else(|| anyhow::anyhow!("answered within the timeout"))?;
+        assert_eq!(error.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(error.message().contains("timeout"), "{}", error.message());
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "answered after {:?}",
+            started.elapsed()
+        );
 
         Ok(())
     }

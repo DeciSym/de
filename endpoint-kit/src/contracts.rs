@@ -64,18 +64,22 @@ pub(crate) fn contract_cases() -> Vec<Case> {
             run: join_order,
         },
         Case {
-            id: "contract/timeout_stops_evaluation",
-            description: "a query past the server's timeout ends, and frees its core",
-            skip_unless: always,
-            run: timeout_stops_evaluation,
-        },
-        Case {
             id: "contract/disconnect_stops_evaluation",
             description: "a query whose client went away before the answer frees its core",
             skip_unless: always,
             run: disconnect_stops_evaluation,
         },
     ]
+}
+
+/// The contract for a server with a query timeout, which gets one of its own.
+pub(crate) fn timeout_cases() -> Vec<Case> {
+    vec![Case {
+        id: "contract/timeout_stops_evaluation",
+        description: "a query past the server's timeout ends, and frees its core",
+        skip_unless: always,
+        run: timeout_stops_evaluation,
+    }]
 }
 
 /// `SELECT ?item ?label … LIMIT limit` over the large graph.
@@ -268,7 +272,9 @@ fn timeout_stops_evaluation(ctx: &Ctx<'_>) -> Outcome {
             "can't read the server's CPU time (needs Linux and a known process)".into(),
         );
     };
-    let timeout = ctx.settings.query_timeout;
+    let Some(timeout) = ctx.settings.query_timeout else {
+        return Outcome::Skip("the server was built without a query timeout".into());
+    };
     let deadline = timeout + Duration::from_secs(3);
     let target = Arc::clone(ctx.target);
     let query = slow_query();

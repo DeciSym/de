@@ -21,7 +21,7 @@ use http::{
     },
 };
 use log::debug;
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 /// How a [`SparqlService`] answers.
 #[derive(Clone, Debug)]
@@ -34,6 +34,11 @@ pub struct ServiceOptions {
     pub cors: bool,
     /// The largest request body accepted, in bytes. Default: 128 MiB.
     pub max_body_bytes: u64,
+    /// How long a query may run. One still running past it is cancelled: it
+    /// gets a 503 if it hasn't sent results yet, or else its response is cut
+    /// off. Results already computed still go out, so a slow client can take
+    /// longer to read them. Default: none.
+    pub query_timeout: Option<Duration>,
 }
 
 impl Default for ServiceOptions {
@@ -42,6 +47,7 @@ impl Default for ServiceOptions {
             union_default_graph: true,
             cors: false,
             max_body_bytes: 1024 * 1024 * 128,
+            query_timeout: None,
         }
     }
 }
@@ -129,8 +135,8 @@ impl SparqlService {
                 return answer;
             }
         }
-        let union_default_graph = self.options.union_default_graph;
-        let max_body_bytes = self.options.max_body_bytes;
+        let options = &self.options;
+        let max_body_bytes = options.max_body_bytes;
         match (request.uri().path(), request.method().as_ref()) {
             ("/query", "GET") => {
                 let query = url_query(request);
@@ -139,7 +145,7 @@ impl SparqlService {
                     let description = generate_service_description(
                         format,
                         EndpointKind::Query,
-                        union_default_graph,
+                        options.union_default_graph,
                     )
                     .map_err(internal_server_error)?;
                     Response::builder()
@@ -153,7 +159,7 @@ impl SparqlService {
                         &[url_query(request)],
                         None,
                         request,
-                        union_default_graph,
+                        options,
                     )
                 }
             }
@@ -168,7 +174,7 @@ impl SparqlService {
                         &[url_query(request)],
                         Some(query),
                         request,
-                        union_default_graph,
+                        options,
                     )
                 } else if content_type == "application/x-www-form-urlencoded" {
                     let buffer = limited_body(request, max_body_bytes)?;
@@ -177,7 +183,7 @@ impl SparqlService {
                         &[url_query(request), &buffer],
                         None,
                         request,
-                        union_default_graph,
+                        options,
                     )
                 } else {
                     Err(unsupported_media_type(&content_type))

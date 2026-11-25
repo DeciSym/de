@@ -43,10 +43,6 @@ const EXPECTED_FAILURES: &[(&str, &str)] = &[
         "an unsupported method is 404, without an Allow header",
     ),
     (
-        "contract/timeout_stops_evaluation",
-        "de serve has no query timeout",
-    ),
-    (
         "contract/disconnect_stops_evaluation",
         "oxhttp notices a client left only when it next writes, and the response starts with the first result",
     ),
@@ -87,9 +83,13 @@ fn build_store(fixtures: &FixtureSet) -> anyhow::Result<PathBuf> {
     Ok(store)
 }
 
-fn in_process(fixtures: &FixtureSet) -> anyhow::Result<Box<dyn Target>> {
+fn in_process(
+    fixtures: &FixtureSet,
+    settings: &ServiceSettings,
+) -> anyhow::Result<Box<dyn Target>> {
     let mut options = ServiceOptions::default();
     options.cors = true;
+    options.query_timeout = settings.query_timeout;
     let service = SparqlService::new(HdtDirectory::new(build_store(fixtures)?)?)
         .with_options(options)
         .with_routes(Yasgui);
@@ -106,7 +106,7 @@ fn in_process(fixtures: &FixtureSet) -> anyhow::Result<Box<dyn Target>> {
     )))
 }
 
-fn spawned(fixtures: &FixtureSet) -> anyhow::Result<Box<dyn Target>> {
+fn spawned(fixtures: &FixtureSet, settings: &ServiceSettings) -> anyhow::Result<Box<dyn Target>> {
     let store_dir = build_store(fixtures)?;
     let port = endpoint_kit::free_port()?;
     let bind = format!("127.0.0.1:{port}");
@@ -118,6 +118,11 @@ fn spawned(fixtures: &FixtureSet) -> anyhow::Result<Box<dyn Target>> {
         .arg("--bind")
         .arg(&bind)
         .arg("--cors");
+    if let Some(timeout) = settings.query_timeout {
+        command
+            .arg("--timeout-s")
+            .arg(timeout.as_secs_f64().to_string());
+    }
     let server = SpawnedServer::start(
         command,
         &format!("http://{bind}"),
@@ -139,14 +144,10 @@ fn finish(report: &Report, file: &str) -> anyhow::Result<()> {
 
 #[test]
 fn endpoint_kit() -> anyhow::Result<()> {
-    let settings = ServiceSettings::default();
     let in_process = suite("de::serve::SparqlService, in process")
         .allocator(&ALLOCATOR)
-        .settings(settings.clone())
-        .run(|fixtures, _settings| in_process(fixtures))?;
-    let over_http = suite("de serve, over HTTP")
-        .settings(settings)
-        .run(|fixtures, _settings| spawned(fixtures))?;
+        .run(in_process)?;
+    let over_http = suite("de serve, over HTTP").run(spawned)?;
     // Both reports are written before either is checked, so a failure in
     // one doesn't hide the other's.
     let first = finish(&in_process, "endpoint-kit-in-process.txt");
