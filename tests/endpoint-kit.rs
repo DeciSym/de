@@ -4,7 +4,9 @@
 //! Runs the `endpoint-kit` cases against `de serve` three ways: by calling
 //! `de::serve::SparqlService` directly, against the `de` binary over a
 //! socket, and against `de::serve::axum`'s server, in this process, over a
-//! socket.
+//! socket. The services built in this process also answer the Graph Store
+//! Protocol's reads, as a server built on `de` can; the binary's run checks
+//! that `de serve` keeps answering 501 on `/store`.
 //!
 //! The cases live in the `endpoint-kit` workspace crate so that servers built
 //! on `de` can run them too. This file loads the kit's fixture graphs into
@@ -34,9 +36,14 @@ use std::time::Duration;
 static ALLOCATOR: PeakAlloc = PeakAlloc::new();
 
 /// Every run turns CORS on, so that the CORS cases check `--cors`.
-fn suite(label: &str, expected_failures: &[(&'static str, &'static str)]) -> Suite {
+fn suite(
+    label: &str,
+    graph_store_read: bool,
+    expected_failures: &[(&'static str, &'static str)],
+) -> Suite {
     let capabilities = Capabilities {
         cors: true,
+        graph_store_read,
         ..Capabilities::default()
     };
     expected_failures.iter().fold(
@@ -68,11 +75,13 @@ fn build_store(fixtures: &FixtureSet) -> anyhow::Result<PathBuf> {
     Ok(store)
 }
 
-/// `de serve`'s service, with its query page, over the fixtures.
+/// `de serve`'s service, with its query page, over the fixtures, and with
+/// the Graph Store Protocol's reads on.
 fn service(fixtures: &FixtureSet, settings: &ServiceSettings) -> anyhow::Result<SparqlService> {
     let mut options = ServiceOptions::default();
     options.cors = true;
     options.query_timeout = settings.query_timeout;
+    options.graph_store_read = true;
     Ok(
         SparqlService::new(HdtDirectory::new(build_store(fixtures)?)?)
             .with_options(options)
@@ -180,11 +189,11 @@ fn finish(report: &Report, file: &str) -> anyhow::Result<()> {
 
 #[test]
 fn endpoint_kit() -> anyhow::Result<()> {
-    let in_process = suite("de::serve::SparqlService, in process", &[])
+    let in_process = suite("de::serve::SparqlService, in process", true, &[])
         .allocator(&ALLOCATOR)
         .run(in_process)?;
-    let over_http = suite("de serve, over HTTP", &[]).run(spawned)?;
-    let axum = suite("de::serve::axum, over HTTP", &[])
+    let over_http = suite("de serve, over HTTP", false, &[]).run(spawned)?;
+    let axum = suite("de::serve::axum, over HTTP", true, &[])
         .allocator(&ALLOCATOR)
         .run(on_axum)?;
     // Every report is written before any is checked, so a failure in one

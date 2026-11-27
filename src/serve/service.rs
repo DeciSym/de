@@ -11,6 +11,7 @@ use super::{
         configure_and_evaluate_sparql_query, content_type, limited_body, limited_string_body,
         url_query,
     },
+    store::{self, is_store_path},
 };
 use crate::service_description::{EndpointKind, generate_service_description};
 use http::{
@@ -39,6 +40,11 @@ pub struct ServiceOptions {
     /// off. Results already computed still go out, so a slow client can take
     /// longer to read them. Default: none.
     pub query_timeout: Option<Duration>,
+    /// Answer the Graph Store Protocol's reads, GET and HEAD on `/store`,
+    /// from the data source: a graph, the default graph, or every graph.
+    /// Writes there still get 501. Default: false, so `/store` answers 501
+    /// to every method.
+    pub graph_store_read: bool,
 }
 
 impl Default for ServiceOptions {
@@ -48,6 +54,7 @@ impl Default for ServiceOptions {
             cors: false,
             max_body_bytes: 1024 * 1024 * 128,
             query_timeout: None,
+            graph_store_read: false,
         }
     }
 }
@@ -67,8 +74,10 @@ pub trait Routes: Send + Sync + 'static {
 ///
 /// It answers SPARQL 1.1 Protocol queries on `/query`, with GET or POST, and
 /// the service description on `GET /query` without a query; other methods
-/// get 405. `/update` and `/store` answer 501, whatever the method. [`Routes`]
-/// add other paths. It doesn't depend on any HTTP server:
+/// get 405. `/update` answers 501, whatever the method, and so does `/store`
+/// unless [`ServiceOptions::graph_store_read`] has it answer the Graph Store
+/// Protocol's GET and HEAD. [`Routes`] add other paths. It doesn't depend on
+/// any HTTP server:
 /// [`axum::spawn`](super::axum::spawn) runs one on axum and hyper.
 ///
 /// A query's response starts once its first results are ready, and then
@@ -202,9 +211,7 @@ impl SparqlService {
             ("/update", _) => Err(not_implemented(
                 "SPARQL Update is not supported by this server",
             )),
-            (path, _method) if is_store_path(path) => Err(not_implemented(
-                "Graph Store Protocol is not supported by this server",
-            )),
+            (path, _method) if is_store_path(path) => self.graph_store(request),
             _ => Err(HttpError::new(
                 StatusCode::NOT_FOUND,
                 format!(
@@ -215,10 +222,29 @@ impl SparqlService {
             )),
         }
     }
-}
 
-fn is_store_path(path: &str) -> bool {
-    path == "/store" || path.starts_with("/store/")
+    /// Answers a request to `/store`.
+    fn graph_store(
+        &self,
+        request: &Request<RequestBody>,
+    ) -> Result<Response<ResponseBody>, HttpError> {
+        if !self.options.graph_store_read {
+            return Err(not_implemented(
+                "Graph Store Protocol is not supported by this server",
+            ));
+        }
+        match *request.method() {
+            Method::GET | Method::HEAD => store::read(&self.source, request, &self.options),
+            Method::PUT | Method::POST | Method::DELETE => Err(not_implemented(
+                "Writing through the Graph Store Protocol is not supported by this server",
+            )),
+            _ => Err(HttpError::method_not_allowed(
+                request.method(),
+                request.uri().path(),
+                &[Method::GET, Method::HEAD],
+            )),
+        }
+    }
 }
 
 /// The answer to a CORS preflight request: any origin, and the method and

@@ -68,20 +68,37 @@ pub(crate) const JOIN_Q: &str = "http://example.org/endpoint-kit/q";
 pub(crate) const JOIN_R: &str = "http://example.org/endpoint-kit/r";
 pub(crate) const JOIN_CHAINS: usize = 5_000;
 
+/// A graph IRI that no fixture set has.
+pub(crate) const MISSING: &str = "http://example.org/endpoint-kit/graph/missing";
+
+/// The protocol fixtures' graphs: each one's name, and its IRI.
+pub(crate) const PROTOCOL_GRAPHS: [(&str, &str); 4] = [
+    ("data1", DATA1),
+    ("data2", DATA2),
+    ("data3", DATA3),
+    ("other", OTHER),
+];
+
+/// The triples of the protocol fixture graph `name`, whose IRI is `iri`, in
+/// N-Triples syntax without the final ` .`.
+pub(crate) fn protocol_triples(name: &str, iri: &str) -> [String; 2] {
+    // Each document describes itself, as the W3C update tests' INSERT DATA
+    // does: `<data1.rdf> a foaf:Document`.
+    [
+        format!("<{iri}> <{RDF_TYPE}> <{FOAF_DOCUMENT}>"),
+        format!("<{iri}> <{DC_TITLE}> \"{name}\""),
+    ]
+}
+
 pub(crate) fn protocol(dir: &Path) -> anyhow::Result<FixtureSet> {
     let mut graphs = Vec::new();
-    for (name, iri) in [
-        ("data1", DATA1),
-        ("data2", DATA2),
-        ("data3", DATA3),
-        ("other", OTHER),
-    ] {
-        // Each document describes itself, as the W3C update tests' INSERT
-        // DATA does: `<data1.rdf> a foaf:Document`.
-        let ntriples = format!(
-            "<{iri}> <{RDF_TYPE}> <{FOAF_DOCUMENT}> .\n<{iri}> <{DC_TITLE}> \"{name}\" .\n"
-        );
-        graphs.push(write_graph(dir, name, iri, &ntriples, 2)?);
+    for (name, iri) in PROTOCOL_GRAPHS {
+        let triples = protocol_triples(name, iri);
+        let mut ntriples = String::new();
+        for triple in &triples {
+            writeln!(ntriples, "{triple} .")?;
+        }
+        graphs.push(write_graph(dir, name, iri, &ntriples, triples.len())?);
     }
     Ok(FixtureSet {
         dir: dir.to_path_buf(),

@@ -1,8 +1,9 @@
 //! Where the endpoint's data comes from.
 
-use super::error::HttpError;
+use super::error::{HttpError, internal_server_error};
+use oxrdf::NamedNode;
 use spareval::{CancellationToken, QueryEvaluationError, QueryResults, QueryableDataset};
-use spargebra::Query;
+use spargebra::{Query, SparqlParser};
 use std::sync::Arc;
 
 /// The dataset a request asks for, from the SPARQL protocol's parameters.
@@ -43,6 +44,28 @@ pub trait DatasetSource: Send + Sync + 'static {
     /// The dataset lives until the results have been streamed, so it can
     /// hold whatever must stay open until then.
     fn open(&self, selection: &DatasetSelection) -> Result<Box<dyn ServeDataset + '_>, HttpError>;
+
+    /// Whether the data has a graph named `graph`, for the Graph Store
+    /// Protocol, which answers 404 for a graph that doesn't exist. Called on
+    /// the request's thread, after [`refresh`](Self::refresh).
+    ///
+    /// By default it opens every graph and evaluates
+    /// `ASK { GRAPH <graph> {} }`. A source that can tell without opening its
+    /// data should override it, as [`HdtDirectory`](super::HdtDirectory)
+    /// does.
+    fn contains_graph(&self, graph: &NamedNode) -> Result<bool, HttpError> {
+        let query = SparqlParser::new()
+            .parse_query(&format!("ASK {{ GRAPH {graph} {{}} }}"))
+            .map_err(internal_server_error)?;
+        let dataset = self.open(&DatasetSelection::default())?;
+        match dataset.evaluate(&query, &EvalOptions::default()) {
+            Ok(QueryResults::Boolean(found)) => Ok(found),
+            Ok(_) => Err(internal_server_error("ASK didn't answer with a boolean")),
+            Err(e) => Err(internal_server_error(format!(
+                "looking for the graph {graph}: {e}"
+            ))),
+        }
+    }
 }
 
 /// A source a server shares, such as with routes of its own that write to it:
@@ -54,6 +77,10 @@ impl<S: DatasetSource + ?Sized> DatasetSource for Arc<S> {
 
     fn open(&self, selection: &DatasetSelection) -> Result<Box<dyn ServeDataset + '_>, HttpError> {
         (**self).open(selection)
+    }
+
+    fn contains_graph(&self, graph: &NamedNode) -> Result<bool, HttpError> {
+        (**self).contains_graph(graph)
     }
 }
 

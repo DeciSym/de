@@ -17,10 +17,15 @@
 //!   `VALUES` so the fixtures don't change their answers.
 //! * `de/…` — behaviour the protocol requires that the W3C cases don't pin
 //!   down, found by reading the server code.
+//! * `store/…` — the Graph Store Protocol's reads (GET and HEAD on `/store`)
+//!   over the fixture graphs, for a server that answers them. Reading the
+//!   whole store with `GET /store` is `oxigraph serve`'s, not the protocol's.
 //! * `readonly/…` — a server without SPARQL Update or the Graph Store
 //!   Protocol answers 501 on those endpoints.
 
-use crate::fixtures::{DATA1, DATA2, DATA3, FOAF_DOCUMENT, OTHER};
+use crate::fixtures::{
+    DATA1, DATA2, DATA3, FOAF_DOCUMENT, MISSING, OTHER, PROTOCOL_GRAPHS, protocol_triples,
+};
 use crate::report::Outcome;
 use crate::target::Target;
 use crate::{Capabilities, ServiceSettings};
@@ -73,6 +78,22 @@ fn without_update(c: &Capabilities) -> Option<&'static str> {
 fn without_graph_store(c: &Capabilities) -> Option<&'static str> {
     c.graph_store
         .then_some("the server supports the Graph Store Protocol")
+}
+
+fn reads_graph_store(c: &Capabilities) -> bool {
+    c.graph_store_read || c.graph_store
+}
+
+fn without_graph_store_read(c: &Capabilities) -> Option<&'static str> {
+    reads_graph_store(c).then_some("the server answers Graph Store Protocol reads")
+}
+
+fn with_graph_store_read(c: &Capabilities) -> Option<&'static str> {
+    (!reads_graph_store(c)).then_some("the server doesn't answer Graph Store Protocol reads")
+}
+
+fn union_default_with_graph_store_read(c: &Capabilities) -> Option<&'static str> {
+    with_graph_store_read(c).or_else(|| union_default(c))
 }
 
 fn with_cors(c: &Capabilities) -> Option<&'static str> {
@@ -648,6 +669,100 @@ pub(crate) fn protocol_cases() -> Vec<Case> {
                 })
             }
         ),
+        // The Graph Store Protocol's reads, over the fixture graphs.
+        case!(
+            "store/get_graph",
+            "GET /store?graph= answers the graph, as N-Triples by default",
+            with_graph_store_read,
+            |ctx| {
+                let answer = send(ctx, get(&params_uri("/store", &[("graph", DATA1)]), &[]))?;
+                answer.expect_status(StatusCode::OK)?;
+                answer.expect_media_type(&["application/n-triples"])?;
+                expect_triples(&answer, &protocol_graph_triples(&[DATA1]))
+            }
+        ),
+        case!(
+            "store/get_graph_turtle",
+            "GET /store?graph= with Accept: text/turtle answers Turtle",
+            with_graph_store_read,
+            |ctx| {
+                let uri = params_uri("/store", &[("graph", DATA2)]);
+                let answer = send(ctx, get(&uri, &[(ACCEPT.as_str(), "text/turtle")]))?;
+                answer.expect_status(StatusCode::OK)?;
+                answer.expect_media_type(&["text/turtle"])?;
+                expect_triples(&answer, &protocol_graph_triples(&[DATA2]))
+            }
+        ),
+        case!(
+            "store/get_missing_graph",
+            "GET of a graph the store doesn't have is 404",
+            with_graph_store_read,
+            |ctx| {
+                let uri = params_uri("/store", &[("graph", MISSING)]);
+                send(ctx, get(&uri, &[]))?.expect_status(StatusCode::NOT_FOUND)
+            }
+        ),
+        case!(
+            "store/head_graph",
+            "HEAD on a graph is 200, with a GET's Content-Type and no body",
+            with_graph_store_read,
+            |ctx| {
+                let uri = params_uri("/store", &[("graph", DATA1)]);
+                let answer = send(ctx, request(Method::HEAD, &uri, &[], Vec::new()))?;
+                answer.expect_status(StatusCode::OK)?;
+                answer.expect_media_type(&["application/n-triples"])?;
+                expect_no_body(&answer)
+            }
+        ),
+        case!(
+            "store/head_missing_graph",
+            "HEAD on a graph the store doesn't have is 404",
+            with_graph_store_read,
+            |ctx| {
+                let uri = params_uri("/store", &[("graph", MISSING)]);
+                send(ctx, request(Method::HEAD, &uri, &[], Vec::new()))?
+                    .expect_status(StatusCode::NOT_FOUND)
+            }
+        ),
+        case!(
+            "store/get_default_graph",
+            "GET /store?default answers the default graph, the union of every graph",
+            union_default_with_graph_store_read,
+            |ctx| {
+                let answer = send(ctx, get("/store?default", &[]))?;
+                answer.expect_status(StatusCode::OK)?;
+                expect_triples(
+                    &answer,
+                    &protocol_graph_triples(&[DATA1, DATA2, DATA3, OTHER]),
+                )
+            }
+        ),
+        case!(
+            "store/graph_and_default",
+            "graph and default together are a 400",
+            with_graph_store_read,
+            |ctx| {
+                let uri = params_uri("/store", &[("graph", DATA1), ("default", "")]);
+                send(ctx, get(&uri, &[]))?.expect_status(StatusCode::BAD_REQUEST)
+            }
+        ),
+        case!(
+            "store/get_dataset",
+            "GET /store answers every graph, named, as N-Quads by default",
+            with_graph_store_read,
+            |ctx| {
+                let answer = send(ctx, get("/store", &[]))?;
+                answer.expect_status(StatusCode::OK)?;
+                answer.expect_media_type(&["application/n-quads"])?;
+                let found = quads(&answer)?;
+                let expected = protocol_quads();
+                if found == expected {
+                    Ok(())
+                } else {
+                    Err(format!("the quads were {found:?}, expected {expected:?}"))
+                }
+            }
+        ),
         // A server without SPARQL Update or the Graph Store Protocol.
         case!(
             "readonly/update_post",
@@ -668,7 +783,7 @@ pub(crate) fn protocol_cases() -> Vec<Case> {
         case!(
             "readonly/store_get",
             "GET /store is 501",
-            without_graph_store,
+            without_graph_store_read,
             |ctx| {
                 let uri = params_uri("/store", &[("graph", DATA1)]);
                 send(ctx, get(&uri, &[]))?.expect_status(StatusCode::NOT_IMPLEMENTED)
@@ -677,7 +792,7 @@ pub(crate) fn protocol_cases() -> Vec<Case> {
         case!(
             "readonly/store_head",
             "HEAD /store is 501",
-            without_graph_store,
+            without_graph_store_read,
             |ctx| {
                 let uri = params_uri("/store", &[("graph", DATA1)]);
                 send(ctx, request(Method::HEAD, &uri, &[], Vec::new()))?
@@ -750,6 +865,45 @@ fn expect_all_documents(answer: &Answer) -> Result<(), String> {
         Ok(())
     } else {
         Err(format!("rows were {rows:?}, expected {expected:?}"))
+    }
+}
+
+/// The triples of the protocol fixture graphs `iris`, as [`triples`] reads them.
+fn protocol_graph_triples(iris: &[&str]) -> BTreeSet<String> {
+    PROTOCOL_GRAPHS
+        .iter()
+        .filter(|(_, iri)| iris.contains(iri))
+        .flat_map(|(name, iri)| protocol_triples(name, iri))
+        .collect()
+}
+
+/// Every protocol fixture triple in its graph, as [`quads`] reads them.
+fn protocol_quads() -> BTreeSet<String> {
+    PROTOCOL_GRAPHS
+        .iter()
+        .flat_map(|(name, iri)| {
+            protocol_triples(name, iri)
+                .into_iter()
+                .map(move |triple| format!("{triple} <{iri}>"))
+        })
+        .collect()
+}
+
+fn expect_triples(answer: &Answer, expected: &BTreeSet<String>) -> Result<(), String> {
+    let found = triples(answer)?;
+    if found == *expected {
+        Ok(())
+    } else {
+        Err(format!("the triples were {found:?}, expected {expected:?}"))
+    }
+}
+
+fn expect_no_body(answer: &Answer) -> Result<(), String> {
+    let body = answer.body()?;
+    if body.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("expected no body, got {} bytes", body.len()))
     }
 }
 
@@ -1014,4 +1168,25 @@ pub(crate) fn triples(answer: &Answer) -> Result<BTreeSet<String>, String> {
         ));
     }
     Ok(triples)
+}
+
+/// The quads of an RDF dataset response: subject, predicate, object and
+/// graph name in N-Quads syntax, the graph name `DEFAULT` for the default
+/// graph.
+pub(crate) fn quads(answer: &Answer) -> Result<BTreeSet<String>, String> {
+    let media_type = answer.media_type();
+    let format = RdfFormat::from_media_type(&media_type)
+        .ok_or_else(|| format!("Content-Type {media_type:?} isn't an RDF format"))?;
+    let parser = RdfParser::from_format(format)
+        .with_base_iri("http://localhost/store")
+        .map_err(|e| format!("{e}"))?;
+    let mut quads = BTreeSet::new();
+    for quad in parser.for_reader(answer.body()?) {
+        let quad = quad.map_err(|e| format!("unparsable RDF: {e}"))?;
+        quads.insert(format!(
+            "{} {} {} {}",
+            quad.subject, quad.predicate, quad.object, quad.graph_name
+        ));
+    }
+    Ok(quads)
 }

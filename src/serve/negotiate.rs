@@ -30,6 +30,21 @@ pub(super) fn rdf_content_negotiation(
     )
 }
 
+/// The format of a whole dataset, for the Graph Store Protocol's `/store`
+/// without a graph: N-Quads, unless the Accept header asks for `TriG`. A graph
+/// format can't hold the graphs' names, so a request for one alone gets a 406.
+pub(super) fn dataset_content_negotiation(
+    request: &Request<RequestBody>,
+) -> Result<RdfFormat, HttpError> {
+    content_negotiation(
+        request,
+        |media_type| RdfFormat::from_media_type(media_type).filter(|f| f.supports_datasets()),
+        RdfFormat::NQuads,
+        &[("application", RdfFormat::NQuads)],
+        "application/n-quads or application/trig",
+    )
+}
+
 pub(super) fn query_results_content_negotiation(
     request: &Request<RequestBody>,
 ) -> Result<QueryResultsFormat, HttpError> {

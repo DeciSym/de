@@ -9,8 +9,9 @@ use super::{
 };
 use http::{Request, Response, StatusCode, header::CONTENT_TYPE};
 use log::debug;
+use oxrdf::{GraphName, NamedNode, NamedOrBlankNode, Quad, Term};
 use oxrdfio::{RdfFormat, RdfSerializer};
-use sparesults::{QueryResultsFormat, QueryResultsSerializer};
+use sparesults::{QueryResultsFormat, QueryResultsSerializer, QuerySolution};
 use spareval::{CancellationToken, QueryEvaluationError, QueryResults};
 use std::{
     io::{self, Read, Write},
@@ -250,7 +251,74 @@ fn stream_query_graph_results(
     writer.flush().map_err(|e| stream_error("sending RDF", &e))
 }
 
-#[allow(clippy::too_many_lines)]
+/// Writes the solutions of `?s ?p ?o ?g` as quads.
+fn stream_query_quad_results(
+    format: RdfFormat,
+    tx: &mpsc::SyncSender<QueryStreamItem>,
+    solutions: spareval::QuerySolutionIter,
+) -> Result<(), HttpError> {
+    let mut writer = QueryStreamChunkWriter::new(tx.clone());
+    {
+        let mut serializer = RdfSerializer::from_format(format).for_writer(&mut writer);
+        for solution in solutions {
+            let solution = solution.map_err(|e| evaluation_error(&e))?;
+            if let Some(quad) = solution_quad(&solution) {
+                serializer
+                    .serialize_quad(&quad)
+                    .map_err(|e| stream_error("serializing RDF quad", &e))?;
+            }
+        }
+        serializer
+            .finish()
+            .map_err(|e| stream_error("finalizing RDF", &e))?;
+    }
+    writer.flush().map_err(|e| stream_error("sending RDF", &e))
+}
+
+/// The quad that a solution of `?s ?p ?o ?g` binds, or `None` if its terms
+/// can't make one, such as a literal subject.
+fn solution_quad(solution: &QuerySolution) -> Option<Quad> {
+    let subject = NamedOrBlankNode::try_from(solution.get("s")?.clone()).ok()?;
+    let predicate = NamedNode::try_from(solution.get("p")?.clone()).ok()?;
+    let object = solution.get("o")?.clone();
+    let graph_name = match solution.get("g") {
+        None => GraphName::DefaultGraph,
+        Some(Term::NamedNode(graph)) => graph.clone().into(),
+        Some(Term::BlankNode(graph)) => graph.clone().into(),
+        Some(_) => return None,
+    };
+    Some(Quad::new(subject, predicate, object, graph_name))
+}
+
+/// How a query's results are written.
+#[derive(Clone, Copy, Debug)]
+pub(super) enum ResultsAs {
+    /// In the format the request's Accept header asks for: an RDF graph
+    /// format for CONSTRUCT and DESCRIBE, a results format for the others.
+    Negotiated,
+    /// The solutions of `?s ?p ?o ?g` as quads, in this dataset format; a
+    /// solution without `?g` is a triple of the default graph.
+    Quads(RdfFormat),
+}
+
+/// The format a query's results go out in.
+#[derive(Clone, Copy)]
+enum Output {
+    Graph(RdfFormat),
+    Solutions(QueryResultsFormat),
+    Quads(RdfFormat),
+}
+
+impl Output {
+    fn media_type(self) -> &'static str {
+        match self {
+            Self::Graph(format) | Self::Quads(format) => format.media_type(),
+            Self::Solutions(format) => format.media_type(),
+        }
+    }
+}
+
+/// Evaluates a SPARQL protocol query, whose dataset is `selection`.
 pub(super) fn evaluate_sparql_query(
     source: &Arc<dyn DatasetSource>,
     query: &str,
@@ -258,7 +326,6 @@ pub(super) fn evaluate_sparql_query(
     request: &Request<RequestBody>,
     timeout: Option<Duration>,
 ) -> Result<Response<ResponseBody>, HttpError> {
-    let started = Instant::now();
     debug!("query: {query}");
     let base = base_url(request);
     let mut parsed_query = crate::sparql::parse_query(query, &base)
@@ -272,10 +339,36 @@ pub(super) fn evaluate_sparql_query(
             | spargebra::Query::Ask { dataset, .. } => *dataset = None,
         }
     }
-    let is_rdf_result = matches!(
-        &parsed_query,
-        spargebra::Query::Construct { .. } | spargebra::Query::Describe { .. }
-    );
+    evaluate_query(
+        source,
+        parsed_query,
+        selection,
+        request,
+        timeout,
+        ResultsAs::Negotiated,
+    )
+}
+
+/// Evaluates `query` over `selection` on a worker thread, and answers with
+/// its results as they stream from there.
+pub(super) fn evaluate_query(
+    source: &Arc<dyn DatasetSource>,
+    query: spargebra::Query,
+    selection: DatasetSelection,
+    request: &Request<RequestBody>,
+    timeout: Option<Duration>,
+    results_as: ResultsAs,
+) -> Result<Response<ResponseBody>, HttpError> {
+    let started = Instant::now();
+    let output = match (&query, results_as) {
+        (spargebra::Query::Construct { .. } | spargebra::Query::Describe { .. }, _) => {
+            Output::Graph(rdf_content_negotiation(request)?)
+        }
+        (_, ResultsAs::Quads(format)) => Output::Quads(format),
+        (_, ResultsAs::Negotiated) => {
+            Output::Solutions(query_results_content_negotiation(request)?)
+        }
+    };
 
     let (tx, rx) = mpsc::sync_channel::<QueryStreamItem>(4);
     // The HTTP server's token, if it put one in the request, so that it can
@@ -289,68 +382,42 @@ pub(super) fn evaluate_sparql_query(
         cancellation_token: cancellation.clone(),
     };
     let source = Arc::clone(source);
-    let output_media_type = if is_rdf_result {
-        let graph_format = rdf_content_negotiation(request)?;
-        let _ = std::thread::spawn(move || {
-            let outcome = (|| -> Result<(), HttpError> {
-                let dataset = source.open(&selection)?;
-                let results = dataset
-                    .evaluate(&parsed_query, &eval_options)
-                    .map_err(|e| evaluation_error(&e))?;
-                match results {
-                    QueryResults::Graph(triples) => {
-                        stream_query_graph_results(graph_format, &tx, triples)?;
-                    }
-                    QueryResults::Solutions(_) | QueryResults::Boolean(_) => {
-                        return Err(HttpError::new(
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            "construct/describe expected",
-                        ));
-                    }
+    let _ = std::thread::spawn(move || {
+        let outcome = (|| -> Result<(), HttpError> {
+            let dataset = source.open(&selection)?;
+            let results = dataset
+                .evaluate(&query, &eval_options)
+                .map_err(|e| evaluation_error(&e))?;
+            match (results, output) {
+                (QueryResults::Graph(triples), Output::Graph(format)) => {
+                    stream_query_graph_results(format, &tx, triples)
                 }
-                Ok(())
-            })();
-            if let Err(error) = outcome {
-                let _ = tx.send(QueryStreamItem::Error(error));
-            }
-        });
-        graph_format.media_type()
-    } else {
-        let solutions_format = query_results_content_negotiation(request)?;
-        let _ = std::thread::spawn(move || {
-            let outcome = (|| -> Result<(), HttpError> {
-                let dataset = source.open(&selection)?;
-                let results = dataset
-                    .evaluate(&parsed_query, &eval_options)
-                    .map_err(|e| evaluation_error(&e))?;
-                match results {
-                    QueryResults::Solutions(solutions) => {
-                        let variables = solutions.variables().to_vec();
-                        stream_query_solution_results(solutions_format, &tx, solutions, variables)?;
-                    }
-                    QueryResults::Boolean(result) => {
-                        let mut body = Vec::new();
-                        QueryResultsSerializer::from_format(solutions_format)
-                            .serialize_boolean_to_writer(&mut body, result)
-                            .map_err(|e| stream_error("serializing boolean result", &e))?;
-                        // A send fails only once the client has gone.
-                        let _ = tx.send(QueryStreamItem::Data(body));
-                    }
-                    QueryResults::Graph(_) => {
-                        return Err(HttpError::new(
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            "select/ask expected",
-                        ));
-                    }
+                (QueryResults::Solutions(solutions), Output::Solutions(format)) => {
+                    let variables = solutions.variables().to_vec();
+                    stream_query_solution_results(format, &tx, solutions, variables)
                 }
-                Ok(())
-            })();
-            if let Err(error) = outcome {
-                let _ = tx.send(QueryStreamItem::Error(error));
+                (QueryResults::Boolean(result), Output::Solutions(format)) => {
+                    let mut body = Vec::new();
+                    QueryResultsSerializer::from_format(format)
+                        .serialize_boolean_to_writer(&mut body, result)
+                        .map_err(|e| stream_error("serializing boolean result", &e))?;
+                    // A send fails only once the client has gone.
+                    let _ = tx.send(QueryStreamItem::Data(body));
+                    Ok(())
+                }
+                (QueryResults::Solutions(solutions), Output::Quads(format)) => {
+                    stream_query_quad_results(format, &tx, solutions)
+                }
+                _ => Err(HttpError::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "the query's results don't fit the format chosen for them",
+                )),
             }
-        });
-        solutions_format.media_type()
-    };
+        })();
+        if let Err(error) = outcome {
+            let _ = tx.send(QueryStreamItem::Error(error));
+        }
+    });
 
     // The status goes out with the headers, so the response waits for the
     // worker's first message: a query that fails before its first results
@@ -367,7 +434,7 @@ pub(super) fn evaluate_sparql_query(
         Err(ended) => return Err(ended.into()),
     };
     Response::builder()
-        .header(CONTENT_TYPE, output_media_type)
+        .header(CONTENT_TYPE, output.media_type())
         .body(ResponseBody::Stream(Box::new(QueryStreamReader::new(
             stream, first,
         ))))

@@ -916,6 +916,133 @@ mod server_tests {
         Ok(())
     }
 
+    /// A service with the Graph Store Protocol's reads on.
+    fn store_reader(source: impl de::serve::DatasetSource) -> SparqlService {
+        let mut options = ServiceOptions::default();
+        options.graph_store_read = true;
+        SparqlService::new(source).with_options(options)
+    }
+
+    /// A source that doesn't say which graphs it has: the service finds out
+    /// by opening the data and asking for the graph.
+    #[tokio::test]
+    async fn test_store_reads_through_a_custom_source() -> anyhow::Result<()> {
+        use de::serve::{DatasetSelection, DatasetSource, ServeDataset};
+
+        struct Plain(HdtDirectory);
+        impl DatasetSource for Plain {
+            fn refresh(&self) -> Result<(), HttpError> {
+                self.0.refresh()
+            }
+            fn open(
+                &self,
+                selection: &DatasetSelection,
+            ) -> Result<Box<dyn ServeDataset + '_>, HttpError> {
+                self.0.open(selection)
+            }
+        }
+
+        let (tmp_dir, store) = setup_test_store().await?;
+        let book1 = file_graph_uri(tmp_dir.path(), "book1.hdt");
+        let service = store_reader(Plain(HdtDirectory::with_store(store, tmp_dir.path())));
+        let get = |graph: &str| -> Result<http::Response<ResponseBody>, HttpError> {
+            let graph: String = url::form_urlencoded::byte_serialize(graph.as_bytes()).collect();
+            let mut request = Request::get(format!("http://localhost/store?graph={graph}"))
+                .body(RequestBody::empty())
+                .unwrap();
+            service.try_handle(&mut request)
+        };
+        let body = read_body(handle_response(get(&book1))?)?;
+        assert_eq!(
+            body,
+            format!("{BOOK1_IRI} {DC_TITLE} \"SPARQL Tutorial\" .\n")
+        );
+        assert_eq!(
+            get("http://example.org/missing").unwrap_err().status(),
+            StatusCode::NOT_FOUND
+        );
+        Ok(())
+    }
+
+    /// A path under /store names the graph whose IRI is the request's URL.
+    #[tokio::test]
+    async fn test_store_direct_graph_identification() -> anyhow::Result<()> {
+        let tmp_dir = tempdir()?;
+        let nt = tmp_dir.path().join("book.nt");
+        std::fs::write(
+            &nt,
+            format!("{BOOK1_IRI} {DC_TITLE} \"SPARQL Tutorial\" .\n"),
+        )?;
+        de::create::do_create_with_options(
+            Some(&tmp_dir.path().join("book.hdt").to_string_lossy()),
+            &[nt.to_string_lossy().into_owned()],
+            false,
+            Some("http://localhost/store/books/1"),
+            &[],
+            None,
+            None,
+        )
+        .await?;
+        let service = store_reader(HdtDirectory::new(tmp_dir.path())?);
+        for uri in [
+            "http://localhost/store/books/1",
+            "http://localhost/store?graph=/store/books/1",
+        ] {
+            let mut request = Request::get(uri)
+                .header("Accept", "application/n-triples")
+                .body(RequestBody::empty())?;
+            let body = read_body(handle_response(service.try_handle(&mut request))?)?;
+            assert_eq!(
+                body,
+                format!("{BOOK1_IRI} {DC_TITLE} \"SPARQL Tutorial\" .\n"),
+                "{uri}"
+            );
+        }
+        let mut request =
+            Request::get("http://localhost/store/books/2").body(RequestBody::empty())?;
+        assert_eq!(
+            service.try_handle(&mut request).unwrap_err().status(),
+            StatusCode::NOT_FOUND
+        );
+        Ok(())
+    }
+
+    /// With only the reads on, writes still get 501, and other methods 405.
+    #[tokio::test]
+    async fn test_store_reads_alone_leave_writes_501() -> anyhow::Result<()> {
+        let (tmp_dir, store) = setup_test_store().await?;
+        let service = store_reader(HdtDirectory::with_store(store, tmp_dir.path()));
+        let status = |method: Method| -> StatusCode {
+            let mut request = Request::builder()
+                .method(method)
+                .uri("http://localhost/store?graph=http://example.org/g")
+                .header("Content-Type", "application/n-triples")
+                .body(RequestBody::from(
+                    "<http://example.org/s> <http://example.org/p> <http://example.org/o> .",
+                ))
+                .unwrap();
+            match service.try_handle(&mut request) {
+                Ok(response) => response.status(),
+                Err(error) => error.status(),
+            }
+        };
+        for method in [Method::PUT, Method::POST, Method::DELETE] {
+            assert_eq!(
+                status(method.clone()),
+                StatusCode::NOT_IMPLEMENTED,
+                "{method}"
+            );
+        }
+        let mut request = Request::builder()
+            .method(Method::PATCH)
+            .uri("http://localhost/store")
+            .body(RequestBody::empty())?;
+        let error = service.try_handle(&mut request).unwrap_err();
+        assert_eq!(error.status(), StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(error.headers().get("allow").unwrap(), "GET, HEAD");
+        Ok(())
+    }
+
     /// Without a union default graph and with no graphs named, the default
     /// graph is empty and every graph is a named graph.
     #[tokio::test]

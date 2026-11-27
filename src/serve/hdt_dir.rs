@@ -7,6 +7,7 @@ use super::{
 use crate::sparql::{AggregateHdt, hdt_files};
 use http::StatusCode;
 use log::debug;
+use oxrdf::NamedNode;
 use std::{
     collections::HashSet,
     path::{Path, PathBuf},
@@ -136,6 +137,14 @@ impl DatasetSource for HdtDirectory {
         snapshot.default_graphs = default_graphs;
         snapshot.named_graphs = named_graphs;
         Ok(Box::new(snapshot))
+    }
+
+    /// Looks the graph up in the files' graph IRIs, read at the last
+    /// refresh, without opening any file.
+    fn contains_graph(&self, graph: &NamedNode) -> Result<bool, HttpError> {
+        self.store
+            .contains_graph_name(graph.as_str())
+            .map_err(|e| internal_server_error(format!("looking for the graph {graph}: {e}")))
     }
 }
 
