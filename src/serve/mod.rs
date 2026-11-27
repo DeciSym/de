@@ -29,6 +29,8 @@
 //!   `negotiate` picks the result format from the Accept header.
 //! * `stream` evaluates the query on a worker thread and streams the results,
 //!   cancelling the query past its timeout or once its response is dropped.
+//! * `store` answers the Graph Store Protocol's reads on `/store`, when
+//!   [`ServiceOptions::graph_store_read`] turns them on.
 //! * `dataset` is what a data source implements; `hdt_dir` is de's.
 //! * `axum` runs a service on axum and hyper, with `server`'s settings and
 //!   `de serve`'s service; `ui` is the query page.
@@ -43,6 +45,7 @@ mod negotiate;
 mod protocol;
 mod server;
 mod service;
+mod store;
 mod stream;
 mod ui;
 

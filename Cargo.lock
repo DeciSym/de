@@ -551,6 +551,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "log",
+ "oxiri",
  "oxrdf",
  "oxrdfio",
  "pprof",

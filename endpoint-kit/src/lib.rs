@@ -66,7 +66,12 @@ pub struct Capabilities {
     pub union_default_graph: bool,
     /// SPARQL Update on `/update`. Without it, `/update` must answer 501.
     pub update: bool,
-    /// The Graph Store Protocol on `/store`. Without it, `/store` must answer 501.
+    /// The Graph Store Protocol's reads on `/store`: GET and HEAD. Without
+    /// them, or `graph_store`, GET and HEAD on `/store` must answer 501.
+    pub graph_store_read: bool,
+    /// The whole Graph Store Protocol on `/store`, writes included, which
+    /// implies `graph_store_read`. Without it, PUT, POST and DELETE on
+    /// `/store` must answer 501.
     pub graph_store: bool,
     /// CORS: requests from web pages on other origins are allowed. Only
     /// checked when set, since it's off by default in `de serve`.
@@ -80,6 +85,7 @@ impl Default for Capabilities {
         Self {
             union_default_graph: true,
             update: false,
+            graph_store_read: false,
             graph_store: false,
             cors: false,
         }
